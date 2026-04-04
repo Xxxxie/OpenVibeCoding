@@ -605,27 +605,22 @@ MAX_SANDBOX_DURATION=300
 
 // ===================== Server Environment =====================
 
-function setupServerEnv() {
+async function setupServerEnv() {
   logSection('配置服务端环境变量')
 
   const env = loadEnvFile()
   const serverEnvFile = resolve(process.cwd(), 'packages/server/.env')
 
-  // Load existing server .env to preserve manually-set values (e.g. CodeBuddy OAuth, Git Archive)
-  const existingServerEnv = {}
+  // 已有 server/.env，询问是否覆盖
   if (existsSync(serverEnvFile)) {
-    readFileSync(serverEnvFile, 'utf-8').split('\n').forEach(line => {
-      const trimmed = line.trim()
-      if (trimmed && !trimmed.startsWith('#')) {
-        const [key, ...rest] = trimmed.split('=')
-        if (key) existingServerEnv[key.trim()] = rest.join('=').trim()
-      }
-    })
+    const overwrite = await askYesNo('packages/server/.env 已存在，是否覆盖？（否则跳过此步骤）', false)
+    if (!overwrite) {
+      log('跳过服务端环境变量配置', 'info')
+      return true
+    }
   }
 
-  // Priority: existing server .env > root .env.local > process.env > fallback
-  const get = (key, fallback = '') =>
-    existingServerEnv[key] || env[key] || process.env[key] || fallback
+  const get = (key, fallback = '') => env[key] || process.env[key] || fallback
 
   const jweSecret = get('JWE_SECRET')
   const encryptionKey = get('ENCRYPTION_KEY')
@@ -753,7 +748,7 @@ async function main() {
   await setupTcr()
 
   // Step 6: Setup Server Environment
-  if (!setupServerEnv()) {
+  if (!(await setupServerEnv())) {
     process.exit(1)
   }
 
