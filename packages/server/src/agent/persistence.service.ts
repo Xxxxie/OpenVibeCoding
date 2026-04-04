@@ -28,7 +28,8 @@ function getLocalMessageFilePath(sessionId: string, cwd: string): string {
   const projectDirName = getProjectHash(cwd)
   const homeDir = getHomeDir()
   const coderProjectsDir = path.join(homeDir, '.codebuddy', 'projects')
-  return path.join(coderProjectsDir, projectDirName, `${sessionId}.jsonl`)
+  // @tencent-ai/agent-sdk prefixes the project directory with 'private-'
+  return path.join(coderProjectsDir, `private-${projectDirName}`, `${sessionId}.jsonl`)
 }
 
 // ─── Persistence Service ───────────────────────────────────────────────────
