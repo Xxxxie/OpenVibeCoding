@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import * as path from 'node:path'
 import { v4 as uuidv4 } from 'uuid'
 import CloudBase from '@cloudbase/node-sdk'
@@ -28,8 +29,14 @@ function getLocalMessageFilePath(sessionId: string, cwd: string): string {
   const projectDirName = getProjectHash(cwd)
   const homeDir = getHomeDir()
   const coderProjectsDir = path.join(homeDir, '.codebuddy', 'projects')
-  // @tencent-ai/agent-sdk prefixes the project directory with 'private-'
-  return path.join(coderProjectsDir, `private-${projectDirName}`, `${sessionId}.jsonl`)
+
+  // Try without prefix first, then with 'private-' prefix (used by some SDK versions)
+  const pathWithoutPrefix = path.join(coderProjectsDir, projectDirName, `${sessionId}.jsonl`)
+  const pathWithPrefix = path.join(coderProjectsDir, `private-${projectDirName}`, `${sessionId}.jsonl`)
+
+  // Return whichever exists; if neither exists, return the default (without prefix)
+  if (existsSync(pathWithPrefix)) return pathWithPrefix
+  return pathWithoutPrefix
 }
 
 // ─── Persistence Service ───────────────────────────────────────────────────

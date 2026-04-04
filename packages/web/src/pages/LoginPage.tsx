@@ -23,7 +23,10 @@ export function LoginPage() {
     setError('')
     setIsLoading(true)
     try {
-      const data = await api.post<{ user: { id: string; username: string; name?: string; email?: string; avatar?: string }; envId?: string }>(`/api/auth/${mode}`, { username, password })
+      const data = await api.post<{
+        user: { id: string; username: string; name?: string; email?: string; avatar?: string }
+        envId?: string
+      }>(`/api/auth/${mode}`, { username, password })
       // Update session atom so RequireAuth / protected routes see the user immediately
       setSession({ user: data.user, envId: data.envId })
       navigate('/')

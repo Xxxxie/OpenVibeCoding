@@ -81,7 +81,10 @@ function LocalSignInForm({ onSuccess }: { onSuccess: () => void }) {
         <button
           type="button"
           className={`font-medium ${mode === 'login' ? 'text-foreground underline' : 'text-muted-foreground'}`}
-          onClick={() => { setMode('login'); setError('') }}
+          onClick={() => {
+            setMode('login')
+            setError('')
+          }}
         >
           Login
         </button>
@@ -89,7 +92,10 @@ function LocalSignInForm({ onSuccess }: { onSuccess: () => void }) {
         <button
           type="button"
           className={`font-medium ${mode === 'register' ? 'text-foreground underline' : 'text-muted-foreground'}`}
-          onClick={() => { setMode('register'); setError('') }}
+          onClick={() => {
+            setMode('register')
+            setError('')
+          }}
         >
           Register
         </button>
