@@ -1,0 +1,31 @@
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+import path from 'path'
+
+export default defineConfig({
+  plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+      // 让 web 直接引用 dashboard 源码，vite 一起打包处理
+      '@coder/dashboard': path.resolve(__dirname, '../dashboard/src'),
+    },
+  },
+  define: {
+    'process.env': {},
+  },
+  server: {
+    port: 5174,
+    host: '0.0.0.0',
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+        // SSE 流式响应需要禁用超时，否则 Vite proxy 会缓冲数据
+        timeout: 0,
+        proxyTimeout: 0,
+      },
+    },
+  },
+})

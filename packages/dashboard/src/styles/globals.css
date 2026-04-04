@@ -1,0 +1,232 @@
+@import 'tailwindcss';
+
+/* CloudBase Dashboard - Dark Theme (default) */
+:root {
+  /* 深色灰度 - 带微蓝调 */
+  --background-default: 222 16% 6%;
+  --background-dash-sidebar: 222 14% 8%;
+  --background-surface-75: 222 14% 8%;
+  --background-surface-100: 222 12% 11%;
+  --background-surface-200: 222 12% 13%;
+  --background-surface-300: 222 10% 16%;
+  --background-surface-400: 222 10% 19%;
+  --background-overlay-default: 222 14% 12%;
+  --background-overlay-hover: 222 10% 18%;
+  --background-control: 222 12% 14%;
+  --background-selection: 222 10% 18%;
+  --background-alternative-default: 222 18% 4%;
+  --background-muted: 222 12% 14%;
+
+  /* 边框 */
+  --border-default: 222 10% 16%;
+  --border-strong: 222 8% 22%;
+  --border-stronger: 222 6% 30%;
+  --border-overlay: 222 8% 20%;
+  --border-muted: 222 10% 13%;
+  --border-control: 222 8% 22%;
+
+  /* 文本 */
+  --foreground-default: 210 20% 98%;
+  --foreground-light: 215 10% 72%;
+  --foreground-lighter: 215 8% 52%;
+  --foreground-muted: 215 6% 30%;
+
+  /* 品牌色 #2563eb — 层级从亮到暗
+   * brand        = #2563eb (主色，用于文字/图标)
+   * brand-600    = 更亮的蓝 (hover 文字色，图标色)
+   * brand-500    = dark 模式按钮背景 (深蓝，22% 亮度)
+   * brand-400    = light 模式按钮背景 (略亮，30% 亮度)
+   * brand-300    = 深色背景色
+   * brand-200    = 最深背景色
+   */
+  --brand-default: 225 84% 53%;
+  --brand-600: 225 84% 65%;
+  --brand-500: 225 74% 22%;   /* dark 按钮背景 */
+  --brand-400: 225 68% 30%;   /* dark hover 按钮背景 */
+  --brand-300: 225 60% 12%;
+  --brand-200: 225 50% 7%;
+
+  /* 警告 */
+  --warning-default: 38 92% 50%;
+  --warning-600: 38 92% 60%;
+  --warning-500: 35 90% 22%;
+
+  /* 错误 */
+  --destructive-default: 0 84% 60%;
+  --destructive-600: 0 84% 70%;
+  --destructive-500: 0 72% 30%;
+
+  /* 成功 */
+  --success-default: 142 71% 45%;
+
+  /* 辅助 */
+  --secondary-default: 250 100% 70%;
+
+  /* 尺寸 */
+  --header-height: 3rem;
+}
+
+/* Light Theme */
+[data-theme='light'] {
+  --background-default: 220 20% 100%;
+  --background-dash-sidebar: 220 14% 97%;
+  --background-surface-75: 220 20% 100%;
+  --background-surface-100: 220 14% 97%;
+  --background-surface-200: 220 10% 94%;
+  --background-surface-300: 220 8% 91%;
+  --background-surface-400: 220 8% 88%;
+  --background-overlay-default: 220 14% 97%;
+  --background-overlay-hover: 220 10% 94%;
+  --background-control: 220 10% 94%;
+  --background-selection: 220 8% 91%;
+  --background-alternative-default: 220 14% 99%;
+  --background-muted: 220 10% 96%;
+  --border-default: 220 8% 87%;
+  --border-strong: 220 8% 82%;
+  --border-stronger: 220 6% 56%;
+  --border-overlay: 220 8% 90%;
+  --border-muted: 220 8% 92%;
+  --border-control: 220 6% 78%;
+  --foreground-default: 222 14% 10%;
+  --foreground-light: 215 8% 34%;
+  --foreground-lighter: 215 6% 46%;
+  --foreground-muted: 215 6% 70%;
+
+  /* light 模式品牌色 */
+  --brand-default: 225 84% 46%;
+  --brand-600: 225 84% 36%;
+  --brand-500: 225 80% 84%;   /* light 按钮背景 */
+  --brand-400: 225 70% 76%;   /* light hover 按钮背景 */
+  --brand-300: 225 60% 92%;
+  --brand-200: 225 50% 97%;
+}
+
+/* 点阵变量 */
+:root {
+  --dot-color: hsl(222 10% 16%);
+  --card-glow-opacity: 1;
+}
+[data-theme='light'] {
+  --dot-color: hsl(220 10% 88%);
+  --card-glow-opacity: 0.35;
+}
+
+/* Tailwind v4 theme mapping */
+@theme {
+  --color-bg-default: hsl(var(--background-default));
+  --color-bg-sidebar: hsl(var(--background-dash-sidebar));
+  --color-bg-surface-75: hsl(var(--background-surface-75));
+  --color-bg-surface-100: hsl(var(--background-surface-100));
+  --color-bg-surface-200: hsl(var(--background-surface-200));
+  --color-bg-surface-300: hsl(var(--background-surface-300));
+  --color-bg-surface-400: hsl(var(--background-surface-400));
+  --color-bg-overlay: hsl(var(--background-overlay-default));
+  --color-bg-overlay-hover: hsl(var(--background-overlay-hover));
+  --color-bg-control: hsl(var(--background-control));
+  --color-bg-selection: hsl(var(--background-selection));
+  --color-bg-alternative: hsl(var(--background-alternative-default));
+  --color-bg-muted: hsl(var(--background-muted));
+  --color-border-default: hsl(var(--border-default));
+  --color-border-strong: hsl(var(--border-strong));
+  --color-border-stronger: hsl(var(--border-stronger));
+  --color-border-overlay: hsl(var(--border-overlay));
+  --color-border-muted: hsl(var(--border-muted));
+  --color-border-control: hsl(var(--border-control));
+  --color-fg-default: hsl(var(--foreground-default));
+  --color-fg-light: hsl(var(--foreground-light));
+  --color-fg-lighter: hsl(var(--foreground-lighter));
+  --color-fg-muted: hsl(var(--foreground-muted));
+  --color-brand: hsl(var(--brand-default));
+  --color-brand-600: hsl(var(--brand-600));
+  --color-brand-500: hsl(var(--brand-500));
+  --color-brand-400: hsl(var(--brand-400));
+  --color-brand-300: hsl(var(--brand-300));
+  --color-brand-200: hsl(var(--brand-200));
+  --color-warning: hsl(var(--warning-default));
+  --color-warning-600: hsl(var(--warning-600));
+  --color-warning-500: hsl(var(--warning-500));
+  --color-destructive: hsl(var(--destructive-default));
+  --color-destructive-600: hsl(var(--destructive-600));
+  --color-destructive-500: hsl(var(--destructive-500));
+  --color-success: hsl(var(--success-default));
+  --color-secondary: hsl(var(--secondary-default));
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* Base */
+* { box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: hsl(var(--background-default));
+  color: hsl(var(--foreground-default));
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overscroll-behavior: none;
+}
+
+/* 全局点阵 */
+#root {
+  width: 100%;
+  height: 100%;
+  background-image: radial-gradient(circle, var(--dot-color) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+a { color: inherit; text-decoration: none; }
+
+button, input, textarea, select {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* 玻璃态 */
+.glass {
+  background: hsl(var(--background-surface-100) / 0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid hsl(var(--border-default) / 0.8);
+}
+
+/* 扫光动画 */
+@keyframes shimmer-scan {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
+.shimmer {
+  position: relative;
+  overflow: hidden;
+}
+
+.shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    hsl(var(--foreground-default) / 0.06) 50%,
+    transparent 100%
+  );
+  animation: shimmer-scan 4s ease-in-out infinite;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border-default));
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: hsl(var(--border-strong)); }
+
+.hide-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+.hide-scrollbar::-webkit-scrollbar { width: 0; height: 0; display: none; }

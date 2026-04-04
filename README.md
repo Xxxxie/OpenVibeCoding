@@ -42,6 +42,11 @@ Or run locally:
 ```bash
 git clone https://github.com/vercel-labs/coding-agent-template.git
 cd coding-agent-template
+
+# Quick setup (recommended)
+./init.sh
+
+# Or manual setup
 pnpm install
 # Set up .env.local with required variables
 pnpm db:push

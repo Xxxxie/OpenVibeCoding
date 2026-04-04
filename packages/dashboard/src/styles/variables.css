@@ -1,0 +1,82 @@
+/* CloudBase Dashboard CSS Variables
+ * 可被外部项目单独引入，无 @import tailwindcss 依赖
+ */
+
+/* Dark Theme (default) */
+:root {
+  --background-default: 222 16% 6%;
+  --background-dash-sidebar: 222 14% 8%;
+  --background-surface-75: 222 14% 8%;
+  --background-surface-100: 222 12% 11%;
+  --background-surface-200: 222 12% 13%;
+  --background-surface-300: 222 10% 16%;
+  --background-surface-400: 222 10% 19%;
+  --background-overlay-default: 222 14% 12%;
+  --background-overlay-hover: 222 10% 18%;
+  --background-control: 222 12% 14%;
+  --background-selection: 222 10% 18%;
+  --background-alternative-default: 222 18% 4%;
+  --background-muted: 222 12% 14%;
+  --border-default: 222 10% 16%;
+  --border-strong: 222 8% 22%;
+  --border-stronger: 222 6% 30%;
+  --border-overlay: 222 8% 20%;
+  --border-muted: 222 10% 13%;
+  --border-control: 222 8% 22%;
+  --foreground-default: 210 20% 98%;
+  --foreground-light: 215 10% 72%;
+  --foreground-lighter: 215 8% 52%;
+  --foreground-muted: 215 6% 30%;
+  --brand-default: 225 84% 53%;
+  --brand-600: 225 84% 65%;
+  --brand-500: 225 74% 22%;
+  --brand-400: 225 68% 30%;
+  --brand-300: 225 60% 12%;
+  --brand-200: 225 50% 7%;
+  --warning-default: 38 92% 50%;
+  --warning-600: 38 92% 60%;
+  --warning-500: 35 90% 22%;
+  --destructive-default: 0 84% 60%;
+  --destructive-600: 0 84% 70%;
+  --destructive-500: 0 72% 30%;
+  --success-default: 142 71% 45%;
+  --secondary-default: 250 100% 70%;
+  --header-height: 3rem;
+  --dot-color: hsl(222 10% 16%);
+  --card-glow-opacity: 1;
+}
+
+/* Light Theme */
+[data-theme='light'] {
+  --background-default: 220 20% 100%;
+  --background-dash-sidebar: 220 14% 97%;
+  --background-surface-75: 220 20% 100%;
+  --background-surface-100: 220 14% 97%;
+  --background-surface-200: 220 10% 94%;
+  --background-surface-300: 220 8% 91%;
+  --background-surface-400: 220 8% 88%;
+  --background-overlay-default: 220 14% 97%;
+  --background-overlay-hover: 220 10% 94%;
+  --background-control: 220 10% 94%;
+  --background-selection: 220 8% 91%;
+  --background-alternative-default: 220 14% 99%;
+  --background-muted: 220 10% 96%;
+  --border-default: 220 8% 87%;
+  --border-strong: 220 8% 82%;
+  --border-stronger: 220 6% 56%;
+  --border-overlay: 220 8% 90%;
+  --border-muted: 220 8% 92%;
+  --border-control: 220 6% 78%;
+  --foreground-default: 222 14% 10%;
+  --foreground-light: 215 8% 34%;
+  --foreground-lighter: 215 6% 46%;
+  --foreground-muted: 215 6% 70%;
+  --brand-default: 225 84% 46%;
+  --brand-600: 225 84% 36%;
+  --brand-500: 225 80% 84%;
+  --brand-400: 225 70% 76%;
+  --brand-300: 225 60% 92%;
+  --brand-200: 225 50% 97%;
+  --dot-color: hsl(220 10% 88%);
+  --card-glow-opacity: 0.35;
+}

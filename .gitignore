@@ -1,7 +1,7 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
-/node_modules
+node_modules
 /.pnp
 .pnp.*
 .yarn/*
@@ -61,3 +61,11 @@ Thumbs.db
 
 # opensrc - source code for packages
 opensrc/
+
+# SQLite database files (runtime artifacts)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+packages/server/data/*.db
+packages/server/data/*.db-shm
+packages/server/data/*.db-wal
