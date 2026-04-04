@@ -655,6 +655,7 @@ ENCRYPTION_KEY=${encryptionKey}
 
 PORT=3001
 NODE_ENV=development
+DATABASE_PATH=.data/app.db
 
 # ==================== Rate Limiting ====================
 
@@ -790,6 +791,35 @@ async function main() {
   // Step 7: Install dependencies
   if (!(await installDependencies())) {
     process.exit(1)
+  }
+
+  // Step 8: Initialize database
+  logSection('初始化数据库')
+  const serverEnvPath = resolve(process.cwd(), 'packages/server/.env')
+  const serverEnvVars = existsSync(serverEnvPath)
+    ? readFileSync(serverEnvPath, 'utf-8').split('\n').reduce((acc, line) => {
+        const trimmed = line.trim()
+        if (trimmed && !trimmed.startsWith('#')) {
+          const [key, ...rest] = trimmed.split('=')
+          if (key) acc[key.trim()] = rest.join('=').trim()
+        }
+        return acc
+      }, {})
+    : {}
+  const dbPath = serverEnvVars['DATABASE_PATH'] || '.data/app.db'
+  // Resolve relative to packages/server
+  const resolvedDbPath = dbPath.startsWith('/')
+    ? dbPath
+    : resolve(process.cwd(), 'packages/server', dbPath)
+  const { mkdirSync } = await import('fs')
+  mkdirSync(resolve(resolvedDbPath, '..'), { recursive: true })
+  const dbResult = runCommandSafe(
+    `DATABASE_PATH="${resolvedDbPath}" pnpm db:push`
+  )
+  if (dbResult.success) {
+    log('数据库表初始化成功', 'success')
+  } else {
+    log('数据库初始化失败，请手动运行：pnpm db:push', 'warn')
   }
 
   // Done!
