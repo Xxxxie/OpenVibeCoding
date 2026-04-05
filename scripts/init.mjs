@@ -499,88 +499,18 @@ async function setupTcr() {
     return true
   }
 
-  // Check cloudbase CLI
-  const cloudbaseCheck = runCommandSafe('cloudbase --version')
-  if (!cloudbaseCheck.success) {
-    log('正在安装 cloudbase CLI...')
-    try {
-      runCommand('npm install -g @cloudbase/cli', true)
-      log('cloudbase CLI 安装成功', 'success')
-    } catch {
-      log('cloudbase CLI 安装失败', 'error')
-      return false
-    }
-  }
-
-  // Check credentials
-  let cred = getCloudbaseCredential()
-  if (!cred) {
-    log('未找到有效的 cloudbase 凭证', 'warn')
-    const loginSuccess = await runCloudbaseLogin()
-    if (!loginSuccess) {
-      log('登录失败', 'error')
-      return false
-    }
-    cred = getCloudbaseCredential()
-  }
-
-  if (!cred) {
-    log('获取凭证失败', 'error')
-    return false
-  }
-
-  log(`使用账号：${cred.uin}`, 'success')
-
-  // Create .env.local if not exists
-  if (!existsSync(ENV_FILE)) {
-    writeFileSync(ENV_FILE, '# Environment variables\n')
-  }
-
-  // Save credentials
-  saveEnvVar('TCB_SECRET_ID', cred.tmpSecretId)
-  saveEnvVar('TCB_SECRET_KEY', cred.tmpSecretKey)
-  saveEnvVar('TENCENTCLOUD_ACCOUNT_ID', cred.uin)
-
-  // Ask for TCR password
-  log('', 'info')
-  log('配置 TCR（容器镜像服务）需要密码。', 'info')
-  log('如未设置密码，请访问：https://console.cloud.tencent.com/tcr', 'info')
-  log('', 'info')
-
-  const savedPassword = env['TCR_PASSWORD']
-  let password = ''
-
-  if (savedPassword) {
-    const useSaved = await askYesNo('使用已保存的 TCR 密码？', true)
-    if (useSaved) {
-      password = savedPassword
-    }
-  }
-
-  if (!password) {
-    password = await promptInput('请输入 TCR 密码', true)
-  }
-
-  if (!password) {
-    log('密码为必填项', 'error')
-    return false
-  }
-
-  saveEnvVar('TCR_PASSWORD', password)
-
-  // Run the full TCR setup script
-  // Pass password via environment variable instead of CLI arg to avoid it appearing in process list
+  // Run the full TCR setup script, passing credentials via env
   log('正在运行 TCR 配置脚本...')
   try {
     execSync('node scripts/setup-tcr.mjs', {
       stdio: 'inherit',
       env: {
         ...process.env,
-        TCR_PASSWORD: password,
         TCB_SECRET_ID: tcbConfig.secretId || process.env.TCB_SECRET_ID || '',
         TCB_SECRET_KEY: tcbConfig.secretKey || process.env.TCB_SECRET_KEY || '',
         TCB_TOKEN: tcbConfig.token || process.env.TCB_TOKEN || '',
         TENCENTCLOUD_ACCOUNT_ID: process.env.TENCENTCLOUD_ACCOUNT_ID || '',
+        TCR_PASSWORD: env['TCR_PASSWORD'] || '',
       },
     })
     log('TCR 配置完成', 'success')
