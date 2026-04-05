@@ -629,6 +629,11 @@ PORT=3001
 NODE_ENV=development
 DATABASE_PATH=.data/app.db
 
+# ==================== Database Provider ====================
+
+DB_PROVIDER=${getPreserved('DB_PROVIDER', 'cloudbase')}
+DB_COLLECTION_PREFIX=${getPreserved('DB_COLLECTION_PREFIX', 'vibe_agent_')}
+
 # ==================== Rate Limiting ====================
 
 MAX_MESSAGES_PER_DAY=${get('MAX_MESSAGES_PER_DAY', '50')}
@@ -780,20 +785,28 @@ async function main() {
         return acc
       }, {})
     : {}
-  const dbPath = serverEnvVars['DATABASE_PATH'] || '.data/app.db'
-  // Resolve relative to packages/server
-  const resolvedDbPath = dbPath.startsWith('/')
-    ? dbPath
-    : resolve(process.cwd(), 'packages/server', dbPath)
-  const { mkdirSync } = await import('fs')
-  mkdirSync(resolve(resolvedDbPath, '..'), { recursive: true })
-  const dbResult = runCommandSafe(
-    `DATABASE_PATH="${resolvedDbPath}" pnpm db:push`
-  )
-  if (dbResult.success) {
-    log('数据库表初始化成功', 'success')
+
+  const dbProvider = serverEnvVars['DB_PROVIDER'] || 'cloudbase'
+
+  if (dbProvider === 'drizzle') {
+    // Drizzle 模式：初始化 SQLite 表结构
+    const dbPath = serverEnvVars['DATABASE_PATH'] || '.data/app.db'
+    const resolvedDbPath = dbPath.startsWith('/')
+      ? dbPath
+      : resolve(process.cwd(), 'packages/server', dbPath)
+    const { mkdirSync } = await import('fs')
+    mkdirSync(resolve(resolvedDbPath, '..'), { recursive: true })
+    const dbResult = runCommandSafe(
+      `DATABASE_PATH="${resolvedDbPath}" pnpm db:push`
+    )
+    if (dbResult.success) {
+      log('SQLite 数据库表初始化成功', 'success')
+    } else {
+      log('数据库初始化失败，请手动运行：pnpm db:push', 'warn')
+    }
   } else {
-    log('数据库初始化失败，请手动运行：pnpm db:push', 'warn')
+    // CloudBase 模式：集合会在首次访问时自动创建
+    log('使用 CloudBase 数据库，集合将在首次访问时自动创建', 'success')
   }
 
   // Done!

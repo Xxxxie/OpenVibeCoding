@@ -404,7 +404,7 @@ export function TaskSidebar({ tasks, width = 288 }: TaskSidebarProps) {
               >
                 Tasks
               </button>
-              <button
+              {/* <button
                 onClick={() => setActiveTab('repos')}
                 className={cn(
                   'text-xs font-medium tracking-wide transition-colors px-2 py-1 rounded',
@@ -414,7 +414,7 @@ export function TaskSidebar({ tasks, width = 288 }: TaskSidebarProps) {
                 )}
               >
                 Repos
-              </button>
+              </button> */}
             </div>
             <div className="flex items-center gap-1">
               <Button
@@ -475,7 +475,7 @@ export function TaskSidebar({ tasks, width = 288 }: TaskSidebarProps) {
             >
               Tasks
             </button>
-            <button
+            {/* <button
               onClick={() => setActiveTab('repos')}
               className={cn(
                 'text-xs font-medium tracking-wide transition-colors px-2 py-1 rounded',
@@ -485,7 +485,7 @@ export function TaskSidebar({ tasks, width = 288 }: TaskSidebarProps) {
               )}
             >
               Repos
-            </button>
+            </button> */}
           </div>
           <div className="flex items-center gap-1">
             <Button
