@@ -1,8 +1,6 @@
 import { Hono } from 'hono'
 import { setCookie, deleteCookie } from 'hono/cookie'
-import { db } from '../db/client'
-import { users, localCredentials, userResources } from '../db/schema'
-import { eq, and } from 'drizzle-orm'
+import { getDb } from '../db/index.js'
 import bcrypt from 'bcryptjs'
 import { nanoid } from 'nanoid'
 import { encryptJWE } from '../lib/session'
@@ -32,13 +30,9 @@ auth.post('/register', async (c) => {
     }
 
     // Check if username already exists
-    const existing = await db
-      .select({ id: users.id })
-      .from(users)
-      .where(and(eq(users.provider, 'local'), eq(users.externalId, trimmedUsername)))
-      .limit(1)
+    const existing = await getDb().users.findByProviderAndExternalId('local', trimmedUsername)
 
-    if (existing.length > 0) {
+    if (existing) {
       return c.json({ error: 'Username already taken' }, 409)
     }
 
@@ -47,18 +41,23 @@ auth.post('/register', async (c) => {
     const now = Date.now()
     const passwordHash = await bcrypt.hash(password, 12)
 
-    await db.insert(users).values({
+    await getDb().users.create({
       id: userId,
       provider: 'local',
       externalId: trimmedUsername,
       accessToken: '',
+      refreshToken: null,
+      scope: null,
       username: trimmedUsername,
+      email: null,
+      name: null,
+      avatarUrl: null,
       createdAt: now,
       updatedAt: now,
       lastLoginAt: now,
     })
 
-    await db.insert(localCredentials).values({
+    await getDb().localCredentials.create({
       userId,
       passwordHash,
       createdAt: now,
@@ -90,46 +89,55 @@ auth.post('/register', async (c) => {
 
       if (provisionMode === 'isolated') {
         // 异步创建独立环境，注册立即返回，前端轮询 provision-status
-        await db.insert(userResources).values({
+        await getDb().userResources.create({
           id: resourceId,
           userId,
           status: 'processing',
+          envId: null,
+          camUsername: null,
+          camSecretId: null,
+          camSecretKey: null,
+          policyId: null,
+          failStep: null,
+          failReason: null,
           createdAt: now,
           updatedAt: now,
         })
 
         provisionUserResources(userId, trimmedUsername)
           .then(async (result) => {
-            await db
-              .update(userResources)
-              .set({
-                status: 'success',
-                envId: result.envId,
-                camUsername: result.camUsername,
-                camSecretId: result.camSecretId,
-                camSecretKey: result.camSecretKey || null,
-                policyId: result.policyId,
-                updatedAt: Date.now(),
-              })
-              .where(eq(userResources.id, resourceId))
+            await getDb().userResources.update(resourceId, {
+              status: 'success',
+              envId: result.envId,
+              camUsername: result.camUsername,
+              camSecretId: result.camSecretId,
+              camSecretKey: result.camSecretKey || null,
+              policyId: result.policyId,
+              updatedAt: Date.now(),
+            })
             console.log(`[provision] User ${trimmedUsername} env ready: ${result.envId}`)
           })
           .catch(async (err) => {
-            await db
-              .update(userResources)
-              .set({ status: 'failed', failReason: err.message, updatedAt: Date.now() })
-              .where(eq(userResources.id, resourceId))
+            await getDb().userResources.update(resourceId, {
+              status: 'failed',
+              failReason: err.message,
+              updatedAt: Date.now(),
+            })
             console.error(`[provision] User ${trimmedUsername} failed:`, err.message)
           })
       } else {
         // shared 模式：直接写入主环境信息，即时就绪
-        await db.insert(userResources).values({
+        await getDb().userResources.create({
           id: resourceId,
           userId,
           status: 'success',
           envId: process.env.TCB_ENV_ID || null,
+          camUsername: null,
           camSecretId: process.env.TCB_SECRET_ID || null,
           camSecretKey: process.env.TCB_SECRET_KEY || null,
+          policyId: null,
+          failStep: null,
+          failReason: null,
           createdAt: now,
           updatedAt: now,
         })
@@ -163,18 +171,14 @@ auth.post('/login', async (c) => {
     const trimmedUsername = username.trim().toLowerCase()
 
     // Find user
-    const [user] = await db
-      .select()
-      .from(users)
-      .where(and(eq(users.provider, 'local'), eq(users.externalId, trimmedUsername)))
-      .limit(1)
+    const user = await getDb().users.findByProviderAndExternalId('local', trimmedUsername)
 
     if (!user) {
       return c.json({ error: 'Invalid username or password' }, 401)
     }
 
     // Get credentials
-    const [cred] = await db.select().from(localCredentials).where(eq(localCredentials.userId, user.id)).limit(1)
+    const cred = await getDb().localCredentials.findByUserId(user.id)
 
     if (!cred) {
       return c.json({ error: 'Invalid username or password' }, 401)
@@ -187,7 +191,7 @@ auth.post('/login', async (c) => {
     }
 
     // Update last login
-    await db.update(users).set({ lastLoginAt: Date.now(), updatedAt: Date.now() }).where(eq(users.id, user.id))
+    await getDb().users.update(user.id, { lastLoginAt: Date.now(), updatedAt: Date.now() })
 
     // Create session
     const session: AppSession = {
@@ -235,7 +239,7 @@ auth.get('/me', async (c) => {
   // 查询用户的 envId
   let envId: string | undefined
   try {
-    const [resource] = await db.select().from(userResources).where(eq(userResources.userId, session.user.id)).limit(1)
+    const resource = await getDb().userResources.findByUserId(session.user.id)
     envId = resource?.envId || undefined
   } catch {
     // ignore
@@ -249,7 +253,7 @@ auth.get('/provision-status', async (c) => {
   const session = c.get('session')
   if (!session?.user?.id) return c.json({ error: 'Unauthorized' }, 401)
 
-  const [resource] = await db.select().from(userResources).where(eq(userResources.userId, session.user.id)).limit(1)
+  const resource = await getDb().userResources.findByUserId(session.user.id)
 
   if (!resource) return c.json({ status: 'not_started' })
 

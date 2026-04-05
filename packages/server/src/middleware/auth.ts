@@ -1,9 +1,7 @@
 import { Context, Next } from 'hono'
 import { getCookie } from 'hono/cookie'
 import { decryptJWE } from '../lib/session'
-import { db } from '../db/client'
-import { userResources } from '../db/schema'
-import { eq } from 'drizzle-orm'
+import { getDb } from '../db/index.js'
 import CloudBaseManager from '@cloudbase/manager-node'
 import { buildUserEnvPolicyStatements } from '../cloudbase/provision.js'
 
@@ -139,7 +137,7 @@ export async function requireUserEnv(c: Context<AppEnv>, next: Next) {
   const session = c.get('session')!
   const userId = session.user.id
 
-  const [resource] = await db.select().from(userResources).where(eq(userResources.userId, userId)).limit(1)
+  const resource = await getDb().userResources.findByUserId(userId)
 
   if (!resource?.envId) {
     return c.json({ error: 'User environment not ready' }, 400)

@@ -16,9 +16,7 @@ import {
 import { cloudbaseAgentService } from '../agent/cloudbase-agent.service.js'
 import { persistenceService } from '../agent/persistence.service.js'
 import { loadConfig } from '../config/store.js'
-import { db } from '../db/client.js'
-import { tasks, deployments } from '../db/schema.js'
-import { eq, and, isNull } from 'drizzle-orm'
+import { getDb } from '../db/index.js'
 import { nanoid } from 'nanoid'
 import { requireUserEnv, type AppEnv } from '../middleware/auth.js'
 
@@ -435,7 +433,7 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
 
   // Update task status to pending
   try {
-    await db.update(tasks).set({ status: 'pending', updatedAt: Date.now() }).where(eq(tasks.id, sessionId))
+    await getDb().tasks.update(sessionId, { status: 'pending', updatedAt: Date.now() })
   } catch {
     // write failure doesn't affect main flow
   }
@@ -513,32 +511,19 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
         try {
           if (deploymentType === 'miniprogram') {
             // Single miniprogram per task
-            const [existing] = await db
-              .select()
-              .from(deployments)
-              .where(
-                and(
-                  eq(deployments.taskId, sessionId),
-                  eq(deployments.type, 'miniprogram'),
-                  isNull(deployments.deletedAt),
-                ),
-              )
-              .limit(1)
+            const existing = await getDb().deployments.findByTaskIdAndTypePath(sessionId, 'miniprogram', null)
 
             if (existing) {
-              await db
-                .update(deployments)
-                .set({
-                  qrCodeUrl: msg.qrCodeUrl || existing.qrCodeUrl,
-                  pagePath: msg.pagePath || existing.pagePath,
-                  appId: msg.appId || existing.appId,
-                  label: msg.label || existing.label,
-                  metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : existing.metadata,
-                  updatedAt: now,
-                })
-                .where(eq(deployments.id, existing.id))
+              await getDb().deployments.update(existing.id, {
+                qrCodeUrl: msg.qrCodeUrl || existing.qrCodeUrl,
+                pagePath: msg.pagePath || existing.pagePath,
+                appId: msg.appId || existing.appId,
+                label: msg.label || existing.label,
+                metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : existing.metadata,
+                updatedAt: now,
+              })
             } else {
-              await db.insert(deployments).values({
+              await getDb().deployments.create({
                 id: nanoid(12),
                 taskId: sessionId,
                 type: 'miniprogram',
@@ -564,31 +549,17 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
             }
 
             if (path) {
-              const [existing] = await db
-                .select()
-                .from(deployments)
-                .where(
-                  and(
-                    eq(deployments.taskId, sessionId),
-                    eq(deployments.type, 'web'),
-                    eq(deployments.path, path),
-                    isNull(deployments.deletedAt),
-                  ),
-                )
-                .limit(1)
+              const existing = await getDb().deployments.findByTaskIdAndTypePath(sessionId, 'web', path)
 
               if (existing) {
-                await db
-                  .update(deployments)
-                  .set({
-                    url: msg.url,
-                    label: msg.label || existing.label,
-                    metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : existing.metadata,
-                    updatedAt: now,
-                  })
-                  .where(eq(deployments.id, existing.id))
+                await getDb().deployments.update(existing.id, {
+                  url: msg.url,
+                  label: msg.label || existing.label,
+                  metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : existing.metadata,
+                  updatedAt: now,
+                })
               } else {
-                await db.insert(deployments).values({
+                await getDb().deployments.create({
                   id: nanoid(12),
                   taskId: sessionId,
                   type: 'web',
@@ -608,7 +579,7 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
 
           // Also update legacy previewUrl for backward compatibility
           if (msg.url) {
-            await db.update(tasks).set({ previewUrl: msg.url }).where(eq(tasks.id, sessionId))
+            await getDb().tasks.update(sessionId, { previewUrl: msg.url })
           }
         } catch (err) {
           console.error('Failed to create deployment:', err)
@@ -659,14 +630,11 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
 
     // 更新 task 状态（消息已由 PersistenceService 存入 CloudBase，不需再写 SQLite）
     try {
-      await db
-        .update(tasks)
-        .set({
-          status: stopReason === 'error' ? 'error' : 'completed',
-          completedAt: Date.now(),
-          updatedAt: Date.now(),
-        })
-        .where(eq(tasks.id, sessionId))
+      await getDb().tasks.update(sessionId, {
+        status: stopReason === 'error' ? 'error' : 'completed',
+        completedAt: Date.now(),
+        updatedAt: Date.now(),
+      })
     } catch (dbErr) {
       console.error('[ACP] Failed to update task status:', dbErr)
     }

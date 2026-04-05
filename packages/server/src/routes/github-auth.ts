@@ -1,8 +1,8 @@
 import { Hono } from 'hono'
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie'
-import { db } from '../db/client'
-import { users, accounts, tasks, connectors, keys } from '../db/schema'
-import { eq, and } from 'drizzle-orm'
+import { getDb, db } from '../db/index.js'
+import { tasks, connectors, accounts, keys, users } from '../db/schema'
+import { eq } from 'drizzle-orm'
 import { nanoid } from 'nanoid'
 import { encryptJWE } from '../lib/session'
 import { encrypt } from '../lib/crypto'
@@ -181,38 +181,32 @@ githubAuth.get('/callback', async (c) => {
       const externalId = `${githubUser.id}`
       const encryptedToken = encrypt(tokenData.access_token)
 
-      const existing = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(and(eq(users.provider, 'github'), eq(users.externalId, externalId)))
-        .limit(1)
+      const existing = await getDb().users.findByProviderAndExternalId('github', externalId)
 
       let userId: string
-      if (existing.length > 0) {
-        userId = existing[0].id
-        await db
-          .update(users)
-          .set({
-            accessToken: encryptedToken,
-            scope: tokenData.scope,
-            username: githubUser.login,
-            email: email || undefined,
-            name: githubUser.name || githubUser.login,
-            avatarUrl: githubUser.avatar_url,
-            updatedAt: now,
-            lastLoginAt: now,
-          })
-          .where(eq(users.id, userId))
+      if (existing) {
+        userId = existing.id
+        await getDb().users.update(userId, {
+          accessToken: encryptedToken,
+          scope: tokenData.scope,
+          username: githubUser.login,
+          email: email || null,
+          name: githubUser.name || githubUser.login,
+          avatarUrl: githubUser.avatar_url,
+          updatedAt: now,
+          lastLoginAt: now,
+        })
       } else {
         userId = nanoid()
-        await db.insert(users).values({
+        await getDb().users.create({
           id: userId,
           provider: 'github',
           externalId: externalId,
           accessToken: encryptedToken,
+          refreshToken: null,
           scope: tokenData.scope,
           username: githubUser.login,
-          email: email || undefined,
+          email: email || null,
           name: githubUser.name || githubUser.login,
           avatarUrl: githubUser.avatar_url,
           createdAt: now,
@@ -254,52 +248,52 @@ githubAuth.get('/callback', async (c) => {
       // CONNECT FLOW: Add GitHub account to existing user
       const encryptedToken = encrypt(tokenData.access_token)
 
-      const existingAccount = await db
+      const existingAccount = await getDb().accounts.findByUserIdAndProvider(storedUserId!, 'github')
+      // Also check if another user has this GitHub account connected
+      // We need to search by externalUserId - use direct db for this specific query
+      const [accountByExternal] = await db
         .select()
         .from(accounts)
-        .where(and(eq(accounts.provider, 'github'), eq(accounts.externalUserId, `${githubUser.id}`)))
+        .where(eq(accounts.externalUserId, `${githubUser.id}`))
         .limit(1)
 
-      if (existingAccount.length > 0) {
-        const connectedUserId = existingAccount[0].userId
+      if (accountByExternal) {
+        const connectedUserId = accountByExternal.userId
 
         if (connectedUserId !== storedUserId) {
           // Merge accounts: transfer everything from old user to new user
+          // These bulk-update-by-userId operations don't map to repository methods
           await db.update(tasks).set({ userId: storedUserId! }).where(eq(tasks.userId, connectedUserId))
           await db.update(connectors).set({ userId: storedUserId! }).where(eq(connectors.userId, connectedUserId))
           await db.update(accounts).set({ userId: storedUserId! }).where(eq(accounts.userId, connectedUserId))
           await db.update(keys).set({ userId: storedUserId! }).where(eq(keys.userId, connectedUserId))
           await db.delete(users).where(eq(users.id, connectedUserId))
 
-          await db
-            .update(accounts)
-            .set({
-              userId: storedUserId!,
-              accessToken: encryptedToken,
-              scope: tokenData.scope,
-              username: githubUser.login,
-              updatedAt: Date.now(),
-            })
-            .where(eq(accounts.id, existingAccount[0].id))
+          await getDb().accounts.update(accountByExternal.id, {
+            userId: storedUserId!,
+            accessToken: encryptedToken,
+            scope: tokenData.scope,
+            username: githubUser.login,
+            updatedAt: Date.now(),
+          })
         } else {
           // Same user, just update the token
-          await db
-            .update(accounts)
-            .set({
-              accessToken: encryptedToken,
-              scope: tokenData.scope,
-              username: githubUser.login,
-              updatedAt: Date.now(),
-            })
-            .where(eq(accounts.id, existingAccount[0].id))
+          await getDb().accounts.update(accountByExternal.id, {
+            accessToken: encryptedToken,
+            scope: tokenData.scope,
+            username: githubUser.login,
+            updatedAt: Date.now(),
+          })
         }
       } else {
-        await db.insert(accounts).values({
+        await getDb().accounts.create({
           id: nanoid(),
           userId: storedUserId!,
           provider: 'github',
           externalUserId: `${githubUser.id}`,
           accessToken: encryptedToken,
+          refreshToken: null,
+          expiresAt: null,
           scope: tokenData.scope,
           username: githubUser.login,
         })
@@ -339,38 +333,24 @@ githubAuth.get('/status', async (c) => {
 
   try {
     // Check if user has GitHub as connected account
-    const account = await db
-      .select({
-        username: accounts.username,
-        createdAt: accounts.createdAt,
-      })
-      .from(accounts)
-      .where(and(eq(accounts.userId, session.user.id), eq(accounts.provider, 'github')))
-      .limit(1)
+    const account = await getDb().accounts.findByUserIdAndProvider(session.user.id, 'github')
 
-    if (account.length > 0) {
+    if (account) {
       return c.json({
         connected: true,
-        username: account[0].username,
-        connectedAt: account[0].createdAt,
+        username: account.username,
+        connectedAt: account.createdAt,
       })
     }
 
     // Check if user signed in with GitHub (primary account)
-    const user = await db
-      .select({
-        username: users.username,
-        createdAt: users.createdAt,
-      })
-      .from(users)
-      .where(and(eq(users.id, session.user.id), eq(users.provider, 'github')))
-      .limit(1)
+    const user = await getDb().users.findById(session.user.id)
 
-    if (user.length > 0) {
+    if (user && user.provider === 'github') {
       return c.json({
         connected: true,
-        username: user[0].username,
-        connectedAt: user[0].createdAt,
+        username: user.username,
+        connectedAt: user.createdAt,
       })
     }
 
@@ -400,7 +380,7 @@ githubAuth.post('/disconnect', async (c) => {
   }
 
   try {
-    await db.delete(accounts).where(and(eq(accounts.userId, session.user.id), eq(accounts.provider, 'github')))
+    await getDb().accounts.delete(session.user.id, 'github')
     return c.json({ success: true })
   } catch (error) {
     console.error('Error disconnecting GitHub:', error)

@@ -1,7 +1,5 @@
 import { Hono } from 'hono'
-import { db } from '../db/client'
-import { keys, accounts, users } from '../db/schema'
-import { eq, and } from 'drizzle-orm'
+import { getDb } from '../db/index.js'
 import { nanoid } from 'nanoid'
 import { encrypt, decrypt } from '../lib/crypto'
 import { requireAuth, type AppEnv } from '../middleware/auth'
@@ -34,24 +32,16 @@ function isGeminiModel(model: string): boolean {
 
 async function getUserGitHubToken(userId: string): Promise<string | null> {
   try {
-    const account = await db
-      .select({ accessToken: accounts.accessToken })
-      .from(accounts)
-      .where(and(eq(accounts.userId, userId), eq(accounts.provider, 'github')))
-      .limit(1)
+    const account = await getDb().accounts.findByUserIdAndProvider(userId, 'github')
 
-    if (account[0]?.accessToken) {
-      return decrypt(account[0].accessToken)
+    if (account?.accessToken) {
+      return decrypt(account.accessToken)
     }
 
-    const user = await db
-      .select({ accessToken: users.accessToken })
-      .from(users)
-      .where(and(eq(users.id, userId), eq(users.provider, 'github')))
-      .limit(1)
+    const user = await getDb().users.findById(userId)
 
-    if (user[0]?.accessToken) {
-      return decrypt(user[0].accessToken)
+    if (user?.provider === 'github' && user.accessToken) {
+      return decrypt(user.accessToken)
     }
 
     return null
@@ -70,14 +60,10 @@ async function getUserApiKey(userId: string, provider: Provider): Promise<string
   }
 
   try {
-    const userKey = await db
-      .select({ value: keys.value })
-      .from(keys)
-      .where(and(eq(keys.userId, userId), eq(keys.provider, provider)))
-      .limit(1)
+    const userKey = await getDb().keys.findByUserIdAndProvider(userId, provider)
 
-    if (userKey[0]?.value) {
-      return decrypt(userKey[0].value)
+    if (userKey?.value) {
+      return decrypt(userKey.value)
     }
   } catch {
     // fall through to system key
@@ -96,15 +82,12 @@ app.get('/', async (c) => {
     const session = c.get('session')!
     const userId = session.user.id
 
-    const userKeys = await db
-      .select({
-        provider: keys.provider,
-        createdAt: keys.createdAt,
-      })
-      .from(keys)
-      .where(eq(keys.userId, userId))
+    const userKeys = await getDb().keys.findByUserId(userId)
 
-    return c.json({ success: true, apiKeys: userKeys })
+    return c.json({
+      success: true,
+      apiKeys: userKeys.map((k) => ({ provider: k.provider, createdAt: k.createdAt })),
+    })
   } catch (error) {
     console.error('Error fetching API keys:', error)
     return c.json({ error: 'Failed to fetch API keys' }, 500)
@@ -130,27 +113,14 @@ app.post('/', async (c) => {
       return c.json({ error: 'Invalid provider' }, 400)
     }
 
-    const existing = await db
-      .select()
-      .from(keys)
-      .where(and(eq(keys.userId, userId), eq(keys.provider, provider)))
-      .limit(1)
-
     const encryptedKey = encrypt(apiKey)
 
-    if (existing.length > 0) {
-      await db
-        .update(keys)
-        .set({ value: encryptedKey, updatedAt: Date.now() })
-        .where(and(eq(keys.userId, userId), eq(keys.provider, provider)))
-    } else {
-      await db.insert(keys).values({
-        id: nanoid(),
-        userId,
-        provider,
-        value: encryptedKey,
-      })
-    }
+    await getDb().keys.upsert({
+      id: nanoid(),
+      userId,
+      provider,
+      value: encryptedKey,
+    })
 
     return c.json({ success: true })
   } catch (error) {
@@ -173,7 +143,7 @@ app.delete('/', async (c) => {
       return c.json({ error: 'Provider is required' }, 400)
     }
 
-    await db.delete(keys).where(and(eq(keys.userId, userId), eq(keys.provider, provider)))
+    await getDb().keys.delete(userId, provider)
 
     return c.json({ success: true })
   } catch (error) {

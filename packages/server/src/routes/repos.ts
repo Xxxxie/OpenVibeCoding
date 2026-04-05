@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { Octokit } from '@octokit/rest'
-import { db } from '../db/client'
-import { tasks, accounts, users } from '../db/schema'
+import { getDb, db } from '../db/index.js'
+import { tasks } from '../db/schema'
 import { eq, and, isNull } from 'drizzle-orm'
 import { decrypt } from '../lib/crypto'
 import { requireAuth, type AppEnv } from '../middleware/auth'
@@ -11,24 +11,16 @@ const app = new Hono<AppEnv>()
 // Helper: get GitHub token for the current session user
 async function getGitHubToken(userId: string): Promise<string | null> {
   try {
-    const account = await db
-      .select({ accessToken: accounts.accessToken })
-      .from(accounts)
-      .where(and(eq(accounts.userId, userId), eq(accounts.provider, 'github')))
-      .limit(1)
+    const account = await getDb().accounts.findByUserIdAndProvider(userId, 'github')
 
-    if (account[0]?.accessToken) {
-      return decrypt(account[0].accessToken)
+    if (account?.accessToken) {
+      return decrypt(account.accessToken)
     }
 
-    const user = await db
-      .select({ accessToken: users.accessToken })
-      .from(users)
-      .where(and(eq(users.id, userId), eq(users.provider, 'github')))
-      .limit(1)
+    const user = await getDb().users.findById(userId)
 
-    if (user[0]?.accessToken) {
-      return decrypt(user[0].accessToken)
+    if (user?.provider === 'github' && user.accessToken) {
+      return decrypt(user.accessToken)
     }
 
     return null
@@ -143,6 +135,7 @@ app.get('/:owner/:repo/pull-requests/:pr_number/check-task', async (c) => {
 
     const repoUrl = `https://github.com/${owner}/${repo}`
 
+    // This compound query (userId + prNumber + repoUrl + isNull(deletedAt)) doesn't map to a repository method
     const existingTasks = await db
       .select()
       .from(tasks)

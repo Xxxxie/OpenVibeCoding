@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { db } from '../db/client'
+import { db } from '../db/index.js'
 import { tasks } from '../db/schema'
 import { eq, and, isNotNull } from 'drizzle-orm'
 import { requireAuth, type AppEnv } from '../middleware/auth'
@@ -51,6 +51,7 @@ app.get('/sandboxes', async (c) => {
     const session = c.get('session')!
     const userId = session.user.id
 
+    // This specialized query (isNotNull(sandboxId) + specific fields) doesn't map to a repository method
     const runningSandboxes = await db
       .select({
         id: tasks.id,

@@ -1,6 +1,4 @@
-import { db } from '../db/client'
-import { tasks } from '../db/schema'
-import { eq } from 'drizzle-orm'
+import { getDb } from '../db/index.js'
 import type { ExtendedSessionUpdate } from '@coder/shared'
 
 type LogLevel = 'info' | 'error' | 'success' | 'command'
@@ -29,14 +27,11 @@ export class TaskLogger {
     const entry: LogEntry = { type: level, message, timestamp: Date.now() }
 
     try {
-      const [task] = await db.select({ logs: tasks.logs }).from(tasks).where(eq(tasks.id, this.taskId)).limit(1)
+      const task = await getDb().tasks.findById(this.taskId)
       const existingLogs: LogEntry[] = task?.logs ? JSON.parse(task.logs) : []
       const newLogs = [...existingLogs, entry]
 
-      await db
-        .update(tasks)
-        .set({ logs: JSON.stringify(newLogs), updatedAt: Date.now() })
-        .where(eq(tasks.id, this.taskId))
+      await getDb().tasks.update(this.taskId, { logs: JSON.stringify(newLogs), updatedAt: Date.now() })
     } catch {
       // Don't throw - logging failures should not break the main process
     }
@@ -66,27 +61,21 @@ export class TaskLogger {
     try {
       if (message) {
         const entry: LogEntry = { type: 'info', message, timestamp: Date.now() }
-        const [task] = await db.select({ logs: tasks.logs }).from(tasks).where(eq(tasks.id, this.taskId)).limit(1)
+        const task = await getDb().tasks.findById(this.taskId)
         const existingLogs: LogEntry[] = task?.logs ? JSON.parse(task.logs) : []
         const newLogs = [...existingLogs, entry]
-        await db
-          .update(tasks)
-          .set({ progress, logs: JSON.stringify(newLogs), updatedAt: Date.now() })
-          .where(eq(tasks.id, this.taskId))
+        await getDb().tasks.update(this.taskId, { progress, logs: JSON.stringify(newLogs), updatedAt: Date.now() })
       } else {
-        await db.update(tasks).set({ progress, updatedAt: Date.now() }).where(eq(tasks.id, this.taskId))
+        await getDb().tasks.update(this.taskId, { progress, updatedAt: Date.now() })
       }
     } catch {
       // Don't throw
     }
 
     if (this.acpNotify) {
-      const [task] = await db
-        .select({ status: tasks.status })
-        .from(tasks)
-        .where(eq(tasks.id, this.taskId))
-        .limit(1)
-        .catch(() => [undefined])
+      const task = await getDb()
+        .tasks.findById(this.taskId)
+        .catch(() => null)
       this.acpNotify({
         sessionUpdate: 'task_progress',
         progress,
@@ -100,10 +89,7 @@ export class TaskLogger {
       const updateData: Record<string, unknown> = { status, updatedAt: Date.now() }
       if (status === 'completed') updateData.completedAt = Date.now()
       if (error) updateData.error = error
-      await db
-        .update(tasks)
-        .set(updateData as any)
-        .where(eq(tasks.id, this.taskId))
+      await getDb().tasks.update(this.taskId, updateData as any)
     } catch {
       // Don't throw
     }

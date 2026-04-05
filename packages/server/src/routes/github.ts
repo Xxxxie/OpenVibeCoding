@@ -1,7 +1,5 @@
 import { Hono } from 'hono'
-import { db } from '../db/client'
-import { users, accounts } from '../db/schema'
-import { eq, and } from 'drizzle-orm'
+import { getDb } from '../db/index.js'
 import { decrypt, encrypt } from '../lib/crypto'
 import { Octokit } from '@octokit/rest'
 import { nanoid } from 'nanoid'
@@ -13,25 +11,17 @@ const github = new Hono<AppEnv>()
 async function getGitHubToken(userId: string): Promise<string | null> {
   try {
     // Check connected GitHub account first
-    const account = await db
-      .select({ accessToken: accounts.accessToken })
-      .from(accounts)
-      .where(and(eq(accounts.userId, userId), eq(accounts.provider, 'github')))
-      .limit(1)
+    const account = await getDb().accounts.findByUserIdAndProvider(userId, 'github')
 
-    if (account[0]?.accessToken) {
-      return decrypt(account[0].accessToken)
+    if (account?.accessToken) {
+      return decrypt(account.accessToken)
     }
 
     // Fall back to primary GitHub sign-in
-    const user = await db
-      .select({ accessToken: users.accessToken })
-      .from(users)
-      .where(and(eq(users.id, userId), eq(users.provider, 'github')))
-      .limit(1)
+    const user = await getDb().users.findById(userId)
 
-    if (user[0]?.accessToken) {
-      return decrypt(user[0].accessToken)
+    if (user?.provider === 'github' && user.accessToken) {
+      return decrypt(user.accessToken)
     }
 
     return null

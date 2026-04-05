@@ -1,8 +1,6 @@
 import { Hono } from 'hono'
-import { db } from '../db/client'
-import { connectors } from '../db/schema'
+import { getDb } from '../db/index.js'
 import { nanoid } from 'nanoid'
-import { eq, and } from 'drizzle-orm'
 import { encrypt, decrypt } from '../lib/crypto'
 import { requireAuth, type AppEnv } from '../middleware/auth'
 
@@ -16,7 +14,7 @@ app.get('/', async (c) => {
     const session = c.get('session')!
     const userId = session.user.id
 
-    const userConnectors = await db.select().from(connectors).where(eq(connectors.userId, userId))
+    const userConnectors = await getDb().connectors.findByUserId(userId)
 
     const decryptedConnectors = userConnectors.map((connector) => ({
       ...connector,
@@ -65,7 +63,7 @@ app.post('/', async (c) => {
       status: 'connected' as const,
     }
 
-    await db.insert(connectors).values({
+    await getDb().connectors.create({
       id: connectorData.id,
       userId: connectorData.userId,
       name: connectorData.name,
@@ -122,21 +120,18 @@ app.patch('/:id', async (c) => {
 
     const validatedData = connectorData
 
-    await db
-      .update(connectors)
-      .set({
-        name: validatedData.name,
-        description: validatedData.description || null,
-        type: validatedData.type as 'local' | 'remote',
-        baseUrl: validatedData.baseUrl || null,
-        oauthClientId: validatedData.oauthClientId || null,
-        oauthClientSecret: validatedData.oauthClientSecret ? encrypt(validatedData.oauthClientSecret) : null,
-        command: validatedData.command || null,
-        env: validatedData.env ? encrypt(JSON.stringify(validatedData.env)) : null,
-        status: validatedData.status as 'connected' | 'disconnected',
-        updatedAt: Date.now(),
-      })
-      .where(and(eq(connectors.id, id), eq(connectors.userId, userId)))
+    await getDb().connectors.update(id, userId, {
+      name: validatedData.name,
+      description: validatedData.description || null,
+      type: validatedData.type as 'local' | 'remote',
+      baseUrl: validatedData.baseUrl || null,
+      oauthClientId: validatedData.oauthClientId || null,
+      oauthClientSecret: validatedData.oauthClientSecret ? encrypt(validatedData.oauthClientSecret) : null,
+      command: validatedData.command || null,
+      env: validatedData.env ? encrypt(JSON.stringify(validatedData.env)) : null,
+      status: validatedData.status as 'connected' | 'disconnected',
+      updatedAt: Date.now(),
+    })
 
     return c.json({
       success: true,
@@ -163,7 +158,7 @@ app.delete('/:id', async (c) => {
     const userId = session.user.id
     const id = c.req.param('id')
 
-    await db.delete(connectors).where(and(eq(connectors.id, id), eq(connectors.userId, userId)))
+    await getDb().connectors.delete(id, userId)
 
     return c.json({
       success: true,
@@ -203,10 +198,7 @@ app.patch('/:id/status', async (c) => {
       )
     }
 
-    await db
-      .update(connectors)
-      .set({ status })
-      .where(and(eq(connectors.id, id), eq(connectors.userId, userId)))
+    await getDb().connectors.update(id, userId, { status })
 
     return c.json({
       success: true,
