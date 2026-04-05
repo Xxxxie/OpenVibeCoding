@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { db } from '../db/index.js'
+import { drizzleDb as db } from '../db/drizzle/client.js'
 import { tasks } from '../db/schema'
 import { eq, and, isNotNull } from 'drizzle-orm'
 import { requireAuth, type AppEnv } from '../middleware/auth'

@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie'
-import { getDb, db } from '../db/index.js'
+import { getDb } from '../db/index.js'
+import { drizzleDb as db } from '../db/drizzle/client.js'
 import { tasks, connectors, accounts, keys, users } from '../db/schema'
 import { eq } from 'drizzle-orm'
 import { nanoid } from 'nanoid'

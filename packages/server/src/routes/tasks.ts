@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { getDb, db } from '../db/index.js'
+import { getDb } from '../db/index.js'
 import { tasks, deployments } from '../db/schema'
 import { eq, desc, and, isNull } from 'drizzle-orm'
 import { nanoid } from 'nanoid'

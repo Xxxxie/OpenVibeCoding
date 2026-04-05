@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { Octokit } from '@octokit/rest'
-import { getDb, db } from '../db/index.js'
+import { getDb } from '../db/index.js'
 import { tasks } from '../db/schema'
 import { eq, and, isNull } from 'drizzle-orm'
 import { decrypt } from '../lib/crypto'
