@@ -289,6 +289,24 @@ function getCloudbaseCredential() {
 }
 
 /**
+ * 从 cloudbase auth.json 读取账号 uin（不区分临时/永久凭证）
+ */
+function getCloudbaseAccountId() {
+  if (!existsSync(CLOUDBASE_AUTH_FILE)) {
+    return null
+  }
+  try {
+    const content = readFileSync(CLOUDBASE_AUTH_FILE, 'utf-8')
+    const auth = JSON.parse(content)
+    // 永久凭证: auth.credential.uin
+    // 临时凭证: auth.credential.uin
+    return auth.credential?.uin || null
+  } catch {
+    return null
+  }
+}
+
+/**
  * Ensure cloudbase CLI is installed and user is logged in
  */
 async function ensureCloudbaseAuth(skipLogin = false) {
@@ -565,10 +583,7 @@ async function setupPermanentKey(config) {
 
     // 如果缺少 accountId，尝试从 cloudbase auth.json 获取
     if (!config.accountId) {
-      const cred = getCloudbaseCredential()
-      if (cred) {
-        config.accountId = cred.credential.uin
-      }
+      config.accountId = getCloudbaseAccountId() || ''
     }
 
     return true
@@ -635,11 +650,13 @@ async function setupPermanentKey(config) {
   config.isTemporaryCredential = false
 
   // 获取账号 ID（从 auth.json 刷新，登录后会更新）
-  const cred = getCloudbaseCredential()
-  if (cred) {
-    config.accountId = cred.credential.uin
-    saveEnvVar('TENCENTCLOUD_ACCOUNT_ID', config.accountId)
-    log(`账号 ID：${config.accountId}`, 'info')
+  const accountId = getCloudbaseAccountId()
+  if (accountId) {
+    config.accountId = accountId
+    saveEnvVar('TENCENTCLOUD_ACCOUNT_ID', accountId)
+    log(`账号 ID：${accountId}`, 'info')
+  } else {
+    log('未能从 cloudbase auth.json 获取账号 ID', 'warn')
   }
 
   return true
@@ -851,9 +868,17 @@ async function setupTcr(config) {
   saveEnvVar('TCR_NAMESPACE', namespace)
   log('Namespace saved to .env.local', 'info')
 
+  // 确保有 accountId（Docker login 需要）
+  if (!config.accountId) {
+    config.accountId = getCloudbaseAccountId() || ''
+  }
+  if (!config.accountId) {
+    log('缺少账号 ID，Docker login 需要 username', 'error')
+    log('请手动执行：docker login ccr.ccs.tencentyun.com --username <你的AppID> --password-stdin', 'info')
+    return false
+  }
 
   // Step 4: Docker login
-  // Step 5 (was 4): Docker login
   if (!dockerLogin(TCR_DOMAIN, config.accountId, password)) {
     return false
   }

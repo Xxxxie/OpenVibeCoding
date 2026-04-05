@@ -323,6 +323,16 @@ const tcbConfig = {
   provisionMode: 'shared',
 }
 
+// In-memory store for CodeBuddy auth config
+const codebuddyConfig = {
+  authMode: '',   // 'apikey' or 'oauth'
+  apiKey: '',
+  internetEnv: '',
+  clientId: '',
+  clientSecret: '',
+  oauthEndpoint: 'https://copilot.tencent.com/oauth2/token',
+}
+
 async function setupCloudbaseConfig() {
   logSection('CloudBase 配置')
 
@@ -507,6 +517,175 @@ async function setupCloudbaseConfig() {
   return true
 }
 
+async function setupCodebuddy() {
+  logSection('CodeBuddy 认证配置')
+
+  const serverEnvFile = resolve(process.cwd(), 'packages/server/.env')
+  const existingServerEnv = {}
+  if (existsSync(serverEnvFile)) {
+    readFileSync(serverEnvFile, 'utf-8').split('\n').forEach(line => {
+      const trimmed = line.trim()
+      if (trimmed && !trimmed.startsWith('#')) {
+        const [key, ...rest] = trimmed.split('=')
+        if (key) existingServerEnv[key.trim()] = rest.join('=').trim()
+      }
+    })
+  }
+
+  // Check if already configured
+  const hasApiKey = !!existingServerEnv['CODEBUDDY_API_KEY']
+  const hasOAuth = !!(existingServerEnv['CODEBUDDY_CLIENT_ID'] && existingServerEnv['CODEBUDDY_CLIENT_SECRET'])
+
+  if (hasApiKey) {
+    console.log('')
+    console.log(`  ${colors.green}已检测到 API Key 配置${colors.reset}`)
+    console.log(`  密钥：${existingServerEnv['CODEBUDDY_API_KEY'].slice(0, 8)}...`)
+    console.log('')
+    console.log('  1) 继续使用当前 API Key')
+    console.log('  2) 重新配置')
+    console.log('')
+
+    const choice = await promptInput('请选择（1 或 2，回车默认选 1）')
+    if (!choice || choice === '1') {
+      codebuddyConfig.authMode = 'apikey'
+      codebuddyConfig.apiKey = existingServerEnv['CODEBUDDY_API_KEY']
+      codebuddyConfig.internetEnv = existingServerEnv['CODEBUDDY_INTERNET_ENVIRONMENT'] || ''
+      log('使用已有 API Key 配置', 'success')
+      return true
+    }
+  } else if (hasOAuth) {
+    console.log('')
+    console.log(`  ${colors.green}已检测到 OAuth 配置${colors.reset}`)
+    console.log(`  Client ID：${existingServerEnv['CODEBUDDY_CLIENT_ID']}`)
+    console.log('')
+    console.log('  1) 继续使用当前 OAuth 配置')
+    console.log('  2) 切换为 API Key')
+    console.log('  3) 重新配置')
+    console.log('')
+
+    const choice = await promptInput('请选择（1/2/3，回车默认选 1）')
+    if (!choice || choice === '1') {
+      codebuddyConfig.authMode = 'oauth'
+      codebuddyConfig.clientId = existingServerEnv['CODEBUDDY_CLIENT_ID']
+      codebuddyConfig.clientSecret = existingServerEnv['CODEBUDDY_CLIENT_SECRET']
+      codebuddyConfig.oauthEndpoint = existingServerEnv['CODEBUDDY_OAUTH_ENDPOINT'] || 'https://copilot.tencent.com/oauth2/token'
+      log('使用已有 OAuth 配置', 'success')
+      return true
+    }
+    if (choice === '2') {
+      // Fall through to API Key setup below
+      codebuddyConfig.authMode = 'apikey'
+    } else {
+      // Fall through to selection below
+      codebuddyConfig.authMode = ''
+    }
+  }
+
+  // ── 选择认证方式 ──────────────────────────────────────────
+  if (!codebuddyConfig.authMode) {
+    console.log('')
+    console.log('  CodeBuddy SDK 支持两种认证方式：')
+    console.log('')
+    console.log(`  ${colors.bright}1) API Key（推荐）${colors.reset}`)
+    console.log('     个人用户可直接使用，无需企业旗舰版。')
+    console.log(`     获取地址：${colors.cyan}https://copilot.tencent.com/profile/${colors.reset}`)
+    console.log('')
+    console.log(`  ${colors.bright}2) OAuth（企业旗舰版）${colors.reset}`)
+    console.log('     需要创建 OAuth 应用获取 Client ID / Secret。')
+    console.log('')
+    console.log(`  ${colors.dim}3) 跳过，稍后自行在 packages/server/.env 中配置${colors.reset}`)
+    console.log('')
+
+    while (!codebuddyConfig.authMode) {
+      const choice = await promptInput('请选择（1/2/3，回车默认选 1）')
+      if (!choice || choice === '1') {
+        codebuddyConfig.authMode = 'apikey'
+      } else if (choice === '2') {
+        codebuddyConfig.authMode = 'oauth'
+      } else if (choice === '3') {
+        log('已跳过，稍后请手动配置 packages/server/.env', 'info')
+        return true
+      } else {
+        log('请输入 1、2 或 3', 'warn')
+      }
+    }
+  }
+
+  // ── API Key 配置 ───────────────────────────────────────────
+  if (codebuddyConfig.authMode === 'apikey') {
+    console.log('')
+    console.log(`  获取 API Key：${colors.cyan}https://copilot.tencent.com/profile/${colors.reset}`)
+    console.log('')
+
+    const apiKey = await promptInput('请输入 API Key')
+    if (!apiKey) {
+      log('未输入 API Key，已跳过', 'warn')
+      return true
+    }
+    codebuddyConfig.apiKey = apiKey
+
+    console.log('')
+    console.log('  网络环境（影响 API 端点）：')
+    console.log('  1) 国内版（默认）')
+    console.log('  2) 海外版')
+    console.log('  3) iOA')
+    console.log('')
+
+    const envChoice = await promptInput('请选择（1/2/3，回车默认选 1）')
+    if (!envChoice || envChoice === '1') {
+      codebuddyConfig.internetEnv = 'internal'
+    } else if (envChoice === '2') {
+      codebuddyConfig.internetEnv = ''
+    } else if (envChoice === '3') {
+      codebuddyConfig.internetEnv = 'ioa'
+    }
+
+    log('CodeBuddy API Key 已配置', 'success')
+    return true
+  }
+
+  // ── OAuth 配置 ─────────────────────────────────────────────
+  if (codebuddyConfig.authMode === 'oauth') {
+    console.log('')
+    console.log('  请输入 CodeBuddy OAuth 应用凭据。')
+    console.log(`  创建地址：${colors.cyan}https://copilot.tencent.com${colors.reset}`)
+    console.log('')
+
+    const clientId = await promptInput('Client ID')
+    if (!clientId) {
+      log('未输入 Client ID，已跳过', 'warn')
+      return true
+    }
+
+    const clientSecret = await promptInput('Client Secret', true)
+    if (!clientSecret) {
+      log('未输入 Client Secret，已跳过', 'warn')
+      return true
+    }
+
+    codebuddyConfig.clientId = clientId
+    codebuddyConfig.clientSecret = clientSecret
+
+    console.log('')
+    console.log('  OAuth Token 端点：')
+    console.log('  1) https://copilot.tencent.com/oauth2/token（国内，默认）')
+    console.log('  2) 自定义')
+    console.log('')
+
+    const endpointChoice = await promptInput('请选择（1 或 2，回车默认选 1）')
+    if (!endpointChoice || endpointChoice === '1') {
+      codebuddyConfig.oauthEndpoint = 'https://copilot.tencent.com/oauth2/token'
+    } else {
+      codebuddyConfig.oauthEndpoint = await promptInput('请输入 OAuth Token 端点 URL')
+    }
+
+    log('CodeBuddy OAuth 已配置', 'success')
+    return true
+  }
+
+  return true
+}
+
 async function setupTcr() {
   logSection('配置 TCR（容器镜像服务）')
 
@@ -651,11 +830,20 @@ TCB_SECRET_KEY=${get('TCB_SECRET_KEY')}
 TCB_TOKEN=${get('TCB_TOKEN')}
 TCB_PROVISION_MODE=${get('TCB_PROVISION_MODE', 'shared')}
 
-# ==================== CodeBuddy OAuth & Git Archive ====================
-
-CODEBUDDY_CLIENT_ID=${getPreserved('CODEBUDDY_CLIENT_ID')}
-CODEBUDDY_CLIENT_SECRET=${getPreserved('CODEBUDDY_CLIENT_SECRET')}
-CODEBUDDY_OAUTH_ENDPOINT=${getPreserved('CODEBUDDY_OAUTH_ENDPOINT', 'https://copilot.tencent.com/oauth2/token')}
+# ==================== CodeBuddy Auth ====================
+# 认证方式: API Key（优先）或 OAuth（企业旗舰版）
+# 设置 CODEBUDDY_API_KEY 后将跳过 OAuth 认证
+${codebuddyConfig.authMode === 'apikey'
+  ? `CODEBUDDY_API_KEY=${codebuddyConfig.apiKey}`
+  : `# CODEBUDDY_API_KEY=`
+}${codebuddyConfig.internetEnv
+  ? `\nCODEBUDDY_INTERNET_ENVIRONMENT=${codebuddyConfig.internetEnv}`
+  : `\n# CODEBUDDY_INTERNET_ENVIRONMENT=internal   # 国内版填 internal, iOA 填 ioa`
+}
+${codebuddyConfig.authMode === 'oauth'
+  ? `\n# --- OAuth 配置（当前已配置 API Key，OAuth 不生效）---\nCODEBUDDY_CLIENT_ID=${codebuddyConfig.clientId}\nCODEBUDDY_CLIENT_SECRET=${codebuddyConfig.clientSecret}\nCODEBUDDY_OAUTH_ENDPOINT=${codebuddyConfig.oauthEndpoint}`
+  : `\n# --- OAuth 配置（企业旗舰版，API Key 优先时此项不生效）---\n# CODEBUDDY_CLIENT_ID=\n# CODEBUDDY_CLIENT_SECRET=\n# CODEBUDDY_OAUTH_ENDPOINT=https://copilot.tencent.com/oauth2/token`
+}
 
 GIT_ARCHIVE_REPO=${getPreserved('GIT_ARCHIVE_REPO')}
 GIT_ARCHIVE_USER=${getPreserved('GIT_ARCHIVE_USER')}
@@ -762,12 +950,15 @@ async function main() {
     process.exit(1)
   }
 
-  // Step 6: Setup Server Environment
+  // Step 7: CodeBuddy auth configuration
+  await setupCodebuddy()
+
+  // Step 8: Setup Server Environment
   if (!(await setupServerEnv())) {
     process.exit(1)
   }
 
-  // Step 7: Install dependencies
+  // Step 9: Install dependencies
   if (!(await installDependencies())) {
     process.exit(1)
   }
@@ -815,14 +1006,23 @@ async function main() {
   console.log(`${colors.bright}${colors.green}║           ✅ 初始化完成！                   ║${colors.reset}`)
   console.log(`${colors.bright}${colors.green}╚══════════════════════════════════════════════╝${colors.reset}`)
   console.log('')
-  console.log(`${colors.bright}${colors.yellow}━━━ 启动前请填写必要配置项 ━━━${colors.reset}`)
+
+  if (codebuddyConfig.authMode) {
+    console.log(`${colors.green}✓${colors.reset} CodeBuddy 认证已配置（${codebuddyConfig.authMode === 'apikey' ? 'API Key' : 'OAuth'}）`)
+  } else {
+    console.log(`${colors.yellow}!${colors.reset} CodeBuddy 认证未配置，启动前请编辑 ${colors.bright}packages/server/.env${colors.reset}`)
+  }
+
   console.log('')
-  console.log(`打开 ${colors.bright}packages/server/.env${colors.reset} 并填写以下内容：`)
+  console.log(`${colors.bright}${colors.yellow}━━━ 启动前请确认 ━━━${colors.reset}`)
   console.log('')
-  console.log(`  ${colors.bright}CodeBuddy OAuth${colors.reset} — 用于用户认证`)
-  console.log(`  ${colors.dim}CODEBUDDY_CLIENT_ID=       # 你的 CodeBuddy OAuth 应用 client ID${colors.reset}`)
-  console.log(`  ${colors.dim}CODEBUDDY_CLIENT_SECRET=   # 你的 CodeBuddy OAuth 应用 client secret${colors.reset}`)
-  console.log(`  ${colors.dim}CODEBUDDY_OAUTH_ENDPOINT=https://copilot.tencent.com/oauth2/token${colors.reset}`)
+  console.log(`打开 ${colors.bright}packages/server/.env${colors.reset} 确认以下配置：`)
+  console.log('')
+  console.log(`  ${colors.bright}CodeBuddy 认证${colors.reset} — API Key 或 OAuth 二选一`)
+  console.log(`  ${colors.dim}CODEBUDDY_API_KEY=              # API Key（设置后优先，推荐）${colors.reset}`)
+  console.log(`  ${colors.dim}CODEBUDDY_INTERNET_ENVIRONMENT= # 国内版填 internal, iOA 填 ioa${colors.reset}`)
+  console.log(`  ${colors.dim}CODEBUDDY_CLIENT_ID=            # OAuth Client ID（企业旗舰版）${colors.reset}`)
+  console.log(`  ${colors.dim}CODEBUDDY_CLIENT_SECRET=        # OAuth Client Secret${colors.reset}`)
   console.log('')
   console.log(`  ${colors.bright}Git Archive (CNB)${colors.reset} — 用于工作区 git 归档`)
   console.log(`  ${colors.dim}GIT_ARCHIVE_REPO=   # 例如 https://cnb.cool/<org>/<repo>${colors.reset}`)

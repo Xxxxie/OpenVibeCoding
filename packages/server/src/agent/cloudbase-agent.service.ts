@@ -485,18 +485,20 @@ export class CloudbaseAgentService {
     // which cannot be serialized by SDK 0.3.68's ProcessTransport.buildArgs.
     // Skip custom MCP tools for now - agent has built-in tools (Read/Write/Bash/etc.)
 
-    // ── 获取 OAuth Token ──────────────────────────────────────────────
-    const authToken = await getOAuthToken()
+    // ── 获取认证凭据（API Key 或 OAuth Token）───────────────────────
+    const envVars: Record<string, string> = {}
 
-    // ── 执行 query ─────────────────────────────────────────────────
-    const abortController = new AbortController()
-    let connectTimer: ReturnType<typeof setTimeout> | undefined
-    let iterationTimeoutTimer: ReturnType<typeof setTimeout> | undefined
-
-    // 用于在 canUseTool 中捕获被中断的写工具调用信息
-    const pendingToolInterrupt: {
-      value: { callId: string; toolName: string; input: unknown } | null
-    } = { value: null }
+    if (process.env.CODEBUDDY_API_KEY) {
+      // API Key 模式 - 直接使用密钥，无需 token 交换
+      envVars.CODEBUDDY_API_KEY = process.env.CODEBUDDY_API_KEY
+      if (process.env.CODEBUDDY_INTERNET_ENVIRONMENT) {
+        envVars.CODEBUDDY_INTERNET_ENVIRONMENT = process.env.CODEBUDDY_INTERNET_ENVIRONMENT
+      }
+    } else {
+      // OAuth 模式 - 通过 client_credentials 获取 token
+      const authToken = await getOAuthToken()
+      envVars.CODEBUDDY_AUTH_TOKEN = authToken
+    }
 
     try {
       const sessionOpts: Record<string, unknown> = hasHistory
@@ -504,9 +506,6 @@ export class CloudbaseAgentService {
         : { persistSession: true, sessionId: conversationId }
 
       // Build env vars for tool override
-      const envVars: Record<string, string> = {
-        CODEBUDDY_AUTH_TOKEN: authToken,
-      }
 
       if (toolOverrideConfig) {
         envVars.CODEBUDDY_TOOL_OVERRIDE = getToolOverridePath()
@@ -519,6 +518,16 @@ export class CloudbaseAgentService {
       if (sandboxMcpClient) {
         mcpServers.cloudbase = sandboxMcpClient.sdkServer
       }
+
+      // ── 执行 query ─────────────────────────────────────────────────
+      const abortController = new AbortController()
+      let connectTimer: ReturnType<typeof setTimeout> | undefined
+      let iterationTimeoutTimer: ReturnType<typeof setTimeout> | undefined
+
+      // 用于在 canUseTool 中捕获被中断的写工具调用信息
+      const pendingToolInterrupt: {
+        value: { callId: string; toolName: string; input: unknown } | null
+      } = { value: null }
 
       // 构建 query 参数 - 和 tcb-headless-service buildQueryOptions 一致
       // 注意: cwd 必须是本地路径, 即使沙箱启用. 沙箱只提供 MCP 工具, agent 进程在本地运行.
