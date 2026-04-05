@@ -546,7 +546,26 @@ function pushImage(image) {
 async function setupPermanentKey(config) {
   const env = loadEnvFile()
 
-  // 已有永久密钥（非临时，即没有 token）
+  // 优先使用 process.env 传入的凭证（由 init.mjs 通过环境变量传入）
+  const envId = process.env.TCB_SECRET_ID || ''
+  const envKey = process.env.TCB_SECRET_KEY || ''
+  const envToken = process.env.TCB_TOKEN || ''
+
+  if (envId && envKey) {
+    log('使用传入的凭证', 'success')
+    config.secretId = envId
+    config.secretKey = envKey
+    config.accountId = process.env.TENCENTCLOUD_ACCOUNT_ID || config.accountId
+    if (envToken) {
+      config.token = envToken
+      config.isTemporaryCredential = true
+    } else {
+      config.isTemporaryCredential = false
+    }
+    return true
+  }
+
+  // 其次检查 .env.local 中的永久密钥（非临时，即没有 token）
   const savedId = env['TCB_SECRET_ID'] || ''
   const savedKey = env['TCB_SECRET_KEY'] || ''
   const savedToken = env['TCB_TOKEN'] || ''
