@@ -746,25 +746,33 @@ async function setupTcr(config) {
   if (userExists) {
     log('TCR 个人版用户已存在', 'info')
 
+    if (password) {
+      // 有已保存的密码，询问是否使用
+      const useSaved = await askYesNo('检测到已保存的 TCR 密码，是否使用？', true)
+      if (!useSaved) {
+        password = ''
+      }
+    }
+
     if (!password) {
       console.log('')
-      console.log('  请输入 TCR 登录密码。')
-      console.log('  如忘记密码，可前往控制台重置：')
-      console.log('  https://console.cloud.tencent.com/tcr/instance?rid=1')
+      console.log('  1) 输入 TCR 密码')
+      console.log('  2) 忘记密码，前往控制台重置')
       console.log('')
 
-      password = await promptInput('请输入 TCR 密码', true)
+      const choice = await promptInput('请选择（1 或 2）')
 
-      if (!password) {
-        const resetNow = await askYesNo('是否前往控制台重置密码？', true)
-        if (resetNow) {
-          log('请在控制台重置密码后，重新运行此脚本', 'info')
-          log('  https://console.cloud.tencent.com/tcr/instance?rid=1', 'info')
-        }
+      if (choice === '2') {
+        log('请在控制台重置密码后，重新运行此脚本', 'info')
+        log('  https://console.cloud.tencent.com/tcr/instance?rid=1', 'info')
         return false
       }
-    } else {
-      log('使用已有的 TCR 密码', 'success')
+
+      password = await promptInput('请输入 TCR 密码', true)
+      if (!password) {
+        log('密码为必填项', 'error')
+        return false
+      }
     }
   } else {
     // 新用户：初始化个人仓库
