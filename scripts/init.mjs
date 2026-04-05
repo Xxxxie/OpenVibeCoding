@@ -509,6 +509,7 @@ async function setupTcr() {
         TCB_SECRET_ID: tcbConfig.secretId || process.env.TCB_SECRET_ID || '',
         TCB_SECRET_KEY: tcbConfig.secretKey || process.env.TCB_SECRET_KEY || '',
         TCB_TOKEN: tcbConfig.token || process.env.TCB_TOKEN || '',
+        TCB_ENV_ID: tcbConfig.envId || process.env.TCB_ENV_ID || '',
         TENCENTCLOUD_ACCOUNT_ID: process.env.TENCENTCLOUD_ACCOUNT_ID || '',
         TCR_PASSWORD: env['TCR_PASSWORD'] || '',
       },
@@ -739,7 +740,9 @@ async function main() {
 
   // Step 6: Setup TCR
   logSection('TCR 配置')
-  await setupTcr()
+  if (!(await setupTcr())) {
+    process.exit(1)
+  }
 
   // Step 6: Setup Server Environment
   if (!(await setupServerEnv())) {

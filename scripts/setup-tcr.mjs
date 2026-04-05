@@ -721,7 +721,7 @@ async function validateAndPrepareEnv(config) {
 }
 
 function generateSecrets() {
-  log('Generating secrets for local development...')
+  log('正在生成本地开发密钥...')
 
   const env = loadEnvFile()
 
@@ -730,7 +730,7 @@ function generateSecrets() {
     saveEnvVar('JWE_SECRET', jweSecret)
     log('Generated JWE_SECRET', 'success')
   } else {
-    log('JWE_SECRET already exists', 'warn')
+    log('JWE_SECRET 已存在', 'warn')
   }
 
   if (!env['ENCRYPTION_KEY']) {
@@ -738,7 +738,7 @@ function generateSecrets() {
     saveEnvVar('ENCRYPTION_KEY', encryptionKey)
     log('Generated ENCRYPTION_KEY', 'success')
   } else {
-    log('ENCRYPTION_KEY already exists', 'warn')
+    log('ENCRYPTION_KEY 已存在', 'warn')
   }
 }
 
@@ -904,7 +904,7 @@ async function selectTcbEnv(config) {
     return true
   }
 
-  log('Fetching CloudBase environment list...')
+  log('正在获取 CloudBase 环境列表...')
 
   let envList = []
   try {
@@ -928,7 +928,7 @@ async function selectTcbEnv(config) {
     console.log('')
     const envId = await promptInput('Or enter an existing TCB_ENV_ID manually')
     if (!envId) {
-      log('TCB_ENV_ID is required', 'error')
+      log('TCB_ENV_ID 为必填项', 'error')
       return false
     }
     saveEnvVar('TCB_ENV_ID', envId)
@@ -936,29 +936,26 @@ async function selectTcbEnv(config) {
     return true
   }
 
-  // Show numbered list
   console.log('')
-  console.log('Available CloudBase environments:')
+  console.log('可用的 CloudBase 环境：')
   envList.forEach((e, i) => {
     console.log(`  ${i + 1}) ${e.envId}`)
   })
-  console.log(`  c) Create a new environment`)
+  console.log(`  c) 创建新环境`)
   console.log('')
 
   while (true) {
-    const answer = await promptInput('Select environment (number or c)')
+    const answer = await promptInput('请选择环境（输入序号或 c）')
     if (!answer) continue
 
     if (answer.toLowerCase() === 'c') {
       console.log('')
-      console.log('Run the following command to create a new environment:')
-      console.log('  cloudbase env:create <envName>')
+      console.log('运行：cloudbase env:create <envName>')
+      console.log('然后重新运行此脚本，或在下方输入新的 envId。')
       console.log('')
-      console.log('After creation, re-run this script or enter the new envId below.')
-      console.log('')
-      const envId = await promptInput('Enter the new TCB_ENV_ID')
+      const envId = await promptInput('请输入新的 TCB_ENV_ID')
       if (!envId) {
-        log('TCB_ENV_ID is required', 'error')
+        log('TCB_ENV_ID 为必填项', 'error')
         return false
       }
       saveEnvVar('TCB_ENV_ID', envId)
@@ -969,7 +966,7 @@ async function selectTcbEnv(config) {
     const idx = parseInt(answer, 10) - 1
     if (idx >= 0 && idx < envList.length) {
       const envId = envList[idx].envId
-      log(`Selected: ${envId}`, 'success')
+      log(`已选择：${envId}`, 'success')
       saveEnvVar('TCB_ENV_ID', envId)
       config.tcbEnvId = envId
       return true
@@ -982,7 +979,7 @@ async function selectTcbEnv(config) {
 // ===================== Main =====================
 
 async function main() {
-  console.log('\n🔧 TCR Personal Edition Setup Script\n')
+  console.log('\n🔧 TCR 个人版配置脚本\n')
 
   // Parse command line arguments
   const args = process.argv.slice(2)
@@ -1149,7 +1146,7 @@ Examples:
   const success = await setupTcr(config)
 
   if (success) {
-    console.log('\n✅ Setup completed successfully!\n')
+    console.log('\n✅ 配置完成！\n')
     console.log('Your image is available at:')
     console.log(`  ${TCR_DOMAIN}/${config.namespace}/${config.repoName}:${config.tag}\n`)
     console.log('Environment variables have been saved to .env.local')
