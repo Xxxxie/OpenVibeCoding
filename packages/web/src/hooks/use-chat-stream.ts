@@ -476,7 +476,10 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
       // so that readSSEStream events can match the message
       setMessages((prev) =>
         prev.map((m) => {
-          if (m.role !== 'agent' || !m.parts?.some((p) => p.type === 'tool_call' && p.toolCallId === askData.toolCallId))
+          if (
+            m.role !== 'agent' ||
+            !m.parts?.some((p) => p.type === 'tool_call' && p.toolCallId === askData.toolCallId)
+          )
             return m
           if (m.id === askData.assistantMessageId) return m
           return { ...m, id: askData.assistantMessageId }

@@ -7,6 +7,13 @@ import { HomePage } from './pages/HomePage'
 import { TaskPage } from './pages/TaskPage'
 import { TasksListPage } from './pages/TasksListPage'
 import { LoginPage } from './pages/LoginPage'
+import { RequireAdmin } from './components/require-admin'
+import { AdminLayout } from './components/admin/admin-layout'
+import { AdminUsersPage } from './pages/admin/users-page'
+import { AdminEnvironmentsPage } from './pages/admin/environments-page'
+import { AdminTasksPage } from './pages/admin/tasks-page'
+import { AdminLogsPage } from './pages/admin/logs-page'
+import { AdminEnvDashboardPage } from './pages/admin/env-dashboard-page'
 import { sessionAtom, sessionLoadedAtom } from './lib/atoms/session'
 import { api } from './lib/api'
 import { Loader2 } from 'lucide-react'
@@ -46,9 +53,10 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     console.log('[AuthProvider] Checking session...')
     api
-      .get<{ user: { id: string; username: string; name?: string; email?: string; avatar?: string }; envId?: string }>(
-        '/api/auth/me',
-      )
+      .get<{
+        user: { id: string; username: string; name?: string; email?: string; avatar?: string; role: 'user' | 'admin' }
+        envId?: string
+      }>('/api/auth/me')
       .then((data) => {
         console.log('[AuthProvider] Session data:', data)
         setSession({ user: data.user, envId: data.envId })
@@ -125,6 +133,25 @@ function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<LoginRoute />} />
+
+          {/* Admin routes */}
+          <Route
+            path="/admin/*"
+            element={
+              <RequireAdmin>
+                <AdminLayout />
+              </RequireAdmin>
+            }
+          >
+            <Route index element={<Navigate to="/admin/users" replace />} />
+            <Route path="users" element={<AdminUsersPage />} />
+            <Route path="environments" element={<AdminEnvironmentsPage />} />
+            <Route path="tasks" element={<AdminTasksPage />} />
+            <Route path="logs" element={<AdminLogsPage />} />
+            <Route path="dashboard/:userId" element={<AdminEnvDashboardPage />} />
+          </Route>
+
+          {/* Regular routes */}
           <Route
             path="/tasks"
             element={

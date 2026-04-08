@@ -293,12 +293,6 @@ export function TaskForm({
       return
     }
 
-    // Validate that multi-agent mode has at least one model selected
-    if (selectedAgent === 'multi-agent' && selectedModels.length === 0) {
-      toast.error('Please select at least one model for multi-agent mode')
-      return
-    }
-
     // If owner/repo not selected, let parent handle it (will show sign-in if needed)
     // Don't clear localStorage here - user might need to sign in and come back
     if (!selectedOwner || !selectedRepo) {
@@ -308,7 +302,6 @@ export function TaskForm({
         repoUrl: '',
         selectedAgent,
         selectedModel,
-        selectedModels: selectedAgent === 'multi-agent' ? selectedModels : undefined,
         installDependencies,
         maxDuration,
         keepAlive,
@@ -318,10 +311,10 @@ export function TaskForm({
     }
 
     // Check if API key is required and available for the selected agent and model
-    // Skip this check if we don't have repo data (likely not signed in) or if multi-agent mode
+    // Skip this check if we don't have repo data (likely not signed in)
     const selectedRepoData = repos?.find((repo) => repo.name === selectedRepo)
 
-    if (selectedRepoData && selectedAgent !== 'multi-agent') {
+    if (selectedRepoData) {
       try {
         console.log('[TaskForm] checking API key for agent:', selectedAgent, 'model:', selectedModel)
         const response = await fetch(`/api/api-keys/check?agent=${selectedAgent}&model=${selectedModel}`)
@@ -356,7 +349,6 @@ export function TaskForm({
       repoUrl: selectedRepoData?.clone_url || '',
       selectedAgent,
       selectedModel,
-      selectedModels: selectedAgent === 'multi-agent' ? selectedModels : undefined,
       installDependencies,
       maxDuration,
       keepAlive,
@@ -657,14 +649,6 @@ export function TaskForm({
             </div>
           </div>
         </div>
-
-        {/* Multi-Agent Info */}
-        {selectedAgent === 'multi-agent' && selectedModels.length > 0 && (
-          <div className="mt-2 text-xs text-muted-foreground text-center">
-            This will create {selectedModels.length} separate task{selectedModels.length > 1 ? 's' : ''} (one for each
-            selected model)
-          </div>
-        )}
       </form>
 
       <ConnectorDialog open={showMcpServersDialog} onOpenChange={setShowMcpServersDialog} />

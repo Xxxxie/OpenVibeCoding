@@ -190,6 +190,11 @@ auth.post('/login', async (c) => {
       return c.json({ error: 'Invalid username or password' }, 401)
     }
 
+    // Check if user is disabled
+    if (user.status === 'disabled') {
+      return c.json({ error: 'Account has been disabled' }, 403)
+    }
+
     // Update last login
     await getDb().users.update(user.id, { lastLoginAt: Date.now(), updatedAt: Date.now() })
 
@@ -236,7 +241,16 @@ auth.get('/me', async (c) => {
     return c.json({ user: undefined })
   }
 
-  // 查询用户的 envId
+  // Get user role and check status
+  const user = await getDb().users.findById(session.user.id)
+
+  // If user is disabled, clear session and return no user
+  if (user?.status === 'disabled') {
+    deleteCookie(c, SESSION_COOKIE_NAME, { path: '/' })
+    return c.json({ user: undefined })
+  }
+
+  // Get user's envId
   let envId: string | undefined
   try {
     const resource = await getDb().userResources.findByUserId(session.user.id)
@@ -245,7 +259,14 @@ auth.get('/me', async (c) => {
     // ignore
   }
 
-  return c.json({ user: session.user, authProvider: session.authProvider, envId })
+  return c.json({
+    user: {
+      ...session.user,
+      role: user?.role || 'user',
+    },
+    authProvider: session.authProvider,
+    envId,
+  })
 })
 
 // 查询当前用户的 CloudBase 环境状态

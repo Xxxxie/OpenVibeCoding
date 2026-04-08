@@ -40,6 +40,8 @@ export interface SandboxMcpDeps {
   log?: (msg: string) => void
   /** uploadFiles 工具成功返回时的回调，用于触发 deploy_url 事件 */
   onDeployUrl?: (url: string) => void
+  /** 根据 appId 查询小程序部署凭证 */
+  getMpDeployCredentials?: (appId: string) => Promise<{ appId: string; privateKey: string } | null>
 }
 
 // ─── Auth Error ──────────────────────────────────────────────────
@@ -142,6 +144,7 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
     workspaceFolderPaths = '',
     log = (msg: string) => console.log(msg),
     onDeployUrl,
+    getMpDeployCredentials,
   } = deps
 
   // ── HTTP helpers ────────────────────────────────────────────────
@@ -383,6 +386,169 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
     }))
   }
 
+  // ── auth tool: re-inject credentials on demand ────────────────
+  server.tool(
+    'auth',
+    'Re-authenticate and inject fresh CloudBase credentials. Call with action "start_auth" when credentials expire.',
+    { action: z.enum(['start_auth']).describe('Authentication action') },
+    async () => {
+      try {
+        await injectCredentials()
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, message: 'Credentials refreshed' }) }],
+        }
+      } catch (e: any) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, message: e.message }) }],
+          isError: true,
+        }
+      }
+    },
+  )
+
+  // ── publishMiniprogram tool ───────────────────────────────────
+  server.tool(
+    'publishMiniprogram',
+    '小程序发布/预览工具。支持预览（preview）和上传（upload）两种操作。预览会生成二维码供扫码体验，上传会将代码提交到微信后台。部署可能耗时较长，若超过 60s 未完成会返回 async=true 和 jobId，请使用 getDeployJobStatus 工具查询结果。',
+    {
+      action: z.enum(['preview', 'upload']).describe('操作类型：preview=预览, upload=上传'),
+      projectPath: z.string().describe('小程序项目路径（沙箱内的绝对路径）'),
+      appId: z.string().describe('微信小程序 AppId'),
+      version: z.string().optional().describe('版本号（upload 时建议提供，如 "1.0.0"）'),
+      description: z.string().optional().describe('版本描述'),
+      robot: z.number().optional().describe('CI 机器人编号（1-30），默认 1'),
+    },
+    async (args: Record<string, unknown>) => {
+      try {
+        let privateKey: string | undefined
+        const appId = args.appId as string
+
+        if (getMpDeployCredentials) {
+          const creds = await getMpDeployCredentials(appId)
+          if (creds) {
+            privateKey = creds.privateKey
+          }
+        }
+
+        if (!privateKey) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  error: true,
+                  message: `未找到 appId ${appId} 的部署密钥，请先在小程序管理中关联该 appId`,
+                }),
+              },
+            ],
+            isError: true,
+          }
+        }
+
+        const headers = await buildHeaders()
+        const res = await fetch(`${baseUrl}/api/miniprogram/deploy`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            appid: appId,
+            privateKey,
+            action: args.action,
+            projectPath: args.projectPath,
+            version: args.version,
+            description: args.description,
+            robot: args.robot,
+          }),
+          signal: AbortSignal.timeout(120_000),
+        })
+
+        const body = (await res.json().catch(() => null)) as any
+
+        if (!res.ok || !body) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  error: true,
+                  status: res.status,
+                  message: body?.error || body?.message || `HTTP ${res.status}`,
+                }),
+              },
+            ],
+            isError: true,
+          }
+        }
+
+        if (body.async) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  async: true,
+                  jobId: body.jobId,
+                  message: '部署仍在进行中，请稍后使用 getDeployJobStatus 工具查询结果',
+                }),
+              },
+            ],
+          }
+        }
+
+        if (!body.success) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  error: true,
+                  message: body.error || body.result?.errMsg || 'Deploy failed',
+                  result: body.result,
+                }),
+              },
+            ],
+            isError: true,
+          }
+        }
+
+        return { content: [{ type: 'text' as const, text: JSON.stringify(body) }] }
+      } catch (e: any) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ error: true, message: e.message }) }],
+          isError: true,
+        }
+      }
+    },
+  )
+
+  // ── getDeployJobStatus tool ───────────────────────────────────
+  server.tool(
+    'getDeployJobStatus',
+    '查询小程序发布/预览任务的状态。当 publishMiniprogram 返回 async=true 时使用此工具轮询结果。',
+    { jobId: z.string().describe('publishMiniprogram 返回的 jobId') },
+    async (args: Record<string, unknown>) => {
+      try {
+        const headers = await buildHeaders()
+        const res = await fetch(
+          `${baseUrl}/api/miniprogram/deploy/status?jobId=${encodeURIComponent(args.jobId as string)}`,
+          {
+            method: 'GET',
+            headers,
+            signal: AbortSignal.timeout(30_000),
+          },
+        )
+        const body = (await res.json().catch(() => null)) as any
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(body ?? { error: true, status: res.status }) }],
+        }
+      } catch (e: any) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ error: true, message: e.message }) }],
+          isError: true,
+        }
+      }
+    },
+  )
+
   // ── Wire InMemoryTransport pair ───────────────────────────────
 
   const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair()
@@ -429,6 +595,117 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
         },
       )
     })
+
+  // SDK-wrapped auth tool
+  sdkTools.push(
+    sdkTool(
+      'auth',
+      'Re-authenticate and inject fresh CloudBase credentials. Call with action "start_auth" when credentials expire.',
+      { action: z.enum(['start_auth']).describe('Authentication action') },
+      async () => {
+        try {
+          await injectCredentials()
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: true }) }] }
+        } catch (e: any) {
+          return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }
+        }
+      },
+    ),
+  )
+
+  // SDK-wrapped publishMiniprogram tool
+  sdkTools.push(
+    sdkTool(
+      'publishMiniprogram',
+      '小程序发布/预览工具。支持预览（preview）和上传（upload）两种操作。',
+      {
+        action: z.enum(['preview', 'upload']).describe('操作类型'),
+        projectPath: z.string().describe('小程序项目路径'),
+        appId: z.string().describe('微信小程序 AppId'),
+        version: z.string().optional().describe('版本号'),
+        description: z.string().optional().describe('版本描述'),
+        robot: z.number().optional().describe('CI 机器人编号'),
+      },
+      async (args: Record<string, unknown>) => {
+        try {
+          let privateKey: string | undefined
+          const appId = args.appId as string
+
+          if (getMpDeployCredentials) {
+            const creds = await getMpDeployCredentials(appId)
+            if (creds) privateKey = creds.privateKey
+          }
+
+          if (!privateKey) {
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: JSON.stringify({ error: true, message: `未找到 appId ${appId} 的部署密钥` }),
+                },
+              ],
+              isError: true,
+            }
+          }
+
+          const headers = await buildHeaders()
+          const res = await fetch(`${baseUrl}/api/miniprogram/deploy`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              appid: appId,
+              privateKey,
+              action: args.action,
+              projectPath: args.projectPath,
+              version: args.version,
+              description: args.description,
+              robot: args.robot,
+            }),
+            signal: AbortSignal.timeout(120_000),
+          })
+
+          const body = (await res.json().catch(() => null)) as any
+          if (!res.ok || !body) {
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify({ error: true, status: res.status }) }],
+              isError: true,
+            }
+          }
+          return { content: [{ type: 'text' as const, text: JSON.stringify(body) }] }
+        } catch (e: any) {
+          return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }
+        }
+      },
+    ),
+  )
+
+  // SDK-wrapped getDeployJobStatus tool
+  sdkTools.push(
+    sdkTool(
+      'getDeployJobStatus',
+      '查询小程序发布/预览任务的状态。',
+      { jobId: z.string().describe('publishMiniprogram 返回的 jobId') },
+      async (args: Record<string, unknown>) => {
+        try {
+          const headers = await buildHeaders()
+          const res = await fetch(
+            `${baseUrl}/api/miniprogram/deploy/status?jobId=${encodeURIComponent(args.jobId as string)}`,
+            {
+              method: 'GET',
+              headers,
+              signal: AbortSignal.timeout(30_000),
+            },
+          )
+          const body = (await res.json().catch(() => null)) as any
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify(body ?? { error: true, status: res.status }) }],
+          }
+        } catch (e: any) {
+          return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }
+        }
+      },
+    ),
+  )
 
   const sdkServer = createSdkMcpServer({
     name: 'cloudbase',

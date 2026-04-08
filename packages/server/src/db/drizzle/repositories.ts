@@ -6,11 +6,13 @@ import {
   localCredentials,
   tasks,
   connectors,
+  miniprogramApps,
   accounts,
   keys,
   userResources,
   settings,
   deployments,
+  adminLogs,
 } from '../schema'
 import type {
   User,
@@ -21,6 +23,8 @@ import type {
   NewTask,
   Connector,
   NewConnector,
+  MiniProgramApp,
+  NewMiniProgramApp,
   Account,
   NewAccount,
   Key,
@@ -31,15 +35,19 @@ import type {
   NewSetting,
   Deployment,
   NewDeployment,
+  AdminLog,
+  NewAdminLog,
   UserRepository,
   LocalCredentialRepository,
   TaskRepository,
   ConnectorRepository,
+  MiniProgramAppRepository,
   AccountRepository,
   KeyRepository,
   UserResourceRepository,
   SettingRepository,
   DeploymentRepository,
+  AdminLogRepository,
   DatabaseProvider,
 } from '../types'
 
@@ -85,6 +93,50 @@ class DrizzleUserRepository implements UserRepository {
   async deleteById(id: string): Promise<void> {
     await drizzleDb.delete(users).where(eq(users.id, id))
   }
+
+  // Admin methods
+  async findAll(limit = 20, offset = 0): Promise<User[]> {
+    const rows = await drizzleDb.select().from(users).limit(limit).offset(offset).orderBy(desc(users.createdAt))
+    return rows as User[]
+  }
+
+  async count(): Promise<number> {
+    const [result] = await drizzleDb.select({ count: users.id }).from(users)
+    return result ? 1 : 0 // Simplified count
+  }
+
+  async updateRole(id: string, role: 'user' | 'admin'): Promise<User | null> {
+    await drizzleDb.update(users).set({ role, updatedAt: now() }).where(eq(users.id, id))
+    return this.findById(id)
+  }
+
+  async disable(id: string, reason: string, adminUserId: string): Promise<User | null> {
+    await drizzleDb
+      .update(users)
+      .set({
+        status: 'disabled',
+        disabledReason: reason,
+        disabledAt: now(),
+        disabledBy: adminUserId,
+        updatedAt: now(),
+      })
+      .where(eq(users.id, id))
+    return this.findById(id)
+  }
+
+  async enable(id: string): Promise<User | null> {
+    await drizzleDb
+      .update(users)
+      .set({
+        status: 'active',
+        disabledReason: null,
+        disabledAt: null,
+        disabledBy: null,
+        updatedAt: now(),
+      })
+      .where(eq(users.id, id))
+    return this.findById(id)
+  }
 }
 
 // ─── LocalCredential Repository ─────────────────────────────────────────────
@@ -104,6 +156,14 @@ class DrizzleLocalCredentialRepository implements LocalCredentialRepository {
     }
     await drizzleDb.insert(localCredentials).values(values)
     return values as LocalCredential
+  }
+
+  async update(userId: string, data: Partial<Omit<LocalCredential, 'userId'>>): Promise<LocalCredential | null> {
+    await drizzleDb
+      .update(localCredentials)
+      .set({ ...data, updatedAt: data.updatedAt ?? now() })
+      .where(eq(localCredentials.userId, userId))
+    return this.findByUserId(userId)
   }
 }
 
@@ -220,6 +280,64 @@ class DrizzleConnectorRepository implements ConnectorRepository {
 
   async delete(id: string, userId: string): Promise<void> {
     await drizzleDb.delete(connectors).where(and(eq(connectors.id, id), eq(connectors.userId, userId)))
+  }
+}
+
+// ─── MiniProgramApp Repository ──────────────────────────────────────────────
+
+class DrizzleMiniProgramAppRepository implements MiniProgramAppRepository {
+  async findByUserId(userId: string): Promise<MiniProgramApp[]> {
+    const rows = await drizzleDb.select().from(miniprogramApps).where(eq(miniprogramApps.userId, userId))
+    return rows as MiniProgramApp[]
+  }
+
+  async findByIdAndUserId(id: string, userId: string): Promise<MiniProgramApp | null> {
+    const [row] = await drizzleDb
+      .select()
+      .from(miniprogramApps)
+      .where(and(eq(miniprogramApps.id, id), eq(miniprogramApps.userId, userId)))
+      .limit(1)
+    return (row as MiniProgramApp) ?? null
+  }
+
+  async findByAppIdAndUserId(appId: string, userId: string): Promise<MiniProgramApp | null> {
+    const [row] = await drizzleDb
+      .select()
+      .from(miniprogramApps)
+      .where(and(eq(miniprogramApps.appId, appId), eq(miniprogramApps.userId, userId)))
+      .limit(1)
+    return (row as MiniProgramApp) ?? null
+  }
+
+  async create(app: NewMiniProgramApp): Promise<MiniProgramApp> {
+    const ts = now()
+    const values = {
+      ...app,
+      createdAt: app.createdAt ?? ts,
+      updatedAt: app.updatedAt ?? ts,
+    }
+    await drizzleDb.insert(miniprogramApps).values(values)
+    return values as MiniProgramApp
+  }
+
+  async update(
+    id: string,
+    userId: string,
+    data: Partial<Omit<MiniProgramApp, 'id' | 'userId'>>,
+  ): Promise<MiniProgramApp | null> {
+    await drizzleDb
+      .update(miniprogramApps)
+      .set({ ...data, updatedAt: data.updatedAt ?? now() })
+      .where(and(eq(miniprogramApps.id, id), eq(miniprogramApps.userId, userId)))
+    return this.findByIdAndUserId(id, userId)
+  }
+
+  async updateUserId(fromUserId: string, toUserId: string): Promise<void> {
+    await drizzleDb.update(miniprogramApps).set({ userId: toUserId }).where(eq(miniprogramApps.userId, fromUserId))
+  }
+
+  async delete(id: string, userId: string): Promise<void> {
+    await drizzleDb.delete(miniprogramApps).where(and(eq(miniprogramApps.id, id), eq(miniprogramApps.userId, userId)))
   }
 }
 
@@ -447,6 +565,45 @@ class DrizzleDeploymentRepository implements DeploymentRepository {
   }
 }
 
+// ─── AdminLog Repository ───────────────────────────────────────────────────────
+
+class DrizzleAdminLogRepository implements AdminLogRepository {
+  async create(log: NewAdminLog): Promise<AdminLog> {
+    const ts = now()
+    const values = {
+      ...log,
+      createdAt: log.createdAt ?? ts,
+    }
+    await drizzleDb.insert(adminLogs).values(values)
+    return values as AdminLog
+  }
+
+  async findByAdminUserId(adminUserId: string, limit = 50): Promise<AdminLog[]> {
+    const rows = await drizzleDb
+      .select()
+      .from(adminLogs)
+      .where(eq(adminLogs.adminUserId, adminUserId))
+      .limit(limit)
+      .orderBy(desc(adminLogs.createdAt))
+    return rows as AdminLog[]
+  }
+
+  async findByTargetUserId(targetUserId: string, limit = 50): Promise<AdminLog[]> {
+    const rows = await drizzleDb
+      .select()
+      .from(adminLogs)
+      .where(eq(adminLogs.targetUserId, targetUserId))
+      .limit(limit)
+      .orderBy(desc(adminLogs.createdAt))
+    return rows as AdminLog[]
+  }
+
+  async findAll(limit = 50, offset = 0): Promise<AdminLog[]> {
+    const rows = await drizzleDb.select().from(adminLogs).limit(limit).offset(offset).orderBy(desc(adminLogs.createdAt))
+    return rows as AdminLog[]
+  }
+}
+
 // ─── Provider Factory ───────────────────────────────────────────────────────
 
 export function createDrizzleProvider(): DatabaseProvider {
@@ -455,10 +612,12 @@ export function createDrizzleProvider(): DatabaseProvider {
     localCredentials: new DrizzleLocalCredentialRepository(),
     tasks: new DrizzleTaskRepository(),
     connectors: new DrizzleConnectorRepository(),
+    miniprogramApps: new DrizzleMiniProgramAppRepository(),
     accounts: new DrizzleAccountRepository(),
     keys: new DrizzleKeyRepository(),
     userResources: new DrizzleUserResourceRepository(),
     settings: new DrizzleSettingRepository(),
     deployments: new DrizzleDeploymentRepository(),
+    adminLogs: new DrizzleAdminLogRepository(),
   }
 }

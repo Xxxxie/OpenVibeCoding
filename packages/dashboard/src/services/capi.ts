@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-const API_BASE = import.meta.env.VITE_API_BASE || '/api'
+import { getApiBase } from './config'
 
 interface CapiRequest {
   service: string
@@ -13,7 +13,7 @@ interface CapiRequest {
 class CapiClient {
   private base: string
 
-  constructor(base = API_BASE) {
+  constructor(base = getApiBase()) {
     this.base = base
   }
 

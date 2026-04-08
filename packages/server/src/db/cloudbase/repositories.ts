@@ -9,6 +9,8 @@ import type {
   NewTask,
   Connector,
   NewConnector,
+  MiniProgramApp,
+  NewMiniProgramApp,
   Account,
   NewAccount,
   Key,
@@ -19,15 +21,19 @@ import type {
   NewSetting,
   Deployment,
   NewDeployment,
+  AdminLog,
+  NewAdminLog,
   UserRepository,
   LocalCredentialRepository,
   TaskRepository,
   ConnectorRepository,
+  MiniProgramAppRepository,
   AccountRepository,
   KeyRepository,
   UserResourceRepository,
   SettingRepository,
   DeploymentRepository,
+  AdminLogRepository,
   DatabaseProvider,
 } from '../types'
 
@@ -90,6 +96,52 @@ class CloudBaseUserRepository implements UserRepository {
     const collection = await getCollection('users')
     await collection.where({ id: _.eq(id) }).remove()
   }
+
+  // Admin methods
+  async findAll(limit = 20, offset = 0): Promise<User[]> {
+    const collection = await getCollection('users')
+    const { data } = await collection.limit(limit).skip(offset).get()
+    return data.map((doc) => stripCloudBaseId<User>(doc as Record<string, unknown>))
+  }
+
+  async count(): Promise<number> {
+    const collection = await getCollection('users')
+    const { total } = await collection.count()
+    return total
+  }
+
+  async updateRole(id: string, role: 'user' | 'admin'): Promise<User | null> {
+    const _ = getCommand()
+    const collection = await getCollection('users')
+    await collection.where({ id: _.eq(id) }).update({ role, updatedAt: now() })
+    return this.findById(id)
+  }
+
+  async disable(id: string, reason: string, adminUserId: string): Promise<User | null> {
+    const _ = getCommand()
+    const collection = await getCollection('users')
+    await collection.where({ id: _.eq(id) }).update({
+      status: 'disabled',
+      disabledReason: reason,
+      disabledAt: now(),
+      disabledBy: adminUserId,
+      updatedAt: now(),
+    })
+    return this.findById(id)
+  }
+
+  async enable(id: string): Promise<User | null> {
+    const _ = getCommand()
+    const collection = await getCollection('users')
+    await collection.where({ id: _.eq(id) }).update({
+      status: 'active',
+      disabledReason: null,
+      disabledAt: null,
+      disabledBy: null,
+      updatedAt: now(),
+    })
+    return this.findById(id)
+  }
 }
 
 // ─── LocalCredential Repository ─────────────────────────────────────────────
@@ -116,6 +168,13 @@ class CloudBaseLocalCredentialRepository implements LocalCredentialRepository {
     }
     await collection.add(doc)
     return doc
+  }
+
+  async update(userId: string, data: Partial<Omit<LocalCredential, 'userId'>>): Promise<LocalCredential | null> {
+    const _ = getCommand()
+    const collection = await getCollection('local_credentials')
+    await collection.where({ userId: _.eq(userId) }).update({ ...data, updatedAt: data.updatedAt ?? now() })
+    return this.findByUserId(userId)
   }
 }
 
@@ -253,6 +312,79 @@ class CloudBaseConnectorRepository implements ConnectorRepository {
   async delete(id: string, userId: string): Promise<void> {
     const _ = getCommand()
     const collection = await getCollection('connectors')
+    await collection.where({ id: _.eq(id), userId: _.eq(userId) }).remove()
+  }
+}
+
+// ─── MiniProgramApp Repository ──────────────────────────────────────────────
+
+class CloudBaseMiniProgramAppRepository implements MiniProgramAppRepository {
+  async findByUserId(userId: string): Promise<MiniProgramApp[]> {
+    const _ = getCommand()
+    const collection = await getCollection('miniprogram_apps')
+    const { data } = await collection
+      .where({ userId: _.eq(userId) })
+      .limit(1000)
+      .get()
+    return (data as Record<string, unknown>[]).map((doc) => stripCloudBaseId<MiniProgramApp>(doc))
+  }
+
+  async findByIdAndUserId(id: string, userId: string): Promise<MiniProgramApp | null> {
+    const _ = getCommand()
+    const collection = await getCollection('miniprogram_apps')
+    const { data } = await collection
+      .where({ id: _.eq(id), userId: _.eq(userId) })
+      .limit(1)
+      .get()
+    if (!data || data.length === 0) return null
+    return stripCloudBaseId<MiniProgramApp>(data[0] as Record<string, unknown>)
+  }
+
+  async findByAppIdAndUserId(appId: string, userId: string): Promise<MiniProgramApp | null> {
+    const _ = getCommand()
+    const collection = await getCollection('miniprogram_apps')
+    const { data } = await collection
+      .where({ appId: _.eq(appId), userId: _.eq(userId) })
+      .limit(1)
+      .get()
+    if (!data || data.length === 0) return null
+    return stripCloudBaseId<MiniProgramApp>(data[0] as Record<string, unknown>)
+  }
+
+  async create(app: NewMiniProgramApp): Promise<MiniProgramApp> {
+    const collection = await getCollection('miniprogram_apps')
+    const ts = now()
+    const doc: MiniProgramApp = {
+      ...app,
+      createdAt: app.createdAt ?? ts,
+      updatedAt: app.updatedAt ?? ts,
+    }
+    await collection.add(doc)
+    return doc
+  }
+
+  async update(
+    id: string,
+    userId: string,
+    data: Partial<Omit<MiniProgramApp, 'id' | 'userId'>>,
+  ): Promise<MiniProgramApp | null> {
+    const _ = getCommand()
+    const collection = await getCollection('miniprogram_apps')
+    await collection
+      .where({ id: _.eq(id), userId: _.eq(userId) })
+      .update({ ...data, updatedAt: data.updatedAt ?? now() })
+    return this.findByIdAndUserId(id, userId)
+  }
+
+  async updateUserId(fromUserId: string, toUserId: string): Promise<void> {
+    const _ = getCommand()
+    const collection = await getCollection('miniprogram_apps')
+    await collection.where({ userId: _.eq(fromUserId) }).update({ userId: toUserId })
+  }
+
+  async delete(id: string, userId: string): Promise<void> {
+    const _ = getCommand()
+    const collection = await getCollection('miniprogram_apps')
     await collection.where({ id: _.eq(id), userId: _.eq(userId) }).remove()
   }
 }
@@ -540,6 +672,47 @@ class CloudBaseDeploymentRepository implements DeploymentRepository {
   }
 }
 
+// ─── AdminLog Repository ───────────────────────────────────────────────────────
+
+class CloudBaseAdminLogRepository implements AdminLogRepository {
+  async create(log: NewAdminLog): Promise<AdminLog> {
+    const collection = await getCollection('admin_logs')
+    const ts = now()
+    const doc: AdminLog = {
+      ...log,
+      createdAt: log.createdAt ?? ts,
+    }
+    await collection.add(doc)
+    return doc
+  }
+
+  async findByAdminUserId(adminUserId: string, limit = 50): Promise<AdminLog[]> {
+    const _ = getCommand()
+    const collection = await getCollection('admin_logs')
+    const { data } = await collection
+      .where({ adminUserId: _.eq(adminUserId) })
+      .limit(limit)
+      .get()
+    return data.map((doc) => stripCloudBaseId<AdminLog>(doc as Record<string, unknown>))
+  }
+
+  async findByTargetUserId(targetUserId: string, limit = 50): Promise<AdminLog[]> {
+    const _ = getCommand()
+    const collection = await getCollection('admin_logs')
+    const { data } = await collection
+      .where({ targetUserId: _.eq(targetUserId) })
+      .limit(limit)
+      .get()
+    return data.map((doc) => stripCloudBaseId<AdminLog>(doc as Record<string, unknown>))
+  }
+
+  async findAll(limit = 50, offset = 0): Promise<AdminLog[]> {
+    const collection = await getCollection('admin_logs')
+    const { data } = await collection.limit(limit).skip(offset).get()
+    return data.map((doc) => stripCloudBaseId<AdminLog>(doc as Record<string, unknown>))
+  }
+}
+
 // ─── Provider Factory ───────────────────────────────────────────────────────
 
 export function createCloudBaseProvider(): DatabaseProvider {
@@ -548,10 +721,12 @@ export function createCloudBaseProvider(): DatabaseProvider {
     localCredentials: new CloudBaseLocalCredentialRepository(),
     tasks: new CloudBaseTaskRepository(),
     connectors: new CloudBaseConnectorRepository(),
+    miniprogramApps: new CloudBaseMiniProgramAppRepository(),
     accounts: new CloudBaseAccountRepository(),
     keys: new CloudBaseKeyRepository(),
     userResources: new CloudBaseUserResourceRepository(),
     settings: new CloudBaseSettingRepository(),
     deployments: new CloudBaseDeploymentRepository(),
+    adminLogs: new CloudBaseAdminLogRepository(),
   }
 }

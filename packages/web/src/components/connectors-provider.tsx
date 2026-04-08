@@ -1,20 +1,31 @@
 // Stub: Connectors provider
 import { createContext, useContext } from 'react'
-
-interface Connector {
-  id: string
-  name: string
-  status: string
-}
+import type { Connector } from '@/lib/session/types'
 
 interface ConnectorsContextType {
   connectors: Connector[]
+  refreshConnectors: () => Promise<void>
+  isLoading: boolean
 }
 
-const ConnectorsContext = createContext<ConnectorsContextType>({ connectors: [] })
+const ConnectorsContext = createContext<ConnectorsContextType>({
+  connectors: [],
+  refreshConnectors: async () => {},
+  isLoading: false,
+})
 
 export function ConnectorsProvider({ children }: { children: React.ReactNode }) {
-  return <ConnectorsContext.Provider value={{ connectors: [] }}>{children}</ConnectorsContext.Provider>
+  return (
+    <ConnectorsContext.Provider
+      value={{
+        connectors: [],
+        refreshConnectors: async () => {},
+        isLoading: false,
+      }}
+    >
+      {children}
+    </ConnectorsContext.Provider>
+  )
 }
 
 export function useConnectors() {

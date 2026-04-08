@@ -97,6 +97,3 @@ export type {
   ToolCallStatusUpdate,
   AvailableCommandsUpdate,
 }
-
-// Re-export extended update types
-export type { AskUserUpdate, ToolConfirmUpdate, DeployUrlUpdate, ArtifactUpdate }

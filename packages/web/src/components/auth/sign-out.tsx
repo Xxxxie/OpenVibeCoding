@@ -8,7 +8,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { toast } from 'sonner'
-import { useNavigate } from 'react-router'
+import { useNavigate, Link } from 'react-router'
 import { useSetAtom, useAtomValue } from 'jotai'
 import { sessionAtom } from '@/lib/atoms/session'
 import { githubConnectionAtom } from '@/lib/atoms/github'
@@ -16,7 +16,7 @@ import { GitHubIcon } from '@/components/icons/github-icon'
 import { ApiKeysDialog } from '@/components/api-keys-dialog'
 import { SandboxesDialog } from '@/components/sandboxes-dialog'
 import { ThemeToggle } from '@/components/theme-toggle'
-import { Key, Server } from 'lucide-react'
+import { Key, Server, Settings } from 'lucide-react'
 import { useState, useEffect, useCallback } from 'react'
 import { getEnabledAuthProviders } from '@/lib/auth/providers'
 
@@ -116,6 +116,16 @@ export function SignOut({ user, authProvider }: Pick<Session, 'user' | 'authProv
         <DropdownMenuSeparator />
 
         <ThemeToggle />
+
+        {/* Admin link */}
+        {user.role === 'admin' && (
+          <DropdownMenuItem asChild className="cursor-pointer">
+            <Link to="/admin">
+              <Settings className="h-4 w-4 mr-2" />
+              管理后台
+            </Link>
+          </DropdownMenuItem>
+        )}
 
         {/* <DropdownMenuItem onClick={() => setShowApiKeysDialog(true)} className="cursor-pointer">
           <Key className="h-4 w-4 mr-2" />

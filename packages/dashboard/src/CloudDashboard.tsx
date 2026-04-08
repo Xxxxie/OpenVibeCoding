@@ -16,6 +16,7 @@ import { DatabaseMenu } from './components/navigation/DatabaseMenu'
 import { StorageMenu } from './components/navigation/StorageMenu'
 import { cn } from './utils/helpers'
 import { envIdAtom } from './atoms/env'
+import { setApiBase } from './services/config'
 import type { Theme } from './hooks/useTheme'
 export type { Theme }
 
@@ -176,25 +177,33 @@ function CloudShell({ defaultPage, theme = 'dark' }: { defaultPage?: CloudPage; 
 interface CloudDashboardProps {
   defaultPage?: CloudPage
   envId?: string
+  apiBase?: string
   theme?: Theme
   className?: string
   style?: React.CSSProperties
 }
 
+function ApiBaseSetter({ apiBase }: { apiBase?: string }) {
+  useEffect(() => {
+    setApiBase(apiBase || '/api')
+  }, [apiBase])
+  return null
+}
+
 function EnvIdSetter({ envId }: { envId?: string }) {
   const setEnvId = useSetAtom(envIdAtom)
   useEffect(() => {
-    console.log('[Dashboard] EnvIdSetter envId:', envId)
     if (envId) setEnvId(envId)
   }, [envId, setEnvId])
   return null
 }
 
-export function CloudDashboard({ defaultPage, envId, theme, className = '', style }: CloudDashboardProps) {
+export function CloudDashboard({ defaultPage, envId, apiBase, theme, className = '', style }: CloudDashboardProps) {
   const resolvedTheme = theme ?? 'dark'
 
   return (
     <JotaiProvider>
+      <ApiBaseSetter apiBase={apiBase} />
       <EnvIdSetter envId={envId} />
       <div className={className} data-theme={resolvedTheme} style={{ height: '100%', ...style }}>
         <CloudShell defaultPage={defaultPage} theme={resolvedTheme} />

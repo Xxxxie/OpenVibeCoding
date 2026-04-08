@@ -142,7 +142,7 @@ export const insertDeploymentSchema = z.object({
   pagePath: z.string().optional().nullable(),
   appId: z.string().optional().nullable(),
   label: z.string().optional().nullable(),
-  metadata: z.record(z.unknown()).optional().nullable(),
+  metadata: z.record(z.string(), z.unknown()).optional().nullable(),
 })
 
 export const selectDeploymentSchema = z.object({
@@ -155,7 +155,7 @@ export const selectDeploymentSchema = z.object({
   pagePath: z.string().nullable(),
   appId: z.string().nullable(),
   label: z.string().nullable(),
-  metadata: z.record(z.unknown()).nullable(),
+  metadata: z.record(z.string(), z.unknown()).nullable(),
   createdAt: z.number(),
   updatedAt: z.number(),
   deletedAt: z.number().nullable(),

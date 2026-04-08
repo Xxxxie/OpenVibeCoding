@@ -183,6 +183,12 @@ githubAuth.get('/callback', async (c) => {
 
       let userId: string
       if (existing) {
+        // Check if user is disabled
+        if (existing.status === 'disabled') {
+          const loginUrl = new URL('/login', c.req.url)
+          loginUrl.searchParams.set('error', 'disabled')
+          return c.redirect(loginUrl.toString())
+        }
         userId = existing.id
         await getDb().users.update(userId, {
           accessToken: encryptedToken,

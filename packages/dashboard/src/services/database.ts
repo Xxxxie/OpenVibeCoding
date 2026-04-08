@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-const API_BASE = import.meta.env.VITE_API_BASE || '/api'
+import { getApiBase } from './config'
 
 export interface CollectionInfo {
   CollectionName: string
@@ -24,7 +24,7 @@ export interface InferredColumn {
 class DatabaseAPI {
   private baseUrl: string
 
-  constructor(baseUrl: string = API_BASE) {
+  constructor(baseUrl: string = getApiBase()) {
     this.baseUrl = baseUrl
   }
 

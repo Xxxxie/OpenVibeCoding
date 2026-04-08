@@ -23,6 +23,7 @@ import githubRoutes from './routes/github'
 import acpRoutes from './routes/acp'
 import tasksRoutes from './routes/tasks'
 import connectorsRoutes from './routes/connectors'
+import miniprogramRoutes from './routes/miniprogram'
 import apiKeysRoutes from './routes/api-keys'
 import miscRoutes from './routes/misc'
 import reposRoutes from './routes/repos'
@@ -31,6 +32,7 @@ import storageRoutes from './routes/storage.js'
 import functionsRoutes from './routes/functions.js'
 import sqlRoutes from './routes/sql.js'
 import capiRoutes from './routes/capi.js'
+import adminRoutes from './routes/admin'
 
 const app = new Hono<AppEnv>()
 
@@ -53,6 +55,7 @@ app.route('/api/github', githubRoutes)
 app.route('/api/agent', acpRoutes)
 app.route('/api/tasks', tasksRoutes)
 app.route('/api/connectors', connectorsRoutes)
+app.route('/api/miniprogram', miniprogramRoutes)
 app.route('/api/api-keys', apiKeysRoutes)
 app.route('/api', miscRoutes)
 app.route('/api/repos', reposRoutes)
@@ -61,6 +64,7 @@ app.route('/api/storage', storageRoutes)
 app.route('/api/functions', functionsRoutes)
 app.route('/api/sql', sqlRoutes)
 app.route('/api/capi', capiRoutes)
+app.route('/api/admin', adminRoutes)
 
 // Static file serving for production (web build output)
 const webDistPath = resolve(__dirname, '../web/dist')

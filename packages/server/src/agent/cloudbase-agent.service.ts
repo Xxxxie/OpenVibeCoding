@@ -10,6 +10,8 @@ import { persistenceService } from './persistence.service.js'
 import { scfSandboxManager, type SandboxInstance } from '../sandbox/scf-sandbox-manager.js'
 import { createSandboxMcpClient } from '../sandbox/sandbox-mcp-proxy.js'
 import { archiveToGit } from '../sandbox/git-archive.js'
+import { getDb } from '../db/index.js'
+import { decrypt } from '../lib/crypto.js'
 import type { AgentCallbackMessage, AgentOptions, CodeBuddyMessage } from '@coder/shared'
 
 // ─── Constants ────────────────────────────────────────────────────────────
@@ -559,6 +561,11 @@ export class CloudbaseAgentService {
             log: (msg) => console.log(msg),
             onDeployUrl: (url) => {
               wrappedCallback({ type: 'deploy_url', url })
+            },
+            getMpDeployCredentials: async (appId: string) => {
+              const app = await getDb().miniprogramApps.findByAppIdAndUserId(appId, userContext.userId)
+              if (!app) return null
+              return { appId: app.appId, privateKey: decrypt(app.privateKey) }
             },
           })
 

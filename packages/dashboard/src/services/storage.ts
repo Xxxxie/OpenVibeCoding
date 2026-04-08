@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-const API_BASE = import.meta.env.VITE_API_BASE || '/api'
+import { getApiBase } from './config'
 
 export interface BucketInfo {
   type: 'storage' | 'static'
@@ -26,7 +26,7 @@ export interface FileInfo {
 class StorageAPI {
   private base: string
 
-  constructor(base = API_BASE) {
+  constructor(base = getApiBase()) {
     this.base = base
   }
 

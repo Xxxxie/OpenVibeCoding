@@ -9,6 +9,7 @@ interface SessionUserResponse {
   name?: string
   email?: string
   avatar?: string
+  role: 'user' | 'admin'
 }
 
 export function useSession() {

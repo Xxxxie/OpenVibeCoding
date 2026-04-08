@@ -309,7 +309,11 @@ export function TasksListPage() {
                             {(task as any).prStatus && (
                               <div className="relative">
                                 <PRStatusIcon status={(task as any).prStatus} />
-                                <PRCheckStatus taskId={task.id} prStatus={(task as any).prStatus} />
+                                <PRCheckStatus
+                                  taskId={task.id}
+                                  prStatus={(task as any).prStatus}
+                                  isActive={task.status === 'processing'}
+                                />
                               </div>
                             )}
                             <span className="truncate">

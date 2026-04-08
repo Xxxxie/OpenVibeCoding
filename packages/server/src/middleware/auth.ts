@@ -73,7 +73,7 @@ const tempCredentialCache = new Map<
 /**
  * 使用支撑身份签发限定在用户 envId 下的临时密钥
  */
-async function issueTempCredentials(
+export async function issueTempCredentials(
   envId: string,
   userId: string,
 ): Promise<{ secretId: string; secretKey: string; sessionToken: string } | undefined> {

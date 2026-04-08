@@ -274,8 +274,8 @@ export function ConnectorDialog({ open, onOpenChange }: ConnectorDialogProps) {
   const getConnectorIcon = (connector: {
     name: string
     type: string
-    baseUrl: string | null
-    command: string | null
+    baseUrl?: string | null
+    command?: string | null
   }) => {
     const lowerName = connector.name.toLowerCase()
     const url = connector.baseUrl?.toLowerCase() || ''

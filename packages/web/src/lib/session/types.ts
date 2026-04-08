@@ -8,6 +8,7 @@ export interface Session {
     email?: string
     avatar?: string
     name?: string
+    role: 'user' | 'admin'
   }
 }
 

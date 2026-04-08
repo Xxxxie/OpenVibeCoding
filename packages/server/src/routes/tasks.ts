@@ -5,35 +5,16 @@ import { requireAuth, requireUserEnv, type AppEnv } from '../middleware/auth'
 import { createTaskLogger } from '../lib/task-logger'
 import { decrypt } from '../lib/crypto'
 import { Octokit } from '@octokit/rest'
-import { Sandbox } from '@vercel/sandbox'
+import { SandboxInstance } from '../sandbox/index.js'
 import { persistenceService } from '../agent/persistence.service'
-import { deleteArchiveDirectory, deleteConversationViaSandbox, scfSandboxManager } from '../sandbox/index.js'
+import { deleteConversationViaSandbox, scfSandboxManager } from '../sandbox/index.js'
 import type { Octokit as OctokitType } from '@octokit/rest'
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const PROJECT_DIR = '/vercel/sandbox/project'
 const MAX_SANDBOX_DURATION = parseInt(process.env.MAX_SANDBOX_DURATION || '300', 10)
-
-// ---------------------------------------------------------------------------
-// In-memory sandbox registry
-// ---------------------------------------------------------------------------
-
-const activeSandboxes = new Map<string, Sandbox>()
-
-function registerSandbox(taskId: string, sandbox: Sandbox): void {
-  activeSandboxes.set(taskId, sandbox)
-}
-
-function unregisterSandbox(taskId: string): void {
-  activeSandboxes.delete(taskId)
-}
-
-function getSandbox(taskId: string): Sandbox | undefined {
-  return activeSandboxes.get(taskId)
-}
 
 // ---------------------------------------------------------------------------
 // GitHub helpers
@@ -82,61 +63,86 @@ interface CommandResult {
   error?: string
 }
 
-async function runCommandInSandbox(sandbox: Sandbox, command: string, args: string[] = []): Promise<CommandResult> {
+async function runCommandInScfSandbox(
+  sandbox: SandboxInstance,
+  command: string,
+  timeout = 30000,
+): Promise<CommandResult> {
   try {
-    const result = await sandbox.runCommand(command, args)
-    let stdout = ''
-    let stderr = ''
-    try {
-      stdout = await (result.stdout as () => Promise<string>)()
-    } catch {
-      /* ignore */
+    const response = await sandbox.request('/api/tools/bash', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command, timeout }),
+    })
+    const data = (await response.json()) as {
+      success: boolean
+      result?: { output: string; exitCode: number }
+      error?: string
     }
-    try {
-      stderr = await (result.stderr as () => Promise<string>)()
-    } catch {
-      /* ignore */
+    if (!data.success) {
+      return { success: false, error: data.error || 'Command failed' }
     }
-    return { success: result.exitCode === 0, exitCode: result.exitCode, output: stdout, error: stderr }
+    return {
+      success: data.result?.exitCode === 0,
+      exitCode: data.result?.exitCode,
+      output: data.result?.output || '',
+    }
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : 'Command failed' }
   }
 }
 
-async function runInProject(sandbox: Sandbox, command: string, args: string[] = []): Promise<CommandResult> {
-  const escapeArg = (arg: string) => `'${arg.replace(/'/g, "'\\''")}'`
-  const fullCommand = args.length > 0 ? `${command} ${args.map(escapeArg).join(' ')}` : command
-  return runCommandInSandbox(sandbox, 'sh', ['-c', `cd ${PROJECT_DIR} && ${fullCommand}`])
-}
-
-async function reconnectSandbox(task: { sandboxId: string | null }): Promise<Sandbox | null> {
-  const sandboxToken = process.env.SANDBOX_VERCEL_TOKEN
-  const teamId = process.env.SANDBOX_VERCEL_TEAM_ID
-  const projectId = process.env.SANDBOX_VERCEL_PROJECT_ID
-  if (!sandboxToken || !teamId || !projectId || !task.sandboxId) return null
+async function getScfSandbox(task: { sandboxId: string | null }, envId: string): Promise<SandboxInstance | null> {
+  if (!task.sandboxId) return null
   try {
-    return await Sandbox.get({ sandboxId: task.sandboxId, teamId, projectId, token: sandboxToken })
+    return (await scfSandboxManager.getExisting(task.sandboxId, envId)) ?? null
   } catch {
     return null
   }
 }
 
-async function getOrReconnectSandbox(taskId: string, task: { sandboxId: string | null }): Promise<Sandbox | null> {
-  let sandbox = getSandbox(taskId)
-  if (!sandbox) {
-    sandbox = await reconnectSandbox(task)
-  }
-  return sandbox || null
-}
-
 type PackageManager = 'pnpm' | 'yarn' | 'npm'
 
-async function detectPackageManager(sandbox: Sandbox): Promise<PackageManager> {
-  const pnpmCheck = await runInProject(sandbox, 'test', ['-f', 'pnpm-lock.yaml'])
-  if (pnpmCheck.success) return 'pnpm'
-  const yarnCheck = await runInProject(sandbox, 'test', ['-f', 'yarn.lock'])
-  if (yarnCheck.success) return 'yarn'
+async function detectPackageManager(sandbox: SandboxInstance): Promise<PackageManager> {
+  const pnpmCheck = await runCommandInScfSandbox(sandbox, 'test -f pnpm-lock.yaml && echo "yes" || echo "no"')
+  if (pnpmCheck.output?.trim() === 'yes') return 'pnpm'
+  const yarnCheck = await runCommandInScfSandbox(sandbox, 'test -f yarn.lock && echo "yes" || echo "no"')
+  if (yarnCheck.output?.trim() === 'yes') return 'yarn'
   return 'npm'
+}
+
+async function readFileFromSandbox(
+  sandbox: SandboxInstance,
+  filePath: string,
+): Promise<{ content: string; found: boolean }> {
+  try {
+    const response = await sandbox.request('/api/tools/read', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: filePath }),
+    })
+    const data = (await response.json()) as { success: boolean; result?: { content: string } }
+    if (data.success && data.result?.content !== undefined) {
+      return { content: data.result.content, found: true }
+    }
+    return { content: '', found: false }
+  } catch {
+    return { content: '', found: false }
+  }
+}
+
+async function writeFileToSandbox(sandbox: SandboxInstance, filePath: string, content: string): Promise<boolean> {
+  try {
+    const response = await sandbox.request('/api/tools/write', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: filePath, content }),
+    })
+    const data = (await response.json()) as { success: boolean }
+    return data.success
+  } catch {
+    return false
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -249,28 +255,6 @@ async function getFileContentFromGitHub(
     throw error
   }
 }
-
-// ---------------------------------------------------------------------------
-// Vite config
-// ---------------------------------------------------------------------------
-
-const SANDBOX_VITE_CONFIG = `import { defineConfig, mergeConfig } from 'vite'
-
-let userConfig = {}
-try {
-  const importedConfig = await import('./vite.config.js')
-  userConfig = importedConfig.default || {}
-} catch {
-  // No user config or import failed
-}
-
-export default mergeConfig(userConfig, defineConfig({
-  server: {
-    host: '0.0.0.0',
-    strictPort: false,
-    allowedHosts: undefined,
-  }
-}))`
 
 // ---------------------------------------------------------------------------
 // Router
@@ -531,11 +515,10 @@ function addToFileTree(tree: Record<string, FileTreeNode>, filename: string, fil
   }
 }
 
-tasksRouter.get('/:taskId/files', async (c) => {
+tasksRouter.get('/:taskId/files', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const mode = c.req.query('mode') || 'remote'
     const task = await findActiveTask(taskId, session.user.id)
@@ -554,8 +537,7 @@ tasksRouter.get('/:taskId/files', async (c) => {
     if (mode === 'local') {
       if (!task.sandboxId) return c.json({ success: false, error: 'Sandbox is not running' }, 410)
       try {
-        let sandbox = getSandbox(taskId)
-        if (!sandbox) sandbox = await reconnectSandbox(task)
+        const sandbox = await getScfSandbox(task, envId)
         if (!sandbox)
           return c.json({
             success: true,
@@ -565,8 +547,8 @@ tasksRouter.get('/:taskId/files', async (c) => {
             message: 'Sandbox not found',
           })
 
-        const statusResult = await sandbox.runCommand({ cmd: 'git', args: ['status', '--porcelain'], cwd: PROJECT_DIR })
-        if (statusResult.exitCode !== 0)
+        const statusResult = await runCommandInScfSandbox(sandbox, 'git status --porcelain')
+        if (!statusResult.success)
           return c.json({
             success: true,
             files: [],
@@ -575,26 +557,21 @@ tasksRouter.get('/:taskId/files', async (c) => {
             message: 'Failed to get local changes',
           })
 
-        const statusOutput = await statusResult.stdout()
+        const statusOutput = statusResult.output || ''
         const statusLines = statusOutput
           .trim()
           .split('\n')
           .filter((line) => line.trim())
-        const checkRemoteResult = await sandbox.runCommand({
-          cmd: 'git',
-          args: ['rev-parse', '--verify', `origin/${task.branchName}`],
-          cwd: PROJECT_DIR,
-        })
-        const remoteBranchExists = checkRemoteResult.exitCode === 0
+        const checkRemoteResult = await runCommandInScfSandbox(
+          sandbox,
+          `git rev-parse --verify origin/${task.branchName}`,
+        )
+        const remoteBranchExists = checkRemoteResult.success
         const compareRef = remoteBranchExists ? `origin/${task.branchName}` : 'HEAD'
-        const numstatResult = await sandbox.runCommand({
-          cmd: 'git',
-          args: ['diff', '--numstat', compareRef],
-          cwd: PROJECT_DIR,
-        })
+        const numstatResult = await runCommandInScfSandbox(sandbox, `git diff --numstat ${compareRef}`)
         const diffStats: Record<string, { additions: number; deletions: number }> = {}
-        if (numstatResult.exitCode === 0) {
-          const numstatOutput = await numstatResult.stdout()
+        if (numstatResult.success) {
+          const numstatOutput = numstatResult.output || ''
           for (const line of numstatOutput
             .trim()
             .split('\n')
@@ -622,10 +599,9 @@ tasksRouter.get('/:taskId/files', async (c) => {
             (indexStatus === '?' && worktreeStatus === '?') ||
             (indexStatus === 'A' && !stats.additions && !stats.deletions)
           ) {
-            const wcResult = await sandbox!.runCommand({ cmd: 'wc', args: ['-l', filename], cwd: PROJECT_DIR })
-            if (wcResult.exitCode === 0) {
-              const wcOutput = await wcResult.stdout()
-              stats = { additions: parseInt(wcOutput.trim().split(/\s+/)[0]) || 0, deletions: 0 }
+            const wcResult = await runCommandInScfSandbox(sandbox, `wc -l '${filename.replace(/'/g, "'\\''")}'`)
+            if (wcResult.success) {
+              stats = { additions: parseInt((wcResult.output || '').trim().split(/\s+/)[0]) || 0, deletions: 0 }
             }
           }
           return {
@@ -637,26 +613,13 @@ tasksRouter.get('/:taskId/files', async (c) => {
           }
         })
         files = await Promise.all(filePromises)
-      } catch (error) {
-        const is410 =
-          error &&
-          typeof error === 'object' &&
-          (('status' in error && (error as { status: number }).status === 410) ||
-            ('response' in error &&
-              typeof (error as { response?: { status?: number } }).response === 'object' &&
-              (error as { response?: { status?: number } }).response?.status === 410))
-        if (is410) {
-          await getDb().tasks.update(taskId, { sandboxId: null, sandboxUrl: null })
-          unregisterSandbox(taskId)
-          return c.json({ success: false, error: 'Sandbox is not running' }, 410)
-        }
+      } catch {
         return c.json({ success: false, error: 'Failed to fetch local changes' }, 500)
       }
     } else if (mode === 'all-local') {
       if (!task.sandboxId) return c.json({ success: false, error: 'Sandbox is not running' }, 410)
       try {
-        let sandbox = getSandbox(taskId)
-        if (!sandbox) sandbox = await reconnectSandbox(task)
+        const sandbox = await getScfSandbox(task, envId)
         if (!sandbox)
           return c.json({
             success: true,
@@ -665,34 +628,11 @@ tasksRouter.get('/:taskId/files', async (c) => {
             branchName: task.branchName,
             message: 'Sandbox not found',
           })
-        const findResult = await sandbox.runCommand({
-          cmd: 'find',
-          args: [
-            '.',
-            '-type',
-            'f',
-            '-not',
-            '-path',
-            '*/.git/*',
-            '-not',
-            '-path',
-            '*/node_modules/*',
-            '-not',
-            '-path',
-            '*/.next/*',
-            '-not',
-            '-path',
-            '*/dist/*',
-            '-not',
-            '-path',
-            '*/build/*',
-            '-not',
-            '-path',
-            '*/.vercel/*',
-          ],
-          cwd: PROJECT_DIR,
-        })
-        if (findResult.exitCode !== 0)
+        const findResult = await runCommandInScfSandbox(
+          sandbox,
+          "find . -type f -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/.next/*' -not -path '*/dist/*' -not -path '*/build/*' -not -path '*/.vercel/*'",
+        )
+        if (!findResult.success)
           return c.json({
             success: true,
             files: [],
@@ -700,16 +640,16 @@ tasksRouter.get('/:taskId/files', async (c) => {
             branchName: task.branchName,
             message: 'Failed to list files',
           })
-        const findOutput = await findResult.stdout()
+        const findOutput = findResult.output || ''
         const fileLines = findOutput
           .trim()
           .split('\n')
           .filter((line) => line.trim() && line !== '.')
           .map((line) => line.replace(/^\.\//, ''))
-        const statusResult = await sandbox.runCommand({ cmd: 'git', args: ['status', '--porcelain'], cwd: PROJECT_DIR })
+        const statusResult = await runCommandInScfSandbox(sandbox, 'git status --porcelain')
         const changedFilesMap: Record<string, 'added' | 'modified' | 'deleted' | 'renamed'> = {}
-        if (statusResult.exitCode === 0) {
-          const statusOutput = await statusResult.stdout()
+        if (statusResult.success) {
+          const statusOutput = statusResult.output || ''
           for (const line of statusOutput
             .trim()
             .split('\n')
@@ -734,19 +674,7 @@ tasksRouter.get('/:taskId/files', async (c) => {
           const status = changedFilesMap[trimmed] || ('renamed' as const)
           return { filename: trimmed, status, additions: 0, deletions: 0, changes: 0 }
         })
-      } catch (error) {
-        const is410 =
-          error &&
-          typeof error === 'object' &&
-          (('status' in error && (error as { status: number }).status === 410) ||
-            ('response' in error &&
-              typeof (error as { response?: { status?: number } }).response === 'object' &&
-              (error as { response?: { status?: number } }).response?.status === 410))
-        if (is410) {
-          await getDb().tasks.update(taskId, { sandboxId: null, sandboxUrl: null })
-          unregisterSandbox(taskId)
-          return c.json({ success: false, error: 'Sandbox is not running' }, 410)
-        }
+      } catch {
         return c.json({ success: false, error: 'Failed to fetch local files' }, 500)
       }
     } else if (mode === 'all') {
@@ -867,11 +795,10 @@ tasksRouter.get('/:taskId/files', async (c) => {
 // ---------------------------------------------------------------------------
 // GET /:taskId/file-content
 // ---------------------------------------------------------------------------
-tasksRouter.get('/:taskId/file-content', async (c) => {
+tasksRouter.get('/:taskId/file-content', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const rawFilename = c.req.query('filename')
     const mode = c.req.query('mode') || 'remote'
@@ -908,12 +835,12 @@ tasksRouter.get('/:taskId/file-content', async (c) => {
       }
       if (task.sandboxId) {
         try {
-          const sandbox = await getOrReconnectSandbox(taskId, task)
+          const sandbox = await getScfSandbox(task, envId)
           if (sandbox) {
             const normalizedPath = filename.startsWith('/') ? filename.substring(1) : filename
-            const catResult = await sandbox.runCommand({ cmd: 'cat', args: [normalizedPath], cwd: PROJECT_DIR })
-            if (catResult.exitCode === 0) {
-              newContent = await catResult.stdout()
+            const result = await readFileFromSandbox(sandbox, normalizedPath)
+            if (result.found) {
+              newContent = result.content
               fileFound = true
             }
           }
@@ -926,12 +853,12 @@ tasksRouter.get('/:taskId/file-content', async (c) => {
       let content = ''
       if (isNodeModulesFile && task.sandboxId) {
         try {
-          const sandbox = await getOrReconnectSandbox(taskId, task)
+          const sandbox = await getScfSandbox(task, envId)
           if (sandbox) {
             const normalizedPath = filename.startsWith('/') ? filename.substring(1) : filename
-            const catResult = await sandbox.runCommand('cat', [normalizedPath])
-            if (catResult.exitCode === 0) {
-              content = await catResult.stdout()
+            const result = await readFileFromSandbox(sandbox, normalizedPath)
+            if (result.found) {
+              content = result.content
               fileFound = true
             }
           }
@@ -946,12 +873,12 @@ tasksRouter.get('/:taskId/file-content', async (c) => {
       }
       if (!fileFound && !isImage && !isNodeModulesFile && task.sandboxId) {
         try {
-          const sandbox = await getOrReconnectSandbox(taskId, task)
+          const sandbox = await getScfSandbox(task, envId)
           if (sandbox) {
             const normalizedPath = filename.startsWith('/') ? filename.substring(1) : filename
-            const catResult = await sandbox.runCommand('cat', [normalizedPath])
-            if (catResult.exitCode === 0) {
-              content = await catResult.stdout()
+            const result = await readFileFromSandbox(sandbox, normalizedPath)
+            if (result.found) {
+              content = result.content
               fileFound = true
             }
           }
@@ -977,18 +904,17 @@ tasksRouter.get('/:taskId/file-content', async (c) => {
     })
   } catch (error) {
     console.error('Error in file-content API:', error)
-    return c.json({ error: error instanceof Error ? error.message : 'Internal server error' }, 500)
+    return c.json({ error: 'Internal server error' }, 500)
   }
 })
 
 // ---------------------------------------------------------------------------
 // POST /:taskId/save-file
 // ---------------------------------------------------------------------------
-tasksRouter.post('/:taskId/save-file', async (c) => {
+tasksRouter.post('/:taskId/save-file', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const body = await c.req.json()
     const { filename, content } = body
@@ -996,28 +922,24 @@ tasksRouter.post('/:taskId/save-file', async (c) => {
     const task = await findActiveTask(taskId, session.user.id)
     if (!task) return c.json({ error: 'Task not found' }, 404)
     if (!task.sandboxId) return c.json({ error: 'Task does not have an active sandbox' }, 400)
-    const sandbox = await getOrReconnectSandbox(taskId, task)
+    const sandbox = await getScfSandbox(task, envId)
     if (!sandbox) return c.json({ error: 'Sandbox not available' }, 400)
-    const escapedFilename = "'" + filename.replace(/'/g, "'\\''") + "'"
-    const encodedContent = Buffer.from(content).toString('base64')
-    const writeCommand = `echo '${encodedContent}' | base64 -d > ${escapedFilename}`
-    const result = await sandbox.runCommand({ cmd: 'sh', args: ['-c', writeCommand], cwd: PROJECT_DIR })
-    if (result.exitCode !== 0) return c.json({ error: 'Failed to write file to sandbox' }, 500)
+    const success = await writeFileToSandbox(sandbox, filename, content)
+    if (!success) return c.json({ error: 'Failed to write file to sandbox' }, 500)
     return c.json({ success: true, message: 'File saved successfully' })
   } catch (error) {
     console.error('Error in save-file API:', error)
-    return c.json({ error: error instanceof Error ? error.message : 'Internal server error' }, 500)
+    return c.json({ error: 'Internal server error' }, 500)
   }
 })
 
 // ---------------------------------------------------------------------------
 // POST /:taskId/create-file
 // ---------------------------------------------------------------------------
-tasksRouter.post('/:taskId/create-file', async (c) => {
+tasksRouter.post('/:taskId/create-file', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const body = await c.req.json()
     const { filename } = body
@@ -1025,21 +947,18 @@ tasksRouter.post('/:taskId/create-file', async (c) => {
     const task = await findActiveTask(taskId, session.user.id)
     if (!task) return c.json({ success: false, error: 'Task not found' }, 404)
     if (!task.sandboxId) return c.json({ success: false, error: 'Sandbox not available' }, 400)
-    const sandbox = await getOrReconnectSandbox(taskId, task)
+    const sandbox = await getScfSandbox(task, envId)
     if (!sandbox) return c.json({ success: false, error: 'Sandbox not found or inactive' }, 400)
     const pathParts = filename.split('/')
     if (pathParts.length > 1) {
       const dirPath = pathParts.slice(0, -1).join('/')
-      const mkdirResult = await sandbox.runCommand({ cmd: 'mkdir', args: ['-p', dirPath], cwd: PROJECT_DIR })
-      if (mkdirResult.exitCode !== 0)
-        return c.json({ success: false, error: 'Failed to create parent directories' }, 500)
+      const mkdirResult = await runCommandInScfSandbox(sandbox, `mkdir -p '${dirPath.replace(/'/g, "'\\''")}'`)
+      if (!mkdirResult.success) return c.json({ success: false, error: 'Failed to create parent directories' }, 500)
     }
-    const touchResult = await sandbox.runCommand({ cmd: 'touch', args: [filename], cwd: PROJECT_DIR })
-    if (touchResult.exitCode !== 0) return c.json({ success: false, error: 'Failed to create file' }, 500)
+    const touchResult = await runCommandInScfSandbox(sandbox, `touch '${filename.replace(/'/g, "'\\''")}'`)
+    if (!touchResult.success) return c.json({ success: false, error: 'Failed to create file' }, 500)
     return c.json({ success: true, message: 'File created successfully', filename })
-  } catch (error) {
-    if (error && typeof error === 'object' && 'status' in error && (error as { status: number }).status === 410)
-      return c.json({ success: false, error: 'Sandbox is not running' }, 410)
+  } catch {
     return c.json({ success: false, error: 'An error occurred while creating the file' }, 500)
   }
 })
@@ -1047,11 +966,10 @@ tasksRouter.post('/:taskId/create-file', async (c) => {
 // ---------------------------------------------------------------------------
 // POST /:taskId/create-folder
 // ---------------------------------------------------------------------------
-tasksRouter.post('/:taskId/create-folder', async (c) => {
+tasksRouter.post('/:taskId/create-folder', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const body = await c.req.json()
     const { foldername } = body
@@ -1060,14 +978,12 @@ tasksRouter.post('/:taskId/create-folder', async (c) => {
     const task = await findActiveTask(taskId, session.user.id)
     if (!task) return c.json({ success: false, error: 'Task not found' }, 404)
     if (!task.sandboxId) return c.json({ success: false, error: 'Sandbox not available' }, 400)
-    const sandbox = await getOrReconnectSandbox(taskId, task)
+    const sandbox = await getScfSandbox(task, envId)
     if (!sandbox) return c.json({ success: false, error: 'Sandbox not found or inactive' }, 400)
-    const mkdirResult = await sandbox.runCommand({ cmd: 'mkdir', args: ['-p', foldername], cwd: PROJECT_DIR })
-    if (mkdirResult.exitCode !== 0) return c.json({ success: false, error: 'Failed to create folder' }, 500)
+    const mkdirResult = await runCommandInScfSandbox(sandbox, `mkdir -p '${foldername.replace(/'/g, "'\\''")}'`)
+    if (!mkdirResult.success) return c.json({ success: false, error: 'Failed to create folder' }, 500)
     return c.json({ success: true, message: 'Folder created successfully', foldername })
-  } catch (error) {
-    if (error && typeof error === 'object' && 'status' in error && (error as { status: number }).status === 410)
-      return c.json({ success: false, error: 'Sandbox is not running' }, 410)
+  } catch {
     return c.json({ success: false, error: 'An error occurred while creating the folder' }, 500)
   }
 })
@@ -1075,11 +991,10 @@ tasksRouter.post('/:taskId/create-folder', async (c) => {
 // ---------------------------------------------------------------------------
 // DELETE /:taskId/delete-file
 // ---------------------------------------------------------------------------
-tasksRouter.delete('/:taskId/delete-file', async (c) => {
+tasksRouter.delete('/:taskId/delete-file', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const body = await c.req.json()
     const { filename } = body
@@ -1087,14 +1002,12 @@ tasksRouter.delete('/:taskId/delete-file', async (c) => {
     const task = await findActiveTask(taskId, session.user.id)
     if (!task) return c.json({ success: false, error: 'Task not found' }, 404)
     if (!task.sandboxId) return c.json({ success: false, error: 'Sandbox not available' }, 400)
-    const sandbox = await getOrReconnectSandbox(taskId, task)
+    const sandbox = await getScfSandbox(task, envId)
     if (!sandbox) return c.json({ success: false, error: 'Sandbox not found or inactive' }, 400)
-    const rmResult = await sandbox.runCommand({ cmd: 'rm', args: [filename], cwd: PROJECT_DIR })
-    if (rmResult.exitCode !== 0) return c.json({ success: false, error: 'Failed to delete file' }, 500)
+    const rmResult = await runCommandInScfSandbox(sandbox, `rm '${filename.replace(/'/g, "'\\''")}'`)
+    if (!rmResult.success) return c.json({ success: false, error: 'Failed to delete file' }, 500)
     return c.json({ success: true, message: 'File deleted successfully', filename })
-  } catch (error) {
-    if (error && typeof error === 'object' && 'status' in error && (error as { status: number }).status === 410)
-      return c.json({ success: false, error: 'Sandbox is not running' }, 410)
+  } catch {
     return c.json({ success: false, error: 'An error occurred while deleting the file' }, 500)
   }
 })
@@ -1102,11 +1015,10 @@ tasksRouter.delete('/:taskId/delete-file', async (c) => {
 // ---------------------------------------------------------------------------
 // POST /:taskId/discard-file-changes
 // ---------------------------------------------------------------------------
-tasksRouter.post('/:taskId/discard-file-changes', async (c) => {
+tasksRouter.post('/:taskId/discard-file-changes', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const body = await c.req.json()
     const { filename } = body
@@ -1114,28 +1026,23 @@ tasksRouter.post('/:taskId/discard-file-changes', async (c) => {
     const task = await findActiveTask(taskId, session.user.id)
     if (!task) return c.json({ success: false, error: 'Task not found' }, 404)
     if (!task.sandboxId) return c.json({ success: false, error: 'Sandbox not available' }, 400)
-    const sandbox = await getOrReconnectSandbox(taskId, task)
+    const sandbox = await getScfSandbox(task, envId)
     if (!sandbox) return c.json({ success: false, error: 'Sandbox not found or inactive' }, 400)
-    const lsFilesResult = await sandbox.runCommand({ cmd: 'git', args: ['ls-files', filename], cwd: PROJECT_DIR })
-    const isTracked = (await lsFilesResult.stdout()).trim().length > 0
+    const escapedFilename = filename.replace(/'/g, "'\\''")
+    const lsFilesResult = await runCommandInScfSandbox(sandbox, `git ls-files '${escapedFilename}'`)
+    const isTracked = (lsFilesResult.output || '').trim().length > 0
     if (isTracked) {
-      const checkoutResult = await sandbox.runCommand({
-        cmd: 'git',
-        args: ['checkout', 'HEAD', '--', filename],
-        cwd: PROJECT_DIR,
-      })
-      if (checkoutResult.exitCode !== 0) return c.json({ success: false, error: 'Failed to discard changes' }, 500)
+      const checkoutResult = await runCommandInScfSandbox(sandbox, `git checkout HEAD -- '${escapedFilename}'`)
+      if (!checkoutResult.success) return c.json({ success: false, error: 'Failed to discard changes' }, 500)
     } else {
-      const rmResult = await sandbox.runCommand({ cmd: 'rm', args: [filename], cwd: PROJECT_DIR })
-      if (rmResult.exitCode !== 0) return c.json({ success: false, error: 'Failed to delete file' }, 500)
+      const rmResult = await runCommandInScfSandbox(sandbox, `rm '${escapedFilename}'`)
+      if (!rmResult.success) return c.json({ success: false, error: 'Failed to delete file' }, 500)
     }
     return c.json({
       success: true,
       message: isTracked ? 'Changes discarded successfully' : 'New file deleted successfully',
     })
-  } catch (error) {
-    if (error && typeof error === 'object' && 'status' in error && (error as { status: number }).status === 410)
-      return c.json({ success: false, error: 'Sandbox is not running' }, 410)
+  } catch {
     return c.json({ success: false, error: 'An error occurred while discarding changes' }, 500)
   }
 })
@@ -1143,11 +1050,10 @@ tasksRouter.post('/:taskId/discard-file-changes', async (c) => {
 // ---------------------------------------------------------------------------
 // GET /:taskId/diff
 // ---------------------------------------------------------------------------
-tasksRouter.get('/:taskId/diff', async (c) => {
+tasksRouter.get('/:taskId/diff', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const filename = c.req.query('filename')
     const mode = c.req.query('mode')
@@ -1160,24 +1066,19 @@ tasksRouter.get('/:taskId/diff', async (c) => {
     if (mode === 'local') {
       if (!task.sandboxId) return c.json({ error: 'Sandbox not available' }, 400)
       try {
-        const sandbox = await getOrReconnectSandbox(taskId, task)
+        const sandbox = await getScfSandbox(task, envId)
         if (!sandbox) return c.json({ error: 'Sandbox not found or inactive' }, 400)
-        await sandbox.runCommand({ cmd: 'git', args: ['fetch', 'origin', task.branchName], cwd: PROJECT_DIR })
-        const checkRemoteResult = await sandbox.runCommand({
-          cmd: 'git',
-          args: ['rev-parse', '--verify', `origin/${task.branchName}`],
-          cwd: PROJECT_DIR,
-        })
-        const remoteBranchExists = checkRemoteResult.exitCode === 0
+        await runCommandInScfSandbox(sandbox, `git fetch origin ${task.branchName}`)
+        const checkRemoteResult = await runCommandInScfSandbox(
+          sandbox,
+          `git rev-parse --verify origin/${task.branchName}`,
+        )
+        const remoteBranchExists = checkRemoteResult.success
         if (!remoteBranchExists) {
-          const oldContentResult = await sandbox.runCommand({
-            cmd: 'git',
-            args: ['show', `HEAD:${filename}`],
-            cwd: PROJECT_DIR,
-          })
-          const oldContent = oldContentResult.exitCode === 0 ? await oldContentResult.stdout() : ''
-          const newContentResult = await sandbox.runCommand({ cmd: 'cat', args: [filename], cwd: PROJECT_DIR })
-          const newContent = newContentResult.exitCode === 0 ? await newContentResult.stdout() : ''
+          const oldContentResult = await runCommandInScfSandbox(sandbox, `git show HEAD:${filename}`)
+          const oldContent = oldContentResult.success ? oldContentResult.output || '' : ''
+          const newContentFile = await readFileFromSandbox(sandbox, filename)
+          const newContent = newContentFile.found ? newContentFile.content : ''
           return c.json({
             success: true,
             data: {
@@ -1191,14 +1092,10 @@ tasksRouter.get('/:taskId/diff', async (c) => {
           })
         }
         const remoteBranchRef = `origin/${task.branchName}`
-        const oldContentResult = await sandbox.runCommand({
-          cmd: 'git',
-          args: ['show', `${remoteBranchRef}:${filename}`],
-          cwd: PROJECT_DIR,
-        })
-        const oldContent = oldContentResult.exitCode === 0 ? await oldContentResult.stdout() : ''
-        const newContentResult = await sandbox.runCommand({ cmd: 'cat', args: [filename], cwd: PROJECT_DIR })
-        const newContent = newContentResult.exitCode === 0 ? await newContentResult.stdout() : ''
+        const oldContentResult = await runCommandInScfSandbox(sandbox, `git show ${remoteBranchRef}:${filename}`)
+        const oldContent = oldContentResult.success ? oldContentResult.output || '' : ''
+        const newContentFile = await readFileFromSandbox(sandbox, filename)
+        const newContent = newContentFile.found ? newContentFile.content : ''
         return c.json({
           success: true,
           data: {
@@ -1210,9 +1107,7 @@ tasksRouter.get('/:taskId/diff', async (c) => {
             isImage: false,
           },
         })
-      } catch (error) {
-        if (error && typeof error === 'object' && 'status' in error && (error as { status: number }).status === 410)
-          return c.json({ error: 'Sandbox is not running' }, 410)
+      } catch {
         return c.json({ error: 'Failed to get local diff' }, 500)
       }
     }
@@ -1291,7 +1186,7 @@ tasksRouter.get('/:taskId/diff', async (c) => {
     })
   } catch (error) {
     console.error('Error in diff API:', error)
-    return c.json({ error: error instanceof Error ? error.message : 'Internal server error' }, 500)
+    return c.json({ error: 'Internal server error' }, 500)
   }
 })
 
@@ -1345,11 +1240,10 @@ tasksRouter.post('/:taskId/pr', async (c) => {
 // ---------------------------------------------------------------------------
 // POST /:taskId/sync-changes
 // ---------------------------------------------------------------------------
-tasksRouter.post('/:taskId/sync-changes', async (c) => {
+tasksRouter.post('/:taskId/sync-changes', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const body = await c.req.json().catch(() => ({}))
     const { commitMessage } = body
@@ -1357,28 +1251,23 @@ tasksRouter.post('/:taskId/sync-changes', async (c) => {
     if (!task) return c.json({ success: false, error: 'Task not found' }, 404)
     if (!task.sandboxId) return c.json({ success: false, error: 'Sandbox not available' }, 400)
     if (!task.branchName) return c.json({ success: false, error: 'Branch not available' }, 400)
-    const sandbox = await getOrReconnectSandbox(taskId, task)
+    const sandbox = await getScfSandbox(task, envId)
     if (!sandbox) return c.json({ success: false, error: 'Sandbox not found or inactive' }, 400)
-    const addResult = await sandbox.runCommand({ cmd: 'git', args: ['add', '.'], cwd: PROJECT_DIR })
-    if (addResult.exitCode !== 0) return c.json({ success: false, error: 'Failed to add changes' }, 500)
-    const statusResult = await sandbox.runCommand({ cmd: 'git', args: ['status', '--porcelain'], cwd: PROJECT_DIR })
-    if (statusResult.exitCode !== 0) return c.json({ success: false, error: 'Failed to check status' }, 500)
-    const statusOutput = await statusResult.stdout()
+    const addResult = await runCommandInScfSandbox(sandbox, 'git add .')
+    if (!addResult.success) return c.json({ success: false, error: 'Failed to add changes' }, 500)
+    const statusResult = await runCommandInScfSandbox(sandbox, 'git status --porcelain')
+    if (!statusResult.success) return c.json({ success: false, error: 'Failed to check status' }, 500)
+    const statusOutput = statusResult.output || ''
     if (!statusOutput.trim())
       return c.json({ success: true, message: 'No changes to sync', committed: false, pushed: false })
     const message = commitMessage || 'Sync local changes'
-    const commitResult = await sandbox.runCommand({ cmd: 'git', args: ['commit', '-m', message], cwd: PROJECT_DIR })
-    if (commitResult.exitCode !== 0) return c.json({ success: false, error: 'Failed to commit changes' }, 500)
-    const pushResult = await sandbox.runCommand({
-      cmd: 'git',
-      args: ['push', 'origin', task.branchName],
-      cwd: PROJECT_DIR,
-    })
-    if (pushResult.exitCode !== 0) return c.json({ success: false, error: 'Failed to push changes' }, 500)
+    const escapedMessage = message.replace(/'/g, "'\\''")
+    const commitResult = await runCommandInScfSandbox(sandbox, `git commit -m '${escapedMessage}'`)
+    if (!commitResult.success) return c.json({ success: false, error: 'Failed to commit changes' }, 500)
+    const pushResult = await runCommandInScfSandbox(sandbox, `git push origin ${task.branchName}`)
+    if (!pushResult.success) return c.json({ success: false, error: 'Failed to push changes' }, 500)
     return c.json({ success: true, message: 'Changes synced successfully', committed: true, pushed: true })
-  } catch (error) {
-    if (error && typeof error === 'object' && 'status' in error && (error as { status: number }).status === 410)
-      return c.json({ success: false, error: 'Sandbox is not running' }, 410)
+  } catch {
     return c.json({ success: false, error: 'An error occurred while syncing changes' }, 500)
   }
 })
@@ -1449,20 +1338,6 @@ tasksRouter.post('/:taskId/merge-pr', async (c) => {
       commit_message: commitMessage,
       merge_method: mergeMethod,
     })
-    if (task.sandboxId) {
-      try {
-        const sandbox = await Sandbox.get({
-          sandboxId: task.sandboxId,
-          teamId: process.env.SANDBOX_VERCEL_TEAM_ID!,
-          projectId: process.env.SANDBOX_VERCEL_PROJECT_ID!,
-          token: process.env.SANDBOX_VERCEL_TOKEN!,
-        })
-        await sandbox.stop()
-        unregisterSandbox(taskId)
-      } catch (sandboxError) {
-        console.error('Error stopping sandbox after merge:', sandboxError)
-      }
-    }
     await getDb().tasks.update(taskId, {
       prStatus: 'merged',
       prMergeCommitSha: response.data.sha || null,
@@ -1512,7 +1387,7 @@ tasksRouter.post('/:taskId/close-pr', async (c) => {
     }
   } catch (error) {
     console.error('Error in close PR API:', error)
-    return c.json({ error: error instanceof Error ? error.message : 'Internal server error' }, 500)
+    return c.json({ error: 'Internal server error' }, 500)
   }
 })
 
@@ -1547,44 +1422,42 @@ tasksRouter.post('/:taskId/reopen-pr', async (c) => {
     }
   } catch (error) {
     console.error('Error in reopen PR API:', error)
-    return c.json({ error: error instanceof Error ? error.message : 'Internal server error' }, 500)
+    return c.json({ error: 'Internal server error' }, 500)
   }
 })
 
 // ---------------------------------------------------------------------------
 // GET /:taskId/project-files
 // ---------------------------------------------------------------------------
-tasksRouter.get('/:taskId/project-files', async (c) => {
+tasksRouter.get('/:taskId/project-files', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const task = await findActiveTask(taskId, session.user.id)
     if (!task) return c.json({ error: 'Task not found' }, 404)
     if (!task.sandboxId) return c.json({ error: 'Task does not have an active sandbox' }, 400)
-    const sandbox = await getOrReconnectSandbox(taskId, task)
+    const sandbox = await getScfSandbox(task, envId)
     if (!sandbox) return c.json({ error: 'Sandbox not available' }, 400)
     return c.json({ success: true, files: [] })
   } catch (error) {
     console.error('Error in project-files API:', error)
-    return c.json({ error: error instanceof Error ? error.message : 'Internal server error' }, 500)
+    return c.json({ error: 'Internal server error' }, 500)
   }
 })
 
 // ---------------------------------------------------------------------------
 // POST /:taskId/lsp
 // ---------------------------------------------------------------------------
-tasksRouter.post('/:taskId/lsp', async (c) => {
+tasksRouter.post('/:taskId/lsp', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const task = await getDb().tasks.findById(taskId)
     if (!task || task.userId !== session.user.id) return c.json({ error: 'Task not found' }, 404)
     if (!task.sandboxId) return c.json({ error: 'Task does not have an active sandbox' }, 400)
-    const sandbox = await getOrReconnectSandbox(taskId, task)
+    const sandbox = await getScfSandbox(task, envId)
     if (!sandbox) return c.json({ error: 'Sandbox not available' }, 400)
     const body = await c.req.json()
     const { method, filename, position } = body
@@ -1628,25 +1501,13 @@ if (definitions && definitions.length > 0) {
   console.log(JSON.stringify({ definitions: results }));
 } else { console.log(JSON.stringify({ definitions: [] })); }
 `
-        const writeCommand = `cat > '${scriptPath}' << 'EOF'\n${helperScript}\nEOF`
-        await sandbox.runCommand('sh', ['-c', writeCommand])
-        const result = await sandbox.runCommand('node', [scriptPath])
-        let stdout = ''
-        let stderr = ''
+        const writeSuccess = await writeFileToSandbox(sandbox, scriptPath, helperScript)
+        if (!writeSuccess) return c.json({ definitions: [], error: 'Failed to write helper script' })
+        const result = await runCommandInScfSandbox(sandbox, `node ${scriptPath}`)
+        await runCommandInScfSandbox(sandbox, `rm ${scriptPath}`)
+        if (!result.success) return c.json({ definitions: [], error: 'Script execution failed' })
         try {
-          stdout = await result.stdout()
-        } catch {
-          /* ignore */
-        }
-        try {
-          stderr = await result.stderr()
-        } catch {
-          /* ignore */
-        }
-        await sandbox.runCommand('rm', [scriptPath])
-        if (result.exitCode !== 0) return c.json({ definitions: [], error: stderr || 'Script execution failed' })
-        try {
-          return c.json(JSON.parse(stdout.trim()))
+          return c.json(JSON.parse((result.output || '').trim()))
         } catch {
           return c.json({ definitions: [], error: 'Failed to parse TypeScript response' })
         }
@@ -1667,68 +1528,58 @@ if (definitions && definitions.length > 0) {
 // ---------------------------------------------------------------------------
 // POST /:taskId/terminal
 // ---------------------------------------------------------------------------
-tasksRouter.post('/:taskId/terminal', async (c) => {
+tasksRouter.post('/:taskId/terminal', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const { command } = await c.req.json()
     if (!command || typeof command !== 'string') return c.json({ success: false, error: 'Command is required' }, 400)
     const task = await findActiveTask(taskId, session.user.id)
     if (!task) return c.json({ success: false, error: 'Task not found' }, 404)
     if (!task.sandboxId) return c.json({ success: false, error: 'No sandbox found for this task' }, 400)
-    const sandbox = await getOrReconnectSandbox(taskId, task)
+    const sandbox = await getScfSandbox(task, envId)
     if (!sandbox) return c.json({ success: false, error: 'Sandbox not available' }, 400)
     try {
-      const result = await sandbox.runCommand({ cmd: 'sh', args: ['-c', command], cwd: PROJECT_DIR })
-      let stdout = ''
-      let stderr = ''
-      try {
-        stdout = await result.stdout()
-      } catch {
-        /* ignore */
-      }
-      try {
-        stderr = await result.stderr()
-      } catch {
-        /* ignore */
-      }
-      return c.json({ success: true, data: { exitCode: result.exitCode, stdout, stderr } })
+      const result = await runCommandInScfSandbox(sandbox, command)
+      return c.json({
+        success: true,
+        data: {
+          exitCode: result.exitCode ?? (result.success ? 0 : 1),
+          stdout: result.output || '',
+          stderr: result.error || '',
+        },
+      })
     } catch (error) {
       console.error('Error executing command:', error)
-      return c.json({ success: false, error: error instanceof Error ? error.message : 'Command execution failed' }, 500)
+      return c.json({ success: false, error: 'Command execution failed' }, 500)
     }
   } catch (error) {
     console.error('Error in terminal endpoint:', error)
-    return c.json({ success: false, error: error instanceof Error ? error.message : 'Internal server error' }, 500)
+    return c.json({ success: false, error: 'Internal server error' }, 500)
   }
 })
 
 // ---------------------------------------------------------------------------
 // POST /:taskId/autocomplete
 // ---------------------------------------------------------------------------
-tasksRouter.post('/:taskId/autocomplete', async (c) => {
+tasksRouter.post('/:taskId/autocomplete', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const { partial, cwd } = await c.req.json()
     if (typeof partial !== 'string') return c.json({ success: false, error: 'Partial text is required' }, 400)
     const task = await findActiveTask(taskId, session.user.id)
     if (!task) return c.json({ success: false, error: 'Task not found' }, 404)
     if (!task.sandboxId) return c.json({ success: false, error: 'No sandbox found for this task' }, 400)
-    const sandbox = await getOrReconnectSandbox(taskId, task)
+    const sandbox = await getScfSandbox(task, envId)
     if (!sandbox) return c.json({ success: false, error: 'Sandbox not available' }, 400)
     try {
-      const pwdResult = await sandbox.runCommand('sh', ['-c', 'pwd'])
-      let actualCwd = cwd || '/home/vercel-sandbox'
-      try {
-        const pwdOutput = await pwdResult.stdout()
-        if (pwdOutput && pwdOutput.trim()) actualCwd = pwdOutput.trim()
-      } catch {
-        /* use default */
+      const pwdResult = await runCommandInScfSandbox(sandbox, 'pwd')
+      let actualCwd = cwd || '/home/user'
+      if (pwdResult.success && pwdResult.output && pwdResult.output.trim()) {
+        actualCwd = pwdResult.output.trim()
       }
       const parts = partial.split(/\s+/)
       const lastPart = parts[parts.length - 1] || ''
@@ -1739,37 +1590,29 @@ tasksRouter.post('/:taskId/autocomplete', async (c) => {
         const pathPart = lastPart.substring(0, lastSlash + 1)
         prefix = lastPart.substring(lastSlash + 1)
         if (pathPart.startsWith('/')) dir = pathPart
-        else if (pathPart.startsWith('~/')) dir = '/home/vercel-sandbox/' + pathPart.substring(2)
+        else if (pathPart.startsWith('~/')) dir = '/home/user/' + pathPart.substring(2)
         else dir = `${actualCwd}/${pathPart}`
       } else {
         prefix = lastPart
       }
       const escapedDir = "'" + dir.replace(/'/g, "'\\''") + "'"
       const lsCommand = `cd ${escapedDir} 2>/dev/null && ls -1ap 2>/dev/null || echo ""`
-      const result = await sandbox.runCommand('sh', ['-c', lsCommand])
-      let stdout = ''
-      try {
-        stdout = await result.stdout()
-      } catch {
-        /* ignore */
-      }
+      const result = await runCommandInScfSandbox(sandbox, lsCommand)
+      const stdout = result.output || ''
       if (!stdout) return c.json({ success: true, data: { completions: [] } })
-      const files = stdout
+      const completionFiles = stdout
         .trim()
         .split('\n')
         .filter((f) => f && f.toLowerCase().startsWith(prefix.toLowerCase()))
         .map((f) => ({ name: f, isDirectory: f.endsWith('/') }))
-      return c.json({ success: true, data: { completions: files, prefix } })
+      return c.json({ success: true, data: { completions: completionFiles, prefix } })
     } catch (error) {
       console.error('Error getting completions:', error)
-      return c.json(
-        { success: false, error: error instanceof Error ? error.message : 'Failed to get completions' },
-        500,
-      )
+      return c.json({ success: false, error: 'Failed to get completions' }, 500)
     }
   } catch (error) {
     console.error('Error in autocomplete endpoint:', error)
-    return c.json({ success: false, error: error instanceof Error ? error.message : 'Internal server error' }, 500)
+    return c.json({ success: false, error: 'Internal server error' }, 500)
   }
 })
 
@@ -1993,7 +1836,7 @@ tasksRouter.get('/:taskId/deployment', async (c) => {
           console.error('Error checking commit statuses:', statusError)
         }
       }
-      return c.json({ success: true, data: { hasDeployment: false, message: 'No successful Vercel deployment found' } })
+      return c.json({ success: true, data: { hasDeployment: false, message: 'No successful deployment found' } })
     } catch (error) {
       console.error('Error fetching deployment status:', error)
       if (error && typeof error === 'object' && 'status' in error && (error as { status: number }).status === 404)
@@ -2002,7 +1845,7 @@ tasksRouter.get('/:taskId/deployment', async (c) => {
     }
   } catch (error) {
     console.error('Error in deployment API:', error)
-    return c.json({ error: error instanceof Error ? error.message : 'Internal server error' }, 500)
+    return c.json({ error: 'Internal server error' }, 500)
   }
 })
 
@@ -2123,51 +1966,19 @@ tasksRouter.delete('/:taskId/deployments/:deploymentId', async (c) => {
 // ---------------------------------------------------------------------------
 // GET /:taskId/sandbox-health
 // ---------------------------------------------------------------------------
-tasksRouter.get('/:taskId/sandbox-health', async (c) => {
+tasksRouter.get('/:taskId/sandbox-health', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const task = await findActiveTask(taskId, session.user.id)
     if (!task) return c.json({ status: 'not_found' })
-    if (!task.sandboxId || !task.sandboxUrl)
-      return c.json({ status: 'not_available', message: 'Sandbox not created yet' })
-    try {
-      const sandbox = await Sandbox.get({
-        teamId: process.env.SANDBOX_VERCEL_TEAM_ID!,
-        projectId: process.env.SANDBOX_VERCEL_PROJECT_ID!,
-        token: process.env.SANDBOX_VERCEL_TOKEN!,
-        sandboxId: task.sandboxId,
-      })
-      if (!sandbox) return c.json({ status: 'stopped', message: 'Sandbox has stopped or expired' })
-      try {
-        const response = await fetch(task.sandboxUrl, { method: 'GET', signal: AbortSignal.timeout(5000) })
-        const contentLength = response.headers.get('content-length')
-        const body = await response.text()
-        if (response.status === 200 && (contentLength === '0' || body.length === 0))
-          return c.json({ status: 'starting', message: 'Dev server is starting up' })
-        if (response.ok && body.length > 0)
-          return c.json({ status: 'running', message: 'Sandbox and dev server are running' })
-        else if (response.status === 410 || response.status === 502)
-          return c.json({ status: 'stopped', message: 'Sandbox has stopped or expired' })
-        else if (response.status >= 500)
-          return c.json({ status: 'error', message: 'Dev server returned an error', statusCode: response.status })
-        else if (response.status === 404 || response.status === 503)
-          return c.json({ status: 'starting', message: 'Dev server is starting up' })
-        else return c.json({ status: 'starting', message: 'Dev server is initializing' })
-      } catch (fetchError) {
-        if (fetchError instanceof Error) {
-          if (fetchError.name === 'TimeoutError' || fetchError.message.includes('timeout'))
-            return c.json({ status: 'starting', message: 'Dev server is starting or not responding' })
-          return c.json({ status: 'stopped', message: 'Cannot connect to sandbox' })
-        }
-        return c.json({ status: 'starting', message: 'Checking dev server status...' })
-      }
-    } catch (sandboxError) {
-      console.error('Sandbox.get() error:', sandboxError)
-      return c.json({ status: 'stopped', message: 'Sandbox no longer exists' })
-    }
+    if (!task.sandboxId) return c.json({ status: 'not_available', message: 'Sandbox not created yet' })
+    const sandbox = await getScfSandbox(task, envId)
+    if (!sandbox) return c.json({ status: 'stopped', message: 'Sandbox not available' })
+    const result = await runCommandInScfSandbox(sandbox, 'echo ok')
+    if (result.success) return c.json({ status: 'running', message: 'Sandbox is running' })
+    return c.json({ status: 'error', message: 'Sandbox is not responding' })
   } catch (error) {
     console.error('Error checking sandbox health:', error)
     return c.json({ status: 'error', message: 'Failed to check sandbox health' })
@@ -2177,181 +1988,36 @@ tasksRouter.get('/:taskId/sandbox-health', async (c) => {
 // ---------------------------------------------------------------------------
 // POST /:taskId/start-sandbox
 // ---------------------------------------------------------------------------
-tasksRouter.post('/:taskId/start-sandbox', async (c) => {
+tasksRouter.post('/:taskId/start-sandbox', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const task = await getDb().tasks.findById(taskId)
     if (!task) return c.json({ error: 'Task not found' }, 404)
     if (task.userId !== session.user.id) return c.json({ error: 'Unauthorized' }, 403)
     if (!task.keepAlive) return c.json({ error: 'Keep-alive is not enabled for this task' }, 400)
     const logger = createTaskLogger(taskId)
-    if (task.sandboxId && task.sandboxUrl) {
+    if (task.sandboxId) {
       try {
-        const existingSandbox = await Sandbox.get({
-          sandboxId: task.sandboxId,
-          teamId: process.env.SANDBOX_VERCEL_TEAM_ID!,
-          projectId: process.env.SANDBOX_VERCEL_PROJECT_ID!,
-          token: process.env.SANDBOX_VERCEL_TOKEN!,
-        })
-        const testResult = await runCommandInSandbox(existingSandbox, 'echo', ['test'])
-        if (testResult.success) return c.json({ error: 'Sandbox is already running' }, 400)
+        const existingSandbox = await getScfSandbox(task, envId)
+        if (existingSandbox) {
+          const testResult = await runCommandInScfSandbox(existingSandbox, 'echo test')
+          if (testResult.success) return c.json({ error: 'Sandbox is already running' }, 400)
+        }
       } catch {
-        await logger.info('Existing sandbox not accessible, clearing and creating new one')
-        unregisterSandbox(taskId)
+        await logger.info('Existing sandbox not accessible, creating new one')
         await getDb().tasks.update(taskId, { sandboxId: null, sandboxUrl: null, updatedAt: Date.now() })
       }
     }
     await logger.info('Starting sandbox')
-    const githubToken = await getUserGitHubToken(session.user.id)
-    let gitName = 'Coding Agent'
-    let gitEmail = 'agent@example.com'
-    if (githubToken) {
-      try {
-        const octokit = new Octokit({ auth: githubToken })
-        const { data } = await octokit.rest.users.getAuthenticated()
-        gitName = data.name || data.login || gitName
-        gitEmail = `${data.login}@users.noreply.github.com`
-      } catch {
-        /* use defaults */
-      }
-    }
-    const maxDurationMinutes = task.maxDuration || MAX_SANDBOX_DURATION
-    let port = 3000
-    if (task.repoUrl && githubToken) {
-      const urlMatch = task.repoUrl.match(/github\.com[/:]([\w-]+)\/([\w-]+?)(\.git)?$/)
-      if (urlMatch) {
-        try {
-          const octokit = new Octokit({ auth: githubToken })
-          const { data } = await octokit.repos.getContent({
-            owner: urlMatch[1],
-            repo: urlMatch[2],
-            path: 'package.json',
-          })
-          if ('content' in data && data.type === 'file') {
-            const pkgJson = JSON.parse(Buffer.from(data.content, 'base64').toString('utf-8'))
-            if (pkgJson.dependencies?.vite || pkgJson.devDependencies?.vite) port = 5173
-          }
-        } catch {
-          /* use default */
-        }
-      }
-    }
-    const sandbox = await Sandbox.create({
-      teamId: process.env.SANDBOX_VERCEL_TEAM_ID!,
-      projectId: process.env.SANDBOX_VERCEL_PROJECT_ID!,
-      token: process.env.SANDBOX_VERCEL_TOKEN!,
-      source:
-        task.repoUrl && task.branchName
-          ? { type: 'git' as const, url: task.repoUrl, revision: task.branchName, depth: 1 }
-          : undefined,
-      timeout: maxDurationMinutes * 60 * 1000,
-      ports: [port],
-      runtime: 'node22',
-      resources: { vcpus: 4 },
-    })
-    const sandboxId = sandbox?.sandboxId
-    await logger.info('Sandbox created')
-    registerSandbox(taskId, sandbox)
-    await logger.info('Configuring Git')
-    await runInProject(sandbox, 'git', ['config', 'user.name', gitName])
-    await runInProject(sandbox, 'git', ['config', 'user.email', gitEmail])
-    const packageJsonCheck = await runInProject(sandbox, 'test', ['-f', 'package.json'])
-    const requirementsTxtCheck = await runInProject(sandbox, 'test', ['-f', 'requirements.txt'])
-    if (packageJsonCheck.success) {
-      await logger.info('Installing Node.js dependencies')
-      const packageManager = await detectPackageManager(sandbox)
-      const installCmd =
-        packageManager === 'pnpm'
-          ? ['pnpm', 'install', '--frozen-lockfile']
-          : packageManager === 'yarn'
-            ? ['yarn', 'install', '--frozen-lockfile']
-            : ['npm', 'install', '--no-audit', '--no-fund']
-      await logger.info('Installing dependencies')
-      const installResult = await runInProject(sandbox, installCmd[0], installCmd.slice(1))
-      if (!installResult.success && packageManager !== 'npm')
-        await runInProject(sandbox, 'npm', ['install', '--no-audit', '--no-fund'])
-    } else if (requirementsTxtCheck.success) {
-      await logger.info('Installing Python dependencies')
-      await runInProject(sandbox, 'python3', ['-m', 'pip', 'install', '-r', 'requirements.txt'])
-    }
-    let sandboxUrl: string | undefined
-    if (packageJsonCheck.success) {
-      const packageJsonRead = await runInProject(sandbox, 'cat', ['package.json'])
-      if (packageJsonRead.success && packageJsonRead.output) {
-        const packageJson = JSON.parse(packageJsonRead.output)
-        const hasDevScript = packageJson?.scripts?.dev
-        if (hasDevScript) {
-          await logger.info('Starting development server')
-          const packageManager = await detectPackageManager(sandbox)
-          const devCommand = packageManager === 'npm' ? 'npm' : packageManager
-          let devArgs = packageManager === 'npm' ? ['run', 'dev'] : ['dev']
-          const hasVite = packageJson?.dependencies?.vite || packageJson?.devDependencies?.vite
-          let devPort = 3000
-          if (hasVite) {
-            devPort = 5173
-            await logger.info('Vite project detected, using port 5173')
-            await runInProject(sandbox, 'sh', [
-              '-c',
-              `cat > vite.sandbox.config.js << 'VITEEOF'\n${SANDBOX_VITE_CONFIG}\nVITEEOF`,
-            ])
-            if (packageManager === 'npm')
-              devArgs = ['run', 'dev', '--', '--config', 'vite.sandbox.config.js', '--host', '0.0.0.0']
-            else devArgs = ['dev', '--config', 'vite.sandbox.config.js', '--host', '0.0.0.0']
-          }
-          const nextVersion = packageJson?.dependencies?.next || packageJson?.devDependencies?.next || ''
-          const isNext16 =
-            nextVersion.startsWith('16.') || nextVersion.startsWith('^16.') || nextVersion.startsWith('~16.')
-          if (isNext16) {
-            await logger.info('Next.js 16 detected, adding --webpack flag')
-            devArgs = packageManager === 'npm' ? ['run', 'dev', '--', '--webpack'] : ['dev', '--webpack']
-          }
-          const fullDevCommand = devArgs.length > 0 ? `${devCommand} ${devArgs.join(' ')}` : devCommand
-          const { Writable } = await import('stream')
-          const captureStdout = new Writable({
-            write(chunk: Buffer | string, _enc: BufferEncoding, cb: (e?: Error | null) => void) {
-              chunk
-                .toString()
-                .split('\n')
-                .filter((l: string) => l.trim())
-                .forEach((line: string) => logger.info(`[SERVER] ${line}`).catch(() => {}))
-              cb()
-            },
-          })
-          const captureStderr = new Writable({
-            write(chunk: Buffer | string, _enc: BufferEncoding, cb: (e?: Error | null) => void) {
-              chunk
-                .toString()
-                .split('\n')
-                .filter((l: string) => l.trim())
-                .forEach((line: string) => logger.info(`[SERVER] ${line}`).catch(() => {}))
-              cb()
-            },
-          })
-          await sandbox.runCommand({
-            cmd: 'sh',
-            args: ['-c', `cd ${PROJECT_DIR} && ${fullDevCommand}`],
-            detached: true,
-            stdout: captureStdout,
-            stderr: captureStderr,
-          })
-          await logger.info('Development server started')
-          await new Promise((resolve) => setTimeout(resolve, 3000))
-          sandboxUrl = sandbox.domain(devPort)
-        }
-      }
-    }
-    await getDb().tasks.update(taskId, { sandboxId, sandboxUrl: sandboxUrl || undefined, updatedAt: Date.now() })
+    const sandbox = await scfSandboxManager.getOrCreate(taskId, envId)
+    await getDb().tasks.update(taskId, { sandboxId: sandbox.functionName, updatedAt: Date.now() })
     await logger.info('Sandbox started successfully')
-    return c.json({ success: true, message: 'Sandbox started successfully', sandboxId, sandboxUrl })
+    return c.json({ success: true, message: 'Sandbox started successfully', sandboxId: sandbox.functionName })
   } catch (error) {
     console.error('Error starting sandbox:', error)
-    return c.json(
-      { error: 'Failed to start sandbox', details: error instanceof Error ? error.message : 'Unknown error' },
-      500,
-    )
+    return c.json({ error: 'Failed to start sandbox' }, 500)
   }
 })
 
@@ -2368,108 +2034,55 @@ tasksRouter.post('/:taskId/stop-sandbox', async (c) => {
     if (!task) return c.json({ error: 'Task not found' }, 404)
     if (task.userId !== session.user.id) return c.json({ error: 'Unauthorized' }, 403)
     if (!task.sandboxId) return c.json({ error: 'Sandbox is not active' }, 400)
-    const sandbox = await Sandbox.get({
-      sandboxId: task.sandboxId,
-      teamId: process.env.SANDBOX_VERCEL_TEAM_ID!,
-      projectId: process.env.SANDBOX_VERCEL_PROJECT_ID!,
-      token: process.env.SANDBOX_VERCEL_TOKEN!,
-    })
-    await sandbox.stop()
-    unregisterSandbox(taskId)
     await getDb().tasks.update(taskId, { sandboxId: null, sandboxUrl: null, updatedAt: Date.now() })
     return c.json({ success: true, message: 'Sandbox stopped successfully' })
   } catch (error) {
     console.error('Error stopping sandbox:', error)
-    return c.json(
-      { error: 'Failed to stop sandbox', details: error instanceof Error ? error.message : 'Unknown error' },
-      500,
-    )
+    return c.json({ error: 'Failed to stop sandbox' }, 500)
   }
 })
 
 // ---------------------------------------------------------------------------
 // POST /:taskId/restart-dev
 // ---------------------------------------------------------------------------
-tasksRouter.post('/:taskId/restart-dev', async (c) => {
+tasksRouter.post('/:taskId/restart-dev', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const task = await getDb().tasks.findById(taskId)
     if (!task) return c.json({ error: 'Task not found' }, 404)
     if (task.userId !== session.user.id) return c.json({ error: 'Unauthorized' }, 403)
     if (!task.sandboxId) return c.json({ error: 'Sandbox is not active' }, 400)
-    const sandbox = await Sandbox.get({
-      sandboxId: task.sandboxId,
-      teamId: process.env.SANDBOX_VERCEL_TEAM_ID!,
-      projectId: process.env.SANDBOX_VERCEL_PROJECT_ID!,
-      token: process.env.SANDBOX_VERCEL_TOKEN!,
-    })
-    const logger = createTaskLogger(taskId)
-    const packageJsonCheck = await runInProject(sandbox, 'test', ['-f', 'package.json'])
-    if (!packageJsonCheck.success) return c.json({ error: 'No package.json found in sandbox' }, 400)
-    const packageJsonRead = await runCommandInSandbox(sandbox, 'sh', ['-c', `cd ${PROJECT_DIR} && cat package.json`])
-    if (!packageJsonRead.success || !packageJsonRead.output)
-      return c.json({ error: 'Could not read package.json' }, 500)
-    const packageJson = JSON.parse(packageJsonRead.output)
+    const sandbox = await getScfSandbox(task, envId)
+    if (!sandbox) return c.json({ error: 'Sandbox not available' }, 400)
+
+    const packageJsonFile = await readFileFromSandbox(sandbox, 'package.json')
+    if (!packageJsonFile.found) return c.json({ error: 'No package.json found in sandbox' }, 400)
+    let packageJson: {
+      scripts?: { dev?: string }
+      dependencies?: Record<string, string>
+      devDependencies?: Record<string, string>
+    }
+    try {
+      packageJson = JSON.parse(packageJsonFile.content)
+    } catch {
+      return c.json({ error: 'Could not parse package.json' }, 500)
+    }
     if (!packageJson?.scripts?.dev) return c.json({ error: 'No dev script found in package.json' }, 400)
+
     const hasVite = packageJson?.dependencies?.vite || packageJson?.devDependencies?.vite
     const devPort = hasVite ? 5173 : 3000
-    await runCommandInSandbox(sandbox, 'sh', ['-c', `lsof -ti:${devPort} | xargs -r kill -9 2>/dev/null || true`])
-    await new Promise((resolve) => setTimeout(resolve, 1000))
+    await runCommandInScfSandbox(sandbox, `lsof -ti:${devPort} | xargs -r kill -9 2>/dev/null || true`)
+
     const packageManager = await detectPackageManager(sandbox)
-    const devCommand = packageManager === 'npm' ? 'npm' : packageManager
-    let devArgs = packageManager === 'npm' ? ['run', 'dev'] : ['dev']
-    if (hasVite) {
-      await runInProject(sandbox, 'sh', [
-        '-c',
-        `cat > vite.sandbox.config.js << 'VITEEOF'\n${SANDBOX_VITE_CONFIG}\nVITEEOF`,
-      ])
-      devArgs =
-        packageManager === 'npm'
-          ? ['run', 'dev', '--', '--config', 'vite.sandbox.config.js', '--host', '0.0.0.0']
-          : ['dev', '--config', 'vite.sandbox.config.js', '--host', '0.0.0.0']
-    }
-    const nextVersion = packageJson?.dependencies?.next || packageJson?.devDependencies?.next || ''
-    const isNext16 = nextVersion.startsWith('16.') || nextVersion.startsWith('^16.') || nextVersion.startsWith('~16.')
-    if (isNext16) devArgs = packageManager === 'npm' ? ['run', 'dev', '--', '--webpack'] : ['dev', '--webpack']
-    const fullDevCommand = devArgs.length > 0 ? `${devCommand} ${devArgs.join(' ')}` : devCommand
-    const { Writable } = await import('stream')
-    const captureStdout = new Writable({
-      write(chunk: Buffer | string, _enc: BufferEncoding, cb: (e?: Error | null) => void) {
-        chunk
-          .toString()
-          .split('\n')
-          .filter((l: string) => l.trim())
-          .forEach((line: string) => logger.info(`[SERVER] ${line}`).catch(() => {}))
-        cb()
-      },
-    })
-    const captureStderr = new Writable({
-      write(chunk: Buffer | string, _enc: BufferEncoding, cb: (e?: Error | null) => void) {
-        chunk
-          .toString()
-          .split('\n')
-          .filter((l: string) => l.trim())
-          .forEach((line: string) => logger.info(`[SERVER] ${line}`).catch(() => {}))
-        cb()
-      },
-    })
-    await sandbox.runCommand({
-      cmd: 'sh',
-      args: ['-c', `cd ${PROJECT_DIR} && ${fullDevCommand}`],
-      detached: true,
-      stdout: captureStdout,
-      stderr: captureStderr,
-    })
+    const devCommand = packageManager === 'npm' ? 'npm run dev' : `${packageManager} dev`
+    await runCommandInScfSandbox(sandbox, `nohup ${devCommand} > /dev/null 2>&1 &`)
+
     return c.json({ success: true, message: 'Dev server restarted successfully' })
   } catch (error) {
     console.error('Error restarting dev server:', error)
-    return c.json(
-      { error: 'Failed to restart dev server', details: error instanceof Error ? error.message : 'Unknown error' },
-      500,
-    )
+    return c.json({ error: 'Failed to restart dev server' }, 500)
   }
 })
 
@@ -2488,7 +2101,7 @@ tasksRouter.post('/:taskId/clear-logs', async (c) => {
     return c.json({ success: true, message: 'Logs cleared successfully' })
   } catch (error) {
     console.error('Error clearing logs:', error)
-    return c.json({ success: false, error: error instanceof Error ? error.message : 'Failed to clear logs' }, 500)
+    return c.json({ success: false, error: 'Failed to clear logs' }, 500)
   }
 })
 
@@ -2540,11 +2153,10 @@ tasksRouter.get('/:taskId/pr-comments', async (c) => {
 // ---------------------------------------------------------------------------
 // POST /:taskId/file-operation
 // ---------------------------------------------------------------------------
-tasksRouter.post('/:taskId/file-operation', async (c) => {
+tasksRouter.post('/:taskId/file-operation', requireUserEnv, async (c) => {
   try {
-    const authErr = requireAuth(c)
-    if (authErr) return authErr
     const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const body = await c.req.json()
     const { operation, sourceFile, targetPath } = body
@@ -2552,17 +2164,19 @@ tasksRouter.post('/:taskId/file-operation', async (c) => {
     const task = await findActiveTask(taskId, session.user.id)
     if (!task) return c.json({ success: false, error: 'Task not found' }, 404)
     if (!task.sandboxId) return c.json({ success: false, error: 'Sandbox not available' }, 400)
-    const sandbox = await getOrReconnectSandbox(taskId, task)
+    const sandbox = await getScfSandbox(task, envId)
     if (!sandbox) return c.json({ success: false, error: 'Sandbox not found' }, 404)
     const sourceBasename = sourceFile.split('/').pop()
     const targetFile = targetPath ? `${targetPath}/${sourceBasename}` : sourceBasename
+    const escapedSource = sourceFile.replace(/'/g, "'\\''")
+    const escapedTarget = targetFile.replace(/'/g, "'\\''")
     if (operation === 'copy') {
-      const copyResult = await sandbox.runCommand({ cmd: 'cp', args: ['-r', sourceFile, targetFile], cwd: PROJECT_DIR })
-      if (copyResult.exitCode !== 0) return c.json({ success: false, error: 'Failed to copy file' }, 500)
+      const copyResult = await runCommandInScfSandbox(sandbox, `cp -r '${escapedSource}' '${escapedTarget}'`)
+      if (!copyResult.success) return c.json({ success: false, error: 'Failed to copy file' }, 500)
       return c.json({ success: true, message: 'File copied successfully' })
     } else if (operation === 'cut') {
-      const mvResult = await sandbox.runCommand({ cmd: 'mv', args: [sourceFile, targetFile], cwd: PROJECT_DIR })
-      if (mvResult.exitCode !== 0) return c.json({ success: false, error: 'Failed to move file' }, 500)
+      const mvResult = await runCommandInScfSandbox(sandbox, `mv '${escapedSource}' '${escapedTarget}'`)
+      if (!mvResult.success) return c.json({ success: false, error: 'Failed to move file' }, 500)
       return c.json({ success: true, message: 'File moved successfully' })
     } else return c.json({ success: false, error: 'Invalid operation' }, 400)
   } catch (error) {

@@ -11,6 +11,11 @@ export interface User {
   email: string | null
   name: string | null
   avatarUrl: string | null
+  role: string // 'user' | 'admin'
+  status: string // 'active' | 'disabled'
+  disabledReason: string | null
+  disabledAt: number | null
+  disabledBy: string | null
   createdAt: number
   updatedAt: number
   lastLoginAt: number
@@ -67,6 +72,17 @@ export interface Connector {
   command: string | null
   env: string | null
   status: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface MiniProgramApp {
+  id: string
+  userId: string
+  name: string
+  appId: string
+  privateKey: string
+  description: string | null
   createdAt: number
   updatedAt: number
 }
@@ -134,6 +150,17 @@ export interface Deployment {
   deletedAt: number | null
 }
 
+export interface AdminLog {
+  id: string
+  adminUserId: string
+  action: string
+  targetUserId: string | null
+  details: string | null
+  ipAddress: string | null
+  userAgent: string | null
+  createdAt: number
+}
+
 // ─── Creation Types (omit auto-generated timestamps) ────────────────────────
 
 export type NewUser = Omit<User, 'createdAt' | 'updatedAt' | 'lastLoginAt'> & {
@@ -155,6 +182,11 @@ export type NewTask = Omit<Task, 'createdAt' | 'updatedAt' | 'completedAt' | 'de
 }
 
 export type NewConnector = Omit<Connector, 'createdAt' | 'updatedAt'> & {
+  createdAt?: number
+  updatedAt?: number
+}
+
+export type NewMiniProgramApp = Omit<MiniProgramApp, 'createdAt' | 'updatedAt'> & {
   createdAt?: number
   updatedAt?: number
 }
@@ -185,6 +217,10 @@ export type NewDeployment = Omit<Deployment, 'createdAt' | 'updatedAt' | 'delete
   deletedAt?: number | null
 }
 
+export type NewAdminLog = Omit<AdminLog, 'createdAt'> & {
+  createdAt?: number
+}
+
 // ─── Repository Interfaces ──────────────────────────────────────────────────
 
 export interface UserRepository {
@@ -193,11 +229,18 @@ export interface UserRepository {
   create(user: NewUser): Promise<User>
   update(id: string, data: Partial<Omit<User, 'id'>>): Promise<User | null>
   deleteById(id: string): Promise<void>
+  // Admin methods
+  findAll(limit?: number, offset?: number): Promise<User[]>
+  count(): Promise<number>
+  updateRole(id: string, role: 'user' | 'admin'): Promise<User | null>
+  disable(id: string, reason: string, adminUserId: string): Promise<User | null>
+  enable(id: string): Promise<User | null>
 }
 
 export interface LocalCredentialRepository {
   findByUserId(userId: string): Promise<LocalCredential | null>
   create(credential: NewLocalCredential): Promise<LocalCredential>
+  update(userId: string, data: Partial<Omit<LocalCredential, 'userId'>>): Promise<LocalCredential | null>
 }
 
 export interface TaskRepository {
@@ -218,6 +261,20 @@ export interface ConnectorRepository {
   update(id: string, userId: string, data: Partial<Omit<Connector, 'id' | 'userId'>>): Promise<Connector | null>
   updateUserId(fromUserId: string, toUserId: string): Promise<void>
   delete(id: string, userId: string): Promise<void>
+}
+
+export interface MiniProgramAppRepository {
+  findByUserId(userId: string): Promise<MiniProgramApp[]>
+  findByIdAndUserId(id: string, userId: string): Promise<MiniProgramApp | null>
+  findByAppIdAndUserId(appId: string, userId: string): Promise<MiniProgramApp | null>
+  create(app: NewMiniProgramApp): Promise<MiniProgramApp>
+  update(
+    id: string,
+    userId: string,
+    data: Partial<Omit<MiniProgramApp, 'id' | 'userId'>>,
+  ): Promise<MiniProgramApp | null>
+  delete(id: string, userId: string): Promise<void>
+  updateUserId(fromUserId: string, toUserId: string): Promise<void>
 }
 
 export interface AccountRepository {
@@ -258,6 +315,13 @@ export interface DeploymentRepository {
   softDelete(id: string): Promise<void>
 }
 
+export interface AdminLogRepository {
+  create(log: NewAdminLog): Promise<AdminLog>
+  findByAdminUserId(adminUserId: string, limit?: number): Promise<AdminLog[]>
+  findByTargetUserId(targetUserId: string, limit?: number): Promise<AdminLog[]>
+  findAll(limit?: number, offset?: number): Promise<AdminLog[]>
+}
+
 // ─── Database Provider ──────────────────────────────────────────────────────
 
 export interface DatabaseProvider {
@@ -265,9 +329,11 @@ export interface DatabaseProvider {
   localCredentials: LocalCredentialRepository
   tasks: TaskRepository
   connectors: ConnectorRepository
+  miniprogramApps: MiniProgramAppRepository
   accounts: AccountRepository
   keys: KeyRepository
   userResources: UserResourceRepository
   settings: SettingRepository
   deployments: DeploymentRepository
+  adminLogs: AdminLogRepository
 }

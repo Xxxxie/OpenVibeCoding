@@ -19,6 +19,14 @@ export const users = sqliteTable(
     email: text('email'),
     name: text('name'),
     avatarUrl: text('avatar_url'),
+
+    // Role and status fields for admin system
+    role: text('role').notNull().default('user'), // 'user' | 'admin'
+    status: text('status').notNull().default('active'), // 'active' | 'disabled'
+    disabledReason: text('disabled_reason'),
+    disabledAt: integer('disabled_at'),
+    disabledBy: text('disabled_by'), // Admin user ID who disabled this user
+
     createdAt: integer('created_at').notNull().$defaultFn(now),
     updatedAt: integer('updated_at').notNull().$defaultFn(now),
     lastLoginAt: integer('last_login_at').notNull().$defaultFn(now),
@@ -91,6 +99,21 @@ export const connectors = sqliteTable('connectors', {
   command: text('command'),
   env: text('env'),
   status: text('status').notNull().default('disconnected'), // 'connected' | 'disconnected'
+  createdAt: integer('created_at').notNull().$defaultFn(now),
+  updatedAt: integer('updated_at').notNull().$defaultFn(now),
+})
+
+// ─── MiniProgram Apps ─────────────────────────────────────────────────────────
+
+export const miniprogramApps = sqliteTable('miniprogram_apps', {
+  id: text('id').primaryKey(),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  appId: text('app_id').notNull(),
+  privateKey: text('private_key').notNull(), // stored encrypted via lib/crypto
+  description: text('description'),
   createdAt: integer('created_at').notNull().$defaultFn(now),
   updatedAt: integer('updated_at').notNull().$defaultFn(now),
 })
@@ -208,5 +231,29 @@ export const deployments = sqliteTable(
     // Indexes for faster queries (deduplication handled in application logic)
     taskIdIdx: index('deployments_task_id_idx').on(table.taskId),
     taskTypePathIdx: index('deployments_task_type_path_idx').on(table.taskId, table.type, table.path),
+  }),
+)
+
+// ─── Admin Logs ───────────────────────────────────────────────────────────────
+
+export const adminLogs = sqliteTable(
+  'admin_logs',
+  {
+    id: text('id').primaryKey(),
+    adminUserId: text('admin_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    action: text('action').notNull(), // 'user_disable' | 'user_enable' | 'user_role_change' | 'password_reset' | ...
+    targetUserId: text('target_user_id').references(() => users.id, { onDelete: 'set null' }),
+    details: text('details'), // JSON string
+    ipAddress: text('ip_address'),
+    userAgent: text('user_agent'),
+    createdAt: integer('created_at').notNull().$defaultFn(now),
+  },
+  (table) => ({
+    adminUserIdIdx: index('admin_logs_admin_user_id_idx').on(table.adminUserId),
+    targetUserIdIdx: index('admin_logs_target_user_id_idx').on(table.targetUserId),
+    actionIdx: index('admin_logs_action_idx').on(table.action),
+    createdAtIdx: index('admin_logs_created_at_idx').on(table.createdAt),
   }),
 )
