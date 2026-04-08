@@ -224,6 +224,27 @@ class CloudBaseTaskRepository implements TaskRepository {
     return (data as Record<string, unknown>[]).map((doc) => stripCloudBaseId<Task>(doc))
   }
 
+  async findAll(limit: number, offset: number, filters?: { userId?: string; status?: string }): Promise<Task[]> {
+    const _ = getCommand()
+    const collection = await getCollection('tasks')
+    const where: Record<string, any> = { deletedAt: _.eq(null) }
+    if (filters?.userId) where.userId = _.eq(filters.userId)
+    if (filters?.status) where.status = _.eq(filters.status)
+    const { data } = await collection.where(where).orderBy('createdAt', 'desc').skip(offset).limit(limit).get()
+    if (!data) return []
+    return (data as Record<string, unknown>[]).map((doc) => stripCloudBaseId<Task>(doc))
+  }
+
+  async count(filters?: { userId?: string; status?: string }): Promise<number> {
+    const _ = getCommand()
+    const collection = await getCollection('tasks')
+    const where: Record<string, any> = { deletedAt: _.eq(null) }
+    if (filters?.userId) where.userId = _.eq(filters.userId)
+    if (filters?.status) where.status = _.eq(filters.status)
+    const { total } = await collection.where(where).count()
+    return total
+  }
+
   async create(task: NewTask): Promise<Task> {
     const collection = await getCollection('tasks')
     const ts = now()

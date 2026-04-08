@@ -248,6 +248,8 @@ export interface TaskRepository {
   findByIdAndUserId(id: string, userId: string): Promise<Task | null>
   findByUserId(userId: string): Promise<Task[]>
   findByRepoAndPr(userId: string, prNumber: number, repoUrl: string): Promise<Task[]>
+  findAll(limit: number, offset: number, filters?: { userId?: string; status?: string }): Promise<Task[]>
+  count(filters?: { userId?: string; status?: string }): Promise<number>
   create(task: NewTask): Promise<Task>
   update(id: string, data: Partial<Omit<Task, 'id'>>): Promise<Task | null>
   updateUserId(fromUserId: string, toUserId: string): Promise<void>

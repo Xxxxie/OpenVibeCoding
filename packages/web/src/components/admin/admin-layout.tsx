@@ -1,12 +1,11 @@
 import { NavLink, Outlet, useNavigate } from 'react-router'
-import { Users, Server, ListTodo, FileText, ArrowLeft, Menu } from 'lucide-react'
+import { Users, ListTodo, FileText, ArrowLeft, Menu } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { User } from '@/components/auth/user'
 import { cn } from '@/lib/utils'
 
 const navItems = [
   { to: '/admin/users', icon: Users, label: '用户管理' },
-  { to: '/admin/environments', icon: Server, label: '环境管理' },
   { to: '/admin/tasks', icon: ListTodo, label: '任务管理' },
   { to: '/admin/logs', icon: FileText, label: '操作日志' },
 ]

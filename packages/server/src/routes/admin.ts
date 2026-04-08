@@ -477,17 +477,41 @@ admin.get('/tasks', async (c) => {
   const status = c.req.query('status')
 
   const db = getDb()
-  // Note: This would require implementing tasks.findAll() with filtering
-  // For now, we'll return an empty array
-  // TODO: Implement findAll in TaskRepository
+  const filters: { userId?: string; status?: string } = {}
+  if (userId) filters.userId = userId
+  if (status) filters.status = status
+
+  const offset = (page - 1) * limit
+  const tasks = await db.tasks.findAll(limit, offset, filters)
+  const total = await db.tasks.count(filters)
+
+  // Batch fetch usernames
+  const userIds = [...new Set(tasks.map((t) => t.userId))]
+  const userMap = new Map<string, string>()
+  await Promise.all(
+    userIds.map(async (id) => {
+      const user = await db.users.findById(id)
+      if (user) userMap.set(id, user.username)
+    }),
+  )
 
   return c.json({
-    tasks: [],
+    tasks: tasks.map((t) => ({
+      id: t.id,
+      userId: t.userId,
+      username: userMap.get(t.userId) || t.userId,
+      title: t.title,
+      status: t.status,
+      selectedAgent: t.selectedAgent,
+      repoUrl: t.repoUrl,
+      createdAt: t.createdAt,
+      completedAt: t.completedAt,
+    })),
     pagination: {
       page,
       limit,
-      total: 0,
-      totalPages: 0,
+      total,
+      totalPages: Math.ceil(total / limit),
     },
   })
 })

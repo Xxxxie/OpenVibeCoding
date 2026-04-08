@@ -1,4 +1,4 @@
-import { eq, and, isNull, desc } from 'drizzle-orm'
+import { eq, and, isNull, desc, sql } from 'drizzle-orm'
 import { nanoid } from 'nanoid'
 import { drizzleDb } from './client'
 import {
@@ -207,6 +207,31 @@ class DrizzleTaskRepository implements TaskRepository {
       )
       .limit(1)
     return rows as unknown as Task[]
+  }
+
+  async findAll(limit: number, offset: number, filters?: { userId?: string; status?: string }): Promise<Task[]> {
+    const conditions = [isNull(tasks.deletedAt)]
+    if (filters?.userId) conditions.push(eq(tasks.userId, filters.userId))
+    if (filters?.status) conditions.push(eq(tasks.status, filters.status))
+    const rows = await drizzleDb
+      .select()
+      .from(tasks)
+      .where(and(...conditions))
+      .orderBy(desc(tasks.createdAt))
+      .limit(limit)
+      .offset(offset)
+    return rows as unknown as Task[]
+  }
+
+  async count(filters?: { userId?: string; status?: string }): Promise<number> {
+    const conditions = [isNull(tasks.deletedAt)]
+    if (filters?.userId) conditions.push(eq(tasks.userId, filters.userId))
+    if (filters?.status) conditions.push(eq(tasks.status, filters.status))
+    const rows = await drizzleDb
+      .select({ count: sql<number>`count(*)` })
+      .from(tasks)
+      .where(and(...conditions))
+    return Number(rows[0]?.count ?? 0)
   }
 
   async create(task: NewTask): Promise<Task> {
