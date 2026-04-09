@@ -350,6 +350,30 @@ function getCloudbaseCredential() {
   }
 }
 
+// ===================== Cloudbase CLI Helpers =====================
+
+function isCloudbaseInstalled() {
+  try {
+    execSync('which cloudbase', { stdio: 'pipe' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function ensureCloudbaseInstalled() {
+  if (isCloudbaseInstalled()) return true
+  log('未检测到 cloudbase CLI，正在自动安装...', 'warn')
+  try {
+    execSync('npm install -g @cloudbase/cli', { stdio: 'inherit' })
+    log('cloudbase CLI 安装成功', 'success')
+    return true
+  } catch {
+    log('cloudbase CLI 安装失败，请手动运行：npm install -g @cloudbase/cli', 'error')
+    return false
+  }
+}
+
 async function runCloudbaseLogin() {
   log('正在执行 cloudbase 登录...')
   log('请在浏览器中完成登录...', 'info')
@@ -392,6 +416,10 @@ const codebuddyConfig = {
 async function setupCloudbaseConfig() {
   logSection('CloudBase 配置')
 
+  // 确保 cloudbase CLI 已安装
+  const cliReady = await ensureCloudbaseInstalled()
+  if (!cliReady) return false
+
   const env = loadEnvFile()
 
   // Check server/.env for existing TCB config (already-configured state)
@@ -428,6 +456,17 @@ async function setupCloudbaseConfig() {
       tcbConfig.secretKey = savedKey
       usePermanentKey = true
       log('使用已有密钥', 'success')
+      // 使用已有密钥重新登录 cloudbase CLI，确保后续命令可用
+      log('正在使用已有密钥登录 cloudbase CLI...')
+      try {
+        execSync(`cloudbase login --apiKeyId "${savedId}" --apiKey "${savedKey}"`, {
+          stdio: 'pipe',
+          encoding: 'utf-8',
+        })
+        log('cloudbase CLI 登录成功', 'success')
+      } catch {
+        log('cloudbase CLI 登录失败，将继续尝试获取环境列表', 'warn')
+      }
     }
     // choice === '2' 或其他：继续进入密钥输入
   }
