@@ -393,11 +393,14 @@ export function TaskSidebar({ tasks, width = 288 }: TaskSidebarProps) {
       >
         <div className="mb-2">
           <Link to="/miniprogram">
-            <Button
-              variant={pathname === '/miniprogram' ? 'secondary' : 'ghost'}
-              size="sm"
-              className="w-full justify-start h-8 px-2 text-xs"
-            >
+          <Button
+            variant="ghost"
+            size="sm"
+            className={cn(
+              'w-full justify-start h-8 px-2 text-xs',
+              pathname === '/miniprogram' && 'bg-accent text-accent-foreground',
+            )}
+          >
               <Smartphone className="h-3.5 w-3.5 mr-2" />
               小程序管理
             </Button>
@@ -414,9 +417,7 @@ export function TaskSidebar({ tasks, width = 288 }: TaskSidebarProps) {
         </div>
         <div className="space-y-1">
           <Card>
-            <CardContent className="p-3 text-center text-xs text-muted-foreground">
-              登录后查看和创建任务
-            </CardContent>
+            <CardContent className="p-3 text-center text-xs text-muted-foreground">登录后查看和创建任务</CardContent>
           </Card>
         </div>
       </div>
@@ -432,9 +433,12 @@ export function TaskSidebar({ tasks, width = 288 }: TaskSidebarProps) {
       <div className="mb-2">
         <Link to="/miniprogram">
           <Button
-            variant={pathname === '/miniprogram' ? 'secondary' : 'ghost'}
+            variant="ghost"
             size="sm"
-            className="w-full justify-start h-8 px-2 text-xs"
+            className={cn(
+              'w-full justify-start h-8 px-2 text-xs',
+              pathname === '/miniprogram' && 'bg-accent text-accent-foreground',
+            )}
           >
             <Smartphone className="h-3.5 w-3.5 mr-2" />
             小程序管理
