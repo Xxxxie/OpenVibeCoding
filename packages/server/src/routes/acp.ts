@@ -26,6 +26,11 @@ acp.use('/*', async (c, next) => {
   if (c.req.path.endsWith('/health') || c.req.path.endsWith('/config')) {
     return next()
   }
+  // If using API key auth, verify it has 'acp' scope
+  const scopes = c.get('apiKeyScopes')
+  if (scopes !== undefined && !scopes.includes('acp')) {
+    return c.json({ error: 'API key does not have ACP scope' }, 403)
+  }
   return requireUserEnv(c, next)
 })
 

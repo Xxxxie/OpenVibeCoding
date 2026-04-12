@@ -2,6 +2,7 @@ import { Context, Next } from 'hono'
 import { getCookie } from 'hono/cookie'
 import { decryptJWE } from '../lib/session'
 import { getDb } from '../db/index.js'
+import { decrypt } from '../lib/crypto.js'
 import CloudBaseManager from '@cloudbase/manager-node'
 import { buildUserEnvPolicyStatements } from '../cloudbase/provision.js'
 
@@ -15,7 +16,7 @@ export interface SessionUser {
 
 export interface AppSession {
   created: number
-  authProvider: 'github' | 'vercel' | 'local' | 'cloudbase'
+  authProvider: 'github' | 'vercel' | 'local' | 'cloudbase' | 'api-key'
   user: SessionUser
 }
 
@@ -35,12 +36,64 @@ export type AppEnv = {
   Variables: {
     session: AppSession | undefined
     userEnv: UserEnv | undefined
+    /** Scopes from Server API Key auth, undefined for cookie auth */
+    apiKeyScopes: string[] | undefined
   }
 }
 
 const SESSION_COOKIE_NAME = 'nex_session'
 
 export async function authMiddleware(c: Context<AppEnv>, next: Next) {
+  // 1. Try Bearer token (Server API Key: sak_xxx)
+  const authHeader = c.req.header('Authorization')
+  if (authHeader?.startsWith('Bearer sak_')) {
+    try {
+      const plainKey = authHeader.slice(7) // Remove "Bearer "
+      const db = getDb()
+      // Search all keys and decrypt to match (encrypted storage)
+      const allKeys = await db.serverApiKeys.findAll()
+      let matched: (typeof allKeys)[number] | null = null
+      for (const k of allKeys) {
+        try {
+          if (decrypt(k.key) === plainKey) {
+            matched = k
+            break
+          }
+        } catch {
+          // Decryption failed, skip
+        }
+      }
+      if (matched) {
+        const user = await db.users.findById(matched.userId)
+        if (user) {
+          c.set('session', {
+            created: Date.now(),
+            authProvider: 'api-key' as AppSession['authProvider'],
+            user: {
+              id: user.id,
+              username: user.username,
+              email: user.email || undefined,
+              avatar: user.avatarUrl || '',
+              name: user.name || undefined,
+            },
+          })
+          // Update last used in background
+          db.serverApiKeys.updateLastUsed(matched.id).catch(() => {})
+          // Set API key scopes on context
+          try {
+            c.set('apiKeyScopes', JSON.parse(matched.scopes))
+          } catch {
+            c.set('apiKeyScopes', ['acp'])
+          }
+        }
+      }
+    } catch {
+      // Invalid API key, continue without auth
+    }
+    return next()
+  }
+
+  // 2. Try session cookie
   const sessionCookie = getCookie(c, SESSION_COOKIE_NAME)
   if (sessionCookie) {
     try {

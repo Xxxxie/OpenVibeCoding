@@ -707,40 +707,6 @@ class DrizzleAdminLogRepository implements AdminLogRepository {
   }
 }
 
-// ─── Server API Key Repository ──────────────────────────────────────────────
-
-class DrizzleServerApiKeyRepository implements ServerApiKeyRepository {
-  async findByKey(encryptedKey: string): Promise<ServerApiKey | null> {
-    const rows = await drizzleDb.select().from(serverApiKeys).where(eq(serverApiKeys.key, encryptedKey)).limit(1)
-    return (rows[0] as ServerApiKey) || null
-  }
-
-  async findByUserId(userId: string): Promise<ServerApiKey[]> {
-    const rows = await drizzleDb.select().from(serverApiKeys).where(eq(serverApiKeys.userId, userId))
-    return rows as ServerApiKey[]
-  }
-
-  async findAll(): Promise<ServerApiKey[]> {
-    const rows = await drizzleDb.select().from(serverApiKeys).orderBy(desc(serverApiKeys.createdAt))
-    return rows as ServerApiKey[]
-  }
-
-  async create(key: NewServerApiKey): Promise<ServerApiKey> {
-    const now = Date.now()
-    const record = { ...key, lastUsedAt: null, createdAt: now }
-    await drizzleDb.insert(serverApiKeys).values(record)
-    return record as ServerApiKey
-  }
-
-  async delete(id: string): Promise<void> {
-    await drizzleDb.delete(serverApiKeys).where(eq(serverApiKeys.id, id))
-  }
-
-  async updateLastUsed(id: string): Promise<void> {
-    await drizzleDb.update(serverApiKeys).set({ lastUsedAt: Date.now() }).where(eq(serverApiKeys.id, id))
-  }
-}
-
 // ─── Provider Factory ───────────────────────────────────────────────────────
 
 export function createDrizzleProvider(): DatabaseProvider {
@@ -757,6 +723,5 @@ export function createDrizzleProvider(): DatabaseProvider {
     settings: new DrizzleSettingRepository(),
     deployments: new DrizzleDeploymentRepository(),
     adminLogs: new DrizzleAdminLogRepository(),
-    serverApiKeys: new DrizzleServerApiKeyRepository(),
   }
 }
