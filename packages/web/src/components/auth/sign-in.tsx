@@ -4,7 +4,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { GitHubIcon } from '@/components/icons/github-icon'
 import { useState } from 'react'
-import { getEnabledAuthProviders } from '@/lib/auth/providers'
+import { getEnabledAuthProviders, getGitHubAuthMode } from '@/lib/auth/providers'
 
 type LocalMode = 'login' | 'register'
 
@@ -22,8 +22,13 @@ export function SignIn() {
   const { github: hasGitHub, local: hasLocal } = getEnabledAuthProviders()
 
   const handleGitHubSignIn = () => {
-    setLoadingGitHub(true)
-    window.location.href = '/api/auth/signin/github'
+    if (getGitHubAuthMode() === 'cloudbase') {
+      // CloudBase mode requires the full LoginPage with SDK handler
+      window.location.href = '/login'
+    } else {
+      setLoadingGitHub(true)
+      window.location.href = '/api/auth/github/login'
+    }
   }
 
   const handleLocalSubmit = async (e: React.FormEvent) => {
@@ -82,7 +87,6 @@ export function SignIn() {
           </DialogHeader>
 
           <div className="flex flex-col gap-3 py-4">
-            {/* GitHub sign-in (disabled)
             {hasGitHub && (
               <Button
                 onClick={handleGitHubSignIn}
@@ -104,9 +108,7 @@ export function SignIn() {
                 )}
               </Button>
             )}
-            */}
 
-            {/* Divider (disabled)
             {hasGitHub && hasLocal && (
               <div className="relative">
                 <div className="absolute inset-0 flex items-center">
@@ -117,7 +119,6 @@ export function SignIn() {
                 </div>
               </div>
             )}
-            */}
 
             {/* Local account */}
             {hasLocal && (

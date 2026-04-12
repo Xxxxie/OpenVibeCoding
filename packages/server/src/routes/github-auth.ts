@@ -5,6 +5,7 @@ import { nanoid } from 'nanoid'
 import { encryptJWE } from '../lib/session'
 import { encrypt } from '../lib/crypto'
 import type { AppEnv, AppSession } from '../middleware/auth'
+import { provisionUserResources } from '../cloudbase/provision.js'
 
 const SESSION_COOKIE_NAME = 'nex_session'
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 365 // 1 year in seconds
@@ -14,6 +15,58 @@ function generateState(): string {
 }
 
 const githubAuth = new Hono<AppEnv>()
+
+// GET /api/auth/github/login - Redirect to GitHub OAuth for sign-in (no session required)
+githubAuth.get('/login', async (c) => {
+  const clientId = process.env.NEXT_PUBLIC_GITHUB_CLIENT_ID
+  const origin = new URL(c.req.url).origin
+  const redirectUri = `${origin}/api/auth/github/callback`
+
+  // Determine the frontend origin for redirect after OAuth completes
+  // In dev mode, frontend may be on a different port (e.g. Vite dev server)
+  const referer = c.req.header('referer')
+  const frontendOrigin = referer ? new URL(referer).origin : origin
+
+  if (!clientId) {
+    return c.redirect(`${frontendOrigin}/login?error=github_not_configured`)
+  }
+
+  const state = generateState()
+  const next = c.req.query('next') ?? '/'
+  const redirectPath = next.startsWith('/') ? next : '/'
+  const redirectTo = `${frontendOrigin}${redirectPath}`
+
+  setCookie(c, 'github_auth_mode', 'signin', {
+    path: '/',
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    maxAge: 60 * 10,
+    sameSite: 'Lax',
+  })
+  setCookie(c, 'github_auth_state', state, {
+    path: '/',
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    maxAge: 60 * 10,
+    sameSite: 'Lax',
+  })
+  setCookie(c, 'github_auth_redirect_to', redirectTo, {
+    path: '/',
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    maxAge: 60 * 10,
+    sameSite: 'Lax',
+  })
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    scope: 'repo,read:user,user:email',
+    state: state,
+  })
+
+  return c.redirect(`https://github.com/login/oauth/authorize?${params.toString()}`)
+})
 
 // GET /api/auth/github/signin - Redirect to GitHub OAuth (connect flow for existing users)
 githubAuth.get('/signin', async (c) => {
@@ -26,13 +79,17 @@ githubAuth.get('/signin', async (c) => {
   const origin = new URL(c.req.url).origin
   const redirectUri = `${origin}/api/auth/github/callback`
 
+  const referer = c.req.header('referer')
+  const frontendOrigin = referer ? new URL(referer).origin : origin
+
   if (!clientId) {
-    return c.redirect('/?error=github_not_configured')
+    return c.redirect(`${frontendOrigin}/?error=github_not_configured`)
   }
 
   const state = generateState()
   const next = c.req.query('next') ?? '/'
-  const redirectTo = next.startsWith('/') ? next : '/'
+  const redirectPath = next.startsWith('/') ? next : '/'
+  const redirectTo = `${frontendOrigin}${redirectPath}`
 
   setCookie(c, 'github_oauth_redirect_to', redirectTo, {
     path: '/',
@@ -217,6 +274,66 @@ githubAuth.get('/callback', async (c) => {
           updatedAt: now,
           lastLoginAt: now,
         })
+      }
+
+      // Provision CloudBase resources for new users
+      if (process.env.TCB_SECRET_ID && process.env.TCB_SECRET_KEY) {
+        const existingResource = await getDb().userResources.findByUserId(userId)
+        if (!existingResource) {
+          const resourceId = nanoid()
+          const provisionMode = process.env.TCB_PROVISION_MODE || 'shared'
+
+          if (provisionMode === 'isolated') {
+            await getDb().userResources.create({
+              id: resourceId,
+              userId,
+              status: 'processing',
+              envId: null,
+              camUsername: null,
+              camSecretId: null,
+              camSecretKey: null,
+              policyId: null,
+              failStep: null,
+              failReason: null,
+              createdAt: now,
+              updatedAt: now,
+            })
+            provisionUserResources(userId, githubUser.login)
+              .then(async (result) => {
+                await getDb().userResources.update(resourceId, {
+                  status: 'success',
+                  envId: result.envId,
+                  camUsername: result.camUsername,
+                  camSecretId: result.camSecretId,
+                  camSecretKey: result.camSecretKey || null,
+                  policyId: result.policyId,
+                  updatedAt: Date.now(),
+                })
+              })
+              .catch(async (err) => {
+                await getDb().userResources.update(resourceId, {
+                  status: 'failed',
+                  failReason: err.message,
+                  updatedAt: Date.now(),
+                })
+              })
+          } else {
+            await getDb().userResources.create({
+              id: resourceId,
+              userId,
+              status: 'success',
+              envId: process.env.TCB_ENV_ID || null,
+              camUsername: null,
+              camSecretId: process.env.TCB_SECRET_ID || null,
+              camSecretKey: process.env.TCB_SECRET_KEY || null,
+              policyId: null,
+              failStep: null,
+              failReason: null,
+              createdAt: now,
+              updatedAt: now,
+            })
+          }
+        }
       }
 
       const session: AppSession = {

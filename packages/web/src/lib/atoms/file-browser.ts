@@ -16,6 +16,10 @@ interface FileTreeNode {
   deletions?: number
   changes?: number
   children?: { [key: string]: FileTreeNode }
+  /** Whether this directory's children have been loaded (for lazy loading) */
+  loaded?: boolean
+  /** Whether this directory is currently loading children */
+  loading?: boolean
 }
 
 interface ViewModeData {
@@ -52,12 +56,14 @@ const defaultState: FileBrowserState = {
   error: null,
 }
 
-// Create a separate atom for each task's file browser state
+// Single atom holding all tasks' file browser states
 export const fileBrowserStateFamily = atom<Record<string, FileBrowserState>>({})
 
-// Helper to get state for a specific task
-export const getTaskFileBrowserState = (taskId: string) =>
-  atom(
+// Cache derived atoms per taskId so the same atom instance is always returned
+const taskAtomCache = new Map<string, ReturnType<typeof buildTaskAtom>>()
+
+function buildTaskAtom(taskId: string) {
+  return atom(
     (get) => {
       const allStates = get(fileBrowserStateFamily)
       return allStates[taskId] || structuredClone(defaultState)
@@ -71,3 +77,12 @@ export const getTaskFileBrowserState = (taskId: string) =>
       })
     },
   )
+}
+
+// Helper to get state for a specific task — always returns the same atom instance
+export const getTaskFileBrowserState = (taskId: string) => {
+  if (!taskAtomCache.has(taskId)) {
+    taskAtomCache.set(taskId, buildTaskAtom(taskId))
+  }
+  return taskAtomCache.get(taskId)!
+}

@@ -66,6 +66,8 @@ interface FileTreeNode {
   deletions?: number
   changes?: number
   children?: { [key: string]: FileTreeNode }
+  loaded?: boolean
+  loading?: boolean
 }
 
 interface FileBrowserProps {
@@ -211,6 +213,93 @@ export function FileBrowser({
     return null
   }, [])
 
+  // Lazy load a single directory's entries from the sandbox
+  const fetchDirEntries = useCallback(
+    async (dirPath: string) => {
+      try {
+        const url = `/api/tasks/${taskId}/files/list-dir?path=${encodeURIComponent(dirPath)}`
+        const response = await fetch(url)
+        const result = await response.json()
+        if (!result.success || !result.entries) return null
+        return result.entries as Array<{ name: string; type: 'file' | 'directory'; path: string }>
+      } catch {
+        return null
+      }
+    },
+    [taskId],
+  )
+
+  // Refresh file tree: sandboxOnly uses list-dir, otherwise uses full files API
+  const refreshFileTree = useCallback(
+    async (extraExpandedFolders?: Set<string>) => {
+      if (sandboxOnly) {
+        const entries = await fetchDirEntries('.')
+        if (entries) {
+          const lazyTree: Record<string, FileTreeNode> = {}
+          const lazyFiles: FileChange[] = []
+          for (const entry of entries) {
+            if (entry.type === 'directory') {
+              lazyTree[entry.name] = { type: 'directory', children: {}, loaded: false }
+            } else {
+              lazyTree[entry.name] = {
+                type: 'file',
+                filename: entry.path,
+                status: 'modified',
+                additions: 0,
+                deletions: 0,
+                changes: 0,
+              }
+              lazyFiles.push({
+                filename: entry.path,
+                status: 'modified',
+                additions: 0,
+                deletions: 0,
+                changes: 0,
+              })
+            }
+          }
+          const merged = extraExpandedFolders ? new Set([...expandedFolders, ...extraExpandedFolders]) : expandedFolders
+          setState({
+            [viewMode]: {
+              files: lazyFiles,
+              fileTree: lazyTree,
+              expandedFolders: merged,
+              fetchAttempted: true,
+              error: null,
+            },
+            loading: false,
+          })
+          return { success: true, files: lazyFiles, fileTree: lazyTree }
+        }
+        return null
+      }
+      // Non-sandbox: use full files API
+      try {
+        const url = `/api/tasks/${taskId}/files?mode=${viewMode}`
+        const response = await fetch(url)
+        const result = await response.json()
+        if (result.success) {
+          const merged = extraExpandedFolders ? new Set([...expandedFolders, ...extraExpandedFolders]) : expandedFolders
+          setState({
+            [viewMode]: {
+              files: result.files || [],
+              fileTree: result.fileTree || {},
+              expandedFolders: merged,
+              fetchAttempted: true,
+              error: null,
+            },
+            loading: false,
+          })
+          return result
+        }
+      } catch {
+        // ignore
+      }
+      return null
+    },
+    [sandboxOnly, fetchDirEntries, taskId, viewMode, setState, expandedFolders],
+  )
+
   const fetchBranchFiles = useCallback(async () => {
     if (!hasBranch && !sandboxId) return
 
@@ -218,6 +307,48 @@ export function FileBrowser({
 
     if (isInitialLoad) {
       setState({ loading: true, error: null })
+    }
+
+    // Lazy loading: for all-local (sandbox-only), always use list-dir
+    if (sandboxOnly) {
+      const entries = await fetchDirEntries('.')
+      if (entries) {
+        const lazyTree: Record<string, FileTreeNode> = {}
+        const lazyFiles: FileChange[] = []
+        for (const entry of entries) {
+          if (entry.type === 'directory') {
+            lazyTree[entry.name] = { type: 'directory', children: {}, loaded: false }
+          } else {
+            lazyTree[entry.name] = {
+              type: 'file',
+              filename: entry.path,
+              status: 'modified',
+              additions: 0,
+              deletions: 0,
+              changes: 0,
+            }
+            lazyFiles.push({
+              filename: entry.path,
+              status: 'modified',
+              additions: 0,
+              deletions: 0,
+              changes: 0,
+            })
+          }
+        }
+        setState({
+          [viewMode]: {
+            files: lazyFiles,
+            fileTree: lazyTree,
+            expandedFolders: new Set<string>(),
+            fetchAttempted: true,
+            error: null,
+          },
+          loading: false,
+        })
+        return
+      }
+      // Fallback: if list-dir fails, continue with full fetch below
     }
 
     try {
@@ -297,6 +428,8 @@ export function FileBrowser({
     selectedFile,
     onFileSelect,
     getFirstFile,
+    sandboxOnly,
+    fetchDirEntries,
   ])
 
   const handleSyncChanges = useCallback(async () => {
@@ -322,20 +455,7 @@ export function FileBrowser({
       setSyncCommitMessage('')
 
       try {
-        const url = `/api/tasks/${taskId}/files?mode=${viewMode}`
-        const fetchResponse = await fetch(url)
-        const fetchResult = await fetchResponse.json()
-
-        if (fetchResult.success) {
-          setState({
-            [viewMode]: {
-              files: fetchResult.files || [],
-              fileTree: fetchResult.fileTree || {},
-              expandedFolders: currentViewData.expandedFolders,
-              fetchAttempted: true,
-            },
-          })
-        }
+        await refreshFileTree()
       } catch (err) {
         console.error('Error refreshing file list:', err)
       }
@@ -370,20 +490,7 @@ export function FileBrowser({
       setCommitMessage('')
 
       try {
-        const url = `/api/tasks/${taskId}/files?mode=${viewMode}`
-        const fetchResponse = await fetch(url)
-        const fetchResult = await fetchResponse.json()
-
-        if (fetchResult.success) {
-          setState({
-            [viewMode]: {
-              files: fetchResult.files || [],
-              fileTree: fetchResult.fileTree || {},
-              expandedFolders: currentViewData.expandedFolders,
-              fetchAttempted: true,
-            },
-          })
-        }
+        await refreshFileTree()
       } catch (err) {
         console.error('Error refreshing file list:', err)
       }
@@ -453,23 +560,10 @@ export function FileBrowser({
       setNewFileName('')
 
       try {
-        const url = `/api/tasks/${taskId}/files?mode=${viewMode}`
-        const fetchResponse = await fetch(url)
-        const fetchResult = await fetchResponse.json()
-        if (fetchResult.success) {
-          const newExpandedFolders = new Set(currentViewData.expandedFolders)
-          const parentPath = filename.split('/').slice(0, -1).join('/')
-          if (parentPath) newExpandedFolders.add(parentPath)
-          setState({
-            [viewMode]: {
-              files: fetchResult.files || [],
-              fileTree: fetchResult.fileTree || {},
-              expandedFolders: newExpandedFolders,
-              fetchAttempted: true,
-            },
-          })
-          if (onFileSelect) onFileSelect(filename, false)
-        }
+        const parentPath = filename.split('/').slice(0, -1).join('/')
+        const extra = parentPath ? new Set([parentPath]) : undefined
+        await refreshFileTree(extra)
+        if (onFileSelect) onFileSelect(filename, false)
       } catch (err) {
         console.error('Error refreshing file list:', err)
       }
@@ -508,24 +602,12 @@ export function FileBrowser({
       setNewFolderName('')
 
       try {
-        const url = `/api/tasks/${taskId}/files?mode=${viewMode}`
-        const fetchResponse = await fetch(url)
-        const fetchResult = await fetchResponse.json()
-        if (fetchResult.success) {
-          const newExpandedFolders = new Set(currentViewData.expandedFolders)
-          const parentPath = foldername.split('/').slice(0, -1).join('/')
-          if (parentPath) newExpandedFolders.add(parentPath)
-          newExpandedFolders.add(foldername)
-          setState({
-            [viewMode]: {
-              files: fetchResult.files || [],
-              fileTree: fetchResult.fileTree || {},
-              expandedFolders: newExpandedFolders,
-              fetchAttempted: true,
-            },
-          })
-          if (onFileSelect) onFileSelect(foldername, true)
-        }
+        const parentPath = foldername.split('/').slice(0, -1).join('/')
+        const extra = new Set<string>()
+        if (parentPath) extra.add(parentPath)
+        extra.add(foldername)
+        await refreshFileTree(extra)
+        if (onFileSelect) onFileSelect(foldername, true)
       } catch (err) {
         console.error('Error refreshing file list:', err)
       }
@@ -558,19 +640,7 @@ export function FileBrowser({
         setFileToDelete(null)
 
         try {
-          const url = `/api/tasks/${taskId}/files?mode=${viewMode}`
-          const fetchResponse = await fetch(url)
-          const fetchResult = await fetchResponse.json()
-          if (fetchResult.success) {
-            setState({
-              [viewMode]: {
-                files: fetchResult.files || [],
-                fileTree: fetchResult.fileTree || {},
-                expandedFolders: currentViewData.expandedFolders,
-                fetchAttempted: true,
-              },
-            })
-          }
+          await refreshFileTree()
         } catch (err) {
           console.error('Error refreshing file list:', err)
         }
@@ -598,15 +668,102 @@ export function FileBrowser({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey, hasBranch, sandboxId])
 
-  const toggleFolder = (path: string) => {
-    const newExpanded = new Set(expandedFolders)
-    if (newExpanded.has(path)) {
-      newExpanded.delete(path)
-    } else {
+  // Helper: update a nested node in fileTree by path
+  const updateTreeNode = useCallback(
+    (tree: Record<string, FileTreeNode>, path: string, updater: (node: FileTreeNode) => FileTreeNode) => {
+      const newTree = { ...tree }
+      const parts = path.split('/')
+      let current = newTree
+
+      for (let i = 0; i < parts.length - 1; i++) {
+        const part = parts[i]
+        if (current[part]?.type === 'directory') {
+          current[part] = { ...current[part], children: { ...current[part].children } }
+          current = current[part].children!
+        } else {
+          return tree // path not found
+        }
+      }
+
+      const lastPart = parts[parts.length - 1]
+      if (current[lastPart]) {
+        current[lastPart] = updater(current[lastPart])
+      }
+      return newTree
+    },
+    [],
+  )
+
+  const toggleFolder = useCallback(
+    async (path: string) => {
+      const newExpanded = new Set(expandedFolders)
+      if (newExpanded.has(path)) {
+        newExpanded.delete(path)
+        setState({ [viewMode]: { ...currentViewData, expandedFolders: newExpanded } })
+        return
+      }
+
+      // Expanding: check if lazy loading is needed (all-local mode, not yet loaded)
       newExpanded.add(path)
-    }
-    setState({ [viewMode]: { ...currentViewData, expandedFolders: newExpanded } })
-  }
+
+      if (sandboxOnly) {
+        // Find the node at this path
+        const parts = path.split('/')
+        let node: FileTreeNode | undefined
+        let level = fileTree
+        for (const part of parts) {
+          node = level[part]
+          if (!node) break
+          if (node.type === 'directory' && node.children) level = node.children
+        }
+
+        if (node?.type === 'directory' && !node.loaded) {
+          // Mark as loading
+          const loadingTree = updateTreeNode(fileTree, path, (n) => ({ ...n, loading: true }))
+          setState({ [viewMode]: { ...currentViewData, fileTree: loadingTree, expandedFolders: newExpanded } })
+
+          // Fetch directory entries
+          const entries = await fetchDirEntries(path)
+          if (entries) {
+            const children: Record<string, FileTreeNode> = {}
+            for (const entry of entries) {
+              if (entry.type === 'directory') {
+                children[entry.name] = { type: 'directory', children: {}, loaded: false }
+              } else {
+                children[entry.name] = {
+                  type: 'file',
+                  filename: entry.path,
+                  status: 'modified',
+                  additions: 0,
+                  deletions: 0,
+                  changes: 0,
+                }
+              }
+            }
+            const updatedTree = updateTreeNode(fileTree, path, (n) => ({
+              ...n,
+              children,
+              loaded: true,
+              loading: false,
+            }))
+            setState({ [viewMode]: { ...currentViewData, fileTree: updatedTree, expandedFolders: newExpanded } })
+          } else {
+            // Failed, just mark loaded to avoid retrying
+            const failedTree = updateTreeNode(fileTree, path, (n) => ({
+              ...n,
+              loaded: true,
+              loading: false,
+            }))
+            setState({ [viewMode]: { ...currentViewData, fileTree: failedTree, expandedFolders: newExpanded } })
+          }
+          return
+        }
+      }
+
+      setState({ [viewMode]: { ...currentViewData, expandedFolders: newExpanded } })
+    },
+    [expandedFolders, setState, viewMode, currentViewData, sandboxOnly, fileTree, fetchDirEntries, updateTreeNode],
+  )
 
   const handleOpenOnGitHub = useCallback(
     (path: string, isFolder: boolean = false) => {
@@ -659,19 +816,7 @@ export function FileBrowser({
         if (clipboardFile.operation === 'cut') setClipboardFile(null)
 
         try {
-          const url = `/api/tasks/${taskId}/files?mode=${viewMode}`
-          const fetchResponse = await fetch(url)
-          const fetchResult = await fetchResponse.json()
-          if (fetchResult.success) {
-            setState({
-              [viewMode]: {
-                files: fetchResult.files || [],
-                fileTree: fetchResult.fileTree || {},
-                expandedFolders: currentViewData.expandedFolders,
-                fetchAttempted: true,
-              },
-            })
-          }
+          await refreshFileTree()
         } catch (err) {
           console.error('Error refreshing file list:', err)
         }
@@ -705,19 +850,7 @@ export function FileBrowser({
       toast.success('Changes discarded successfully')
 
       try {
-        const url = `/api/tasks/${taskId}/files?mode=${viewMode}`
-        const fetchResponse = await fetch(url)
-        const fetchResult = await fetchResponse.json()
-        if (fetchResult.success) {
-          setState({
-            [viewMode]: {
-              files: fetchResult.files || [],
-              fileTree: fetchResult.fileTree || {},
-              expandedFolders: currentViewData.expandedFolders,
-              fetchAttempted: true,
-            },
-          })
-        }
+        await refreshFileTree()
       } catch (err) {
         console.error('Error refreshing file list:', err)
       }
@@ -797,21 +930,8 @@ export function FileBrowser({
         toast.success(`${draggedItem.type === 'folder' ? 'Folder' : 'File'} moved successfully`)
 
         try {
-          const url = `/api/tasks/${taskId}/files?mode=${viewMode}`
-          const fetchResponse = await fetch(url)
-          const fetchResult = await fetchResponse.json()
-          if (fetchResult.success) {
-            const newExpandedFolders = new Set(currentViewData.expandedFolders)
-            if (targetFolderPath !== '__root__') newExpandedFolders.add(targetFolderPath)
-            setState({
-              [viewMode]: {
-                files: fetchResult.files || [],
-                fileTree: fetchResult.fileTree || {},
-                expandedFolders: newExpandedFolders,
-                fetchAttempted: true,
-              },
-            })
-          }
+          const extra = targetFolderPath !== '__root__' ? new Set([targetFolderPath]) : undefined
+          await refreshFileTree(extra)
         } catch (err) {
           console.error('Error refreshing file list:', err)
         }
@@ -965,7 +1085,16 @@ export function FileBrowser({
               )}
             </div>
             {isExpanded && node.children && (
-              <div className="ml-3 md:ml-4">{renderFileTree(node.children, fullPath)}</div>
+              <div className="ml-3 md:ml-4">
+                {node.loading ? (
+                  <div className="flex items-center gap-2 py-1 px-2 text-xs text-muted-foreground">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Loading...
+                  </div>
+                ) : (
+                  renderFileTree(node.children, fullPath)
+                )}
+              </div>
             )}
           </div>
         )
@@ -1126,12 +1255,12 @@ export function FileBrowser({
         <div className="border-b">
           <div className="py-2 px-3 flex items-center justify-between h-[46px]">
             <div className="flex items-center gap-1">
-              <button
+              {/* <button
                 onClick={() => onViewModeChange?.(subMode === 'local' ? 'local' : 'remote')}
                 className={`text-sm font-semibold px-2 py-1 rounded transition-colors ${filesPane === 'changes' ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
               >
                 Changes
-              </button>
+              </button> */}
               <button
                 onClick={() => onViewModeChange?.(subMode === 'local' ? 'all-local' : 'all')}
                 className={`text-sm font-semibold px-2 py-1 rounded transition-colors ${filesPane === 'files' ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
@@ -1139,7 +1268,7 @@ export function FileBrowser({
                 Files
               </button>
             </div>
-            <div className="inline-flex rounded-md border border-border bg-muted/50 p-0.5">
+            {/* <div className="inline-flex rounded-md border border-border bg-muted/50 p-0.5">
               <Button
                 variant={subMode === 'remote' ? 'secondary' : 'ghost'}
                 size="sm"
@@ -1156,7 +1285,7 @@ export function FileBrowser({
               >
                 Sandbox
               </Button>
-            </div>
+            </div> */}
           </div>
         </div>
       )}

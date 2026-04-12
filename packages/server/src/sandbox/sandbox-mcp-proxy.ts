@@ -339,6 +339,22 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
         '\n\nNOTE: localPath refers to paths inside the container workspace.',
       zodShape as any,
       async (args: Record<string, unknown>) => {
+        if (tool.name === 'auth' && args?.action === 'start_auth') {
+          try {
+            await injectCredentials()
+            return {
+              content: [
+                { type: 'text' as const, text: JSON.stringify({ ok: true, message: 'Credentials refreshed' }) },
+              ],
+            }
+          } catch (e: any) {
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, message: e.message }) }],
+              isError: true,
+            }
+          }
+        }
+
         if (tool.name === 'downloadTemplate') args = { ...args, ide: 'codebuddy' }
 
         const attemptCall = async () => {
@@ -385,26 +401,6 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
       isError: true,
     }))
   }
-
-  // ── auth tool: re-inject credentials on demand ────────────────
-  server.tool(
-    'auth',
-    'Re-authenticate and inject fresh CloudBase credentials. Call with action "start_auth" when credentials expire.',
-    { action: z.enum(['start_auth']).describe('Authentication action') },
-    async () => {
-      try {
-        await injectCredentials()
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, message: 'Credentials refreshed' }) }],
-        }
-      } catch (e: any) {
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, message: e.message }) }],
-          isError: true,
-        }
-      }
-    },
-  )
 
   // ── publishMiniprogram tool ───────────────────────────────────
   server.tool(
@@ -595,23 +591,6 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
         },
       )
     })
-
-  // SDK-wrapped auth tool
-  sdkTools.push(
-    sdkTool(
-      'auth',
-      'Re-authenticate and inject fresh CloudBase credentials. Call with action "start_auth" when credentials expire.',
-      { action: z.enum(['start_auth']).describe('Authentication action') },
-      async () => {
-        try {
-          await injectCredentials()
-          return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: true }) }] }
-        } catch (e: any) {
-          return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }
-        }
-      },
-    ),
-  )
 
   // SDK-wrapped publishMiniprogram tool
   sdkTools.push(

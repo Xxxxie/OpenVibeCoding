@@ -25,6 +25,7 @@ __export(schema_exports, {
   accounts: () => accounts,
   adminLogs: () => adminLogs,
   connectors: () => connectors,
+  cronTasks: () => cronTasks,
   deployments: () => deployments,
   keys: () => keys,
   localCredentials: () => localCredentials,
@@ -35,7 +36,7 @@ __export(schema_exports, {
   users: () => users
 });
 import { sqliteTable, text, integer, uniqueIndex, index } from "drizzle-orm/sqlite-core";
-var now2, users, localCredentials, tasks, connectors, miniprogramApps, accounts, keys, userResources, settings, deployments, adminLogs;
+var now2, users, localCredentials, tasks, connectors, miniprogramApps, cronTasks, accounts, keys, userResources, settings, deployments, adminLogs;
 var init_schema = __esm({
   "src/db/schema.ts"() {
     "use strict";
@@ -135,6 +136,21 @@ var init_schema = __esm({
       privateKey: text("private_key").notNull(),
       // stored encrypted via lib/crypto
       description: text("description"),
+      createdAt: integer("created_at").notNull().$defaultFn(now2),
+      updatedAt: integer("updated_at").notNull().$defaultFn(now2)
+    });
+    cronTasks = sqliteTable("cron_tasks", {
+      id: text("id").primaryKey(),
+      userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+      name: text("name").notNull(),
+      prompt: text("prompt").notNull(),
+      cronExpression: text("cron_expression").notNull(),
+      enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+      repoUrl: text("repo_url"),
+      selectedAgent: text("selected_agent").default("codebuddy"),
+      selectedModel: text("selected_model"),
+      lastRunAt: integer("last_run_at"),
+      nextRunAt: integer("next_run_at"),
       createdAt: integer("created_at").notNull().$defaultFn(now2),
       updatedAt: integer("updated_at").notNull().$defaultFn(now2)
     });
@@ -288,6 +304,7 @@ function createDrizzleProvider() {
     tasks: new DrizzleTaskRepository(),
     connectors: new DrizzleConnectorRepository(),
     miniprogramApps: new DrizzleMiniProgramAppRepository(),
+    cronTasks: new DrizzleCronTaskRepository(),
     accounts: new DrizzleAccountRepository(),
     keys: new DrizzleKeyRepository(),
     userResources: new DrizzleUserResourceRepository(),
@@ -296,7 +313,7 @@ function createDrizzleProvider() {
     adminLogs: new DrizzleAdminLogRepository()
   };
 }
-var now3, DrizzleUserRepository, DrizzleLocalCredentialRepository, DrizzleTaskRepository, DrizzleConnectorRepository, DrizzleMiniProgramAppRepository, DrizzleAccountRepository, DrizzleKeyRepository, DrizzleUserResourceRepository, DrizzleSettingRepository, DrizzleDeploymentRepository, DrizzleAdminLogRepository;
+var now3, DrizzleUserRepository, DrizzleLocalCredentialRepository, DrizzleTaskRepository, DrizzleConnectorRepository, DrizzleMiniProgramAppRepository, DrizzleCronTaskRepository, DrizzleAccountRepository, DrizzleKeyRepository, DrizzleUserResourceRepository, DrizzleSettingRepository, DrizzleDeploymentRepository, DrizzleAdminLogRepository;
 var init_repositories = __esm({
   "src/db/drizzle/repositories.ts"() {
     "use strict";
@@ -487,12 +504,12 @@ var init_repositories = __esm({
         const [row] = await drizzleDb.select().from(miniprogramApps).where(and(eq(miniprogramApps.appId, appId), eq(miniprogramApps.userId, userId))).limit(1);
         return row ?? null;
       }
-      async create(app8) {
+      async create(app9) {
         const ts = now3();
         const values = {
-          ...app8,
-          createdAt: app8.createdAt ?? ts,
-          updatedAt: app8.updatedAt ?? ts
+          ...app9,
+          createdAt: app9.createdAt ?? ts,
+          updatedAt: app9.updatedAt ?? ts
         };
         await drizzleDb.insert(miniprogramApps).values(values);
         return values;
@@ -506,6 +523,40 @@ var init_repositories = __esm({
       }
       async delete(id, userId) {
         await drizzleDb.delete(miniprogramApps).where(and(eq(miniprogramApps.id, id), eq(miniprogramApps.userId, userId)));
+      }
+    };
+    DrizzleCronTaskRepository = class {
+      async findByUserId(userId) {
+        const rows = await drizzleDb.select().from(cronTasks).where(eq(cronTasks.userId, userId));
+        return rows;
+      }
+      async findByIdAndUserId(id, userId) {
+        const [row] = await drizzleDb.select().from(cronTasks).where(and(eq(cronTasks.id, id), eq(cronTasks.userId, userId))).limit(1);
+        return row ?? null;
+      }
+      async findAllEnabled() {
+        const rows = await drizzleDb.select().from(cronTasks).where(eq(cronTasks.enabled, true));
+        return rows;
+      }
+      async create(task) {
+        const ts = now3();
+        const values = {
+          ...task,
+          createdAt: task.createdAt ?? ts,
+          updatedAt: task.updatedAt ?? ts
+        };
+        await drizzleDb.insert(cronTasks).values(values);
+        return values;
+      }
+      async update(id, userId, data) {
+        await drizzleDb.update(cronTasks).set({ ...data, updatedAt: data.updatedAt ?? now3() }).where(and(eq(cronTasks.id, id), eq(cronTasks.userId, userId)));
+        return this.findByIdAndUserId(id, userId);
+      }
+      async delete(id, userId) {
+        await drizzleDb.delete(cronTasks).where(and(eq(cronTasks.id, id), eq(cronTasks.userId, userId)));
+      }
+      async updateUserId(fromUserId, toUserId) {
+        await drizzleDb.update(cronTasks).set({ userId: toUserId }).where(eq(cronTasks.userId, fromUserId));
       }
     };
     DrizzleAccountRepository = class {
@@ -684,7 +735,7 @@ var init_repositories = __esm({
 
 // src/index.ts
 import { serve } from "@hono/node-server";
-import { Hono as Hono17 } from "hono";
+import { Hono as Hono19 } from "hono";
 import { cors } from "hono/cors";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { existsSync as existsSync2 } from "fs";
@@ -1019,13 +1070,13 @@ var CloudBaseMiniProgramAppRepository = class {
     if (!data || data.length === 0) return null;
     return stripCloudBaseId(data[0]);
   }
-  async create(app8) {
+  async create(app9) {
     const collection = await getCollection("miniprogram_apps");
     const ts = now();
     const doc = {
-      ...app8,
-      createdAt: app8.createdAt ?? ts,
-      updatedAt: app8.updatedAt ?? ts
+      ...app9,
+      createdAt: app9.createdAt ?? ts,
+      updatedAt: app9.updatedAt ?? ts
     };
     await collection.add(doc);
     return doc;
@@ -1045,6 +1096,54 @@ var CloudBaseMiniProgramAppRepository = class {
     const _ = getCommand();
     const collection = await getCollection("miniprogram_apps");
     await collection.where({ id: _.eq(id), userId: _.eq(userId) }).remove();
+  }
+};
+var CloudBaseCronTaskRepository = class {
+  async findByUserId(userId) {
+    const _ = getCommand();
+    const collection = await getCollection("cron_tasks");
+    const { data } = await collection.where({ userId: _.eq(userId) }).limit(1e3).get();
+    return data.map((doc) => stripCloudBaseId(doc));
+  }
+  async findByIdAndUserId(id, userId) {
+    const _ = getCommand();
+    const collection = await getCollection("cron_tasks");
+    const { data } = await collection.where({ id: _.eq(id), userId: _.eq(userId) }).limit(1).get();
+    if (!data || data.length === 0) return null;
+    return stripCloudBaseId(data[0]);
+  }
+  async findAllEnabled() {
+    const _ = getCommand();
+    const collection = await getCollection("cron_tasks");
+    const { data } = await collection.where({ enabled: _.eq(true) }).limit(1e3).get();
+    return data.map((doc) => stripCloudBaseId(doc));
+  }
+  async create(task) {
+    const collection = await getCollection("cron_tasks");
+    const ts = now();
+    const doc = {
+      ...task,
+      createdAt: task.createdAt ?? ts,
+      updatedAt: task.updatedAt ?? ts
+    };
+    await collection.add(doc);
+    return doc;
+  }
+  async update(id, userId, data) {
+    const _ = getCommand();
+    const collection = await getCollection("cron_tasks");
+    await collection.where({ id: _.eq(id), userId: _.eq(userId) }).update({ ...data, updatedAt: data.updatedAt ?? now() });
+    return this.findByIdAndUserId(id, userId);
+  }
+  async delete(id, userId) {
+    const _ = getCommand();
+    const collection = await getCollection("cron_tasks");
+    await collection.where({ id: _.eq(id), userId: _.eq(userId) }).remove();
+  }
+  async updateUserId(fromUserId, toUserId) {
+    const _ = getCommand();
+    const collection = await getCollection("cron_tasks");
+    await collection.where({ userId: _.eq(fromUserId) }).update({ userId: toUserId });
   }
 };
 var CloudBaseAccountRepository = class {
@@ -1291,6 +1390,7 @@ function createCloudBaseProvider() {
     tasks: new CloudBaseTaskRepository(),
     connectors: new CloudBaseConnectorRepository(),
     miniprogramApps: new CloudBaseMiniProgramAppRepository(),
+    cronTasks: new CloudBaseCronTaskRepository(),
     accounts: new CloudBaseAccountRepository(),
     keys: new CloudBaseKeyRepository(),
     userResources: new CloudBaseUserResourceRepository(),
@@ -1521,8 +1621,8 @@ async function issueTempCredentials(envId, userId) {
   const systemEnvId = process.env.TCB_ENV_ID;
   if (!systemSecretId || !systemSecretKey || !systemEnvId) return void 0;
   try {
-    const app8 = new CloudBaseManager({ secretId: systemSecretId, secretKey: systemSecretKey, envId: systemEnvId });
-    const result = await app8.commonService("sts").call({
+    const app9 = new CloudBaseManager({ secretId: systemSecretId, secretKey: systemSecretKey, envId: systemEnvId });
+    const result = await app9.commonService("sts").call({
       Action: "GetFederationToken",
       Param: {
         Name: `vibe-user-${userId.slice(0, 8)}`,
@@ -1626,7 +1726,7 @@ auth.post("/register", async (c) => {
     });
     const session = {
       created: now4,
-      authProvider: "github",
+      authProvider: "local",
       user: {
         id: userId,
         username: trimmedUsername,
@@ -1729,7 +1829,7 @@ auth.post("/login", async (c) => {
     await getDb().users.update(user.id, { lastLoginAt: Date.now(), updatedAt: Date.now() });
     const session = {
       created: Date.now(),
-      authProvider: "github",
+      authProvider: "local",
       user: {
         id: user.id,
         username: user.username,
@@ -1806,6 +1906,12 @@ auth.get("/rate-limit", async (c) => {
     resetAt: new Date(Date.now() + 864e5).toISOString()
   });
 });
+auth.get("/auth-config", (c) => {
+  const providers = (process.env.NEXT_PUBLIC_AUTH_PROVIDERS || "local").split(",").map((s) => s.trim());
+  const githubMode = process.env.AUTH_GITHUB_MODE || "direct";
+  const tcbEnvId = process.env.TCB_ENV_ID || "";
+  return c.json({ providers, githubMode, tcbEnvId });
+});
 var auth_default = auth;
 
 // src/routes/github-auth.ts
@@ -1873,6 +1979,48 @@ function generateState() {
   return nanoid4(32);
 }
 var githubAuth = new Hono2();
+githubAuth.get("/login", async (c) => {
+  const clientId = process.env.NEXT_PUBLIC_GITHUB_CLIENT_ID;
+  const origin = new URL(c.req.url).origin;
+  const redirectUri = `${origin}/api/auth/github/callback`;
+  const referer = c.req.header("referer");
+  const frontendOrigin = referer ? new URL(referer).origin : origin;
+  if (!clientId) {
+    return c.redirect(`${frontendOrigin}/login?error=github_not_configured`);
+  }
+  const state = generateState();
+  const next = c.req.query("next") ?? "/";
+  const redirectPath = next.startsWith("/") ? next : "/";
+  const redirectTo = `${frontendOrigin}${redirectPath}`;
+  setCookie2(c, "github_auth_mode", "signin", {
+    path: "/",
+    secure: process.env.NODE_ENV === "production",
+    httpOnly: true,
+    maxAge: 60 * 10,
+    sameSite: "Lax"
+  });
+  setCookie2(c, "github_auth_state", state, {
+    path: "/",
+    secure: process.env.NODE_ENV === "production",
+    httpOnly: true,
+    maxAge: 60 * 10,
+    sameSite: "Lax"
+  });
+  setCookie2(c, "github_auth_redirect_to", redirectTo, {
+    path: "/",
+    secure: process.env.NODE_ENV === "production",
+    httpOnly: true,
+    maxAge: 60 * 10,
+    sameSite: "Lax"
+  });
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    scope: "repo,read:user,user:email",
+    state
+  });
+  return c.redirect(`https://github.com/login/oauth/authorize?${params.toString()}`);
+});
 githubAuth.get("/signin", async (c) => {
   const session = c.get("session");
   if (!session?.user) {
@@ -1881,12 +2029,15 @@ githubAuth.get("/signin", async (c) => {
   const clientId = process.env.NEXT_PUBLIC_GITHUB_CLIENT_ID;
   const origin = new URL(c.req.url).origin;
   const redirectUri = `${origin}/api/auth/github/callback`;
+  const referer = c.req.header("referer");
+  const frontendOrigin = referer ? new URL(referer).origin : origin;
   if (!clientId) {
-    return c.redirect("/?error=github_not_configured");
+    return c.redirect(`${frontendOrigin}/?error=github_not_configured`);
   }
   const state = generateState();
   const next = c.req.query("next") ?? "/";
-  const redirectTo = next.startsWith("/") ? next : "/";
+  const redirectPath = next.startsWith("/") ? next : "/";
+  const redirectTo = `${frontendOrigin}${redirectPath}`;
   setCookie2(c, "github_oauth_redirect_to", redirectTo, {
     path: "/",
     secure: process.env.NODE_ENV === "production",
@@ -2028,6 +2179,61 @@ githubAuth.get("/callback", async (c) => {
           lastLoginAt: now4
         });
       }
+      if (process.env.TCB_SECRET_ID && process.env.TCB_SECRET_KEY) {
+        const existingResource = await getDb().userResources.findByUserId(userId);
+        if (!existingResource) {
+          const resourceId = nanoid4();
+          const provisionMode = process.env.TCB_PROVISION_MODE || "shared";
+          if (provisionMode === "isolated") {
+            await getDb().userResources.create({
+              id: resourceId,
+              userId,
+              status: "processing",
+              envId: null,
+              camUsername: null,
+              camSecretId: null,
+              camSecretKey: null,
+              policyId: null,
+              failStep: null,
+              failReason: null,
+              createdAt: now4,
+              updatedAt: now4
+            });
+            provisionUserResources(userId, githubUser.login).then(async (result) => {
+              await getDb().userResources.update(resourceId, {
+                status: "success",
+                envId: result.envId,
+                camUsername: result.camUsername,
+                camSecretId: result.camSecretId,
+                camSecretKey: result.camSecretKey || null,
+                policyId: result.policyId,
+                updatedAt: Date.now()
+              });
+            }).catch(async (err) => {
+              await getDb().userResources.update(resourceId, {
+                status: "failed",
+                failReason: err.message,
+                updatedAt: Date.now()
+              });
+            });
+          } else {
+            await getDb().userResources.create({
+              id: resourceId,
+              userId,
+              status: "success",
+              envId: process.env.TCB_ENV_ID || null,
+              camUsername: null,
+              camSecretId: process.env.TCB_SECRET_ID || null,
+              camSecretKey: process.env.TCB_SECRET_KEY || null,
+              policyId: null,
+              failStep: null,
+              failReason: null,
+              createdAt: now4,
+              updatedAt: now4
+            });
+          }
+        }
+      }
       const session = {
         created: now4,
         authProvider: "github",
@@ -2161,10 +2367,138 @@ githubAuth.post("/disconnect", async (c) => {
 });
 var github_auth_default = githubAuth;
 
-// src/routes/github.ts
+// src/routes/cloudbase-auth.ts
 import { Hono as Hono3 } from "hono";
+import { setCookie as setCookie3 } from "hono/cookie";
+import { nanoid as nanoid5 } from "nanoid";
+var SESSION_COOKIE_NAME4 = "nex_session";
+var COOKIE_MAX_AGE3 = 60 * 60 * 24 * 365;
+var cloudbaseAuth = new Hono3();
+cloudbaseAuth.post("/login", async (c) => {
+  try {
+    const body = await c.req.json();
+    const { uid, customUserId, nickName, email, avatarUrl } = body;
+    if (!uid || typeof uid !== "string") {
+      return c.json({ error: "Missing CloudBase user ID" }, 400);
+    }
+    const now4 = Date.now();
+    const externalId = uid;
+    const username = nickName || customUserId || `cb_${uid.slice(0, 8)}`;
+    const existing = await getDb().users.findByProviderAndExternalId("cloudbase", externalId);
+    let userId;
+    if (existing) {
+      if (existing.status === "disabled") {
+        return c.json({ error: "Account has been disabled" }, 403);
+      }
+      userId = existing.id;
+      await getDb().users.update(userId, {
+        email: email || null,
+        name: nickName || null,
+        avatarUrl: avatarUrl || null,
+        updatedAt: now4,
+        lastLoginAt: now4
+      });
+    } else {
+      userId = nanoid5();
+      await getDb().users.create({
+        id: userId,
+        provider: "cloudbase",
+        externalId,
+        accessToken: "",
+        refreshToken: null,
+        scope: null,
+        username,
+        email: email || null,
+        name: nickName || null,
+        avatarUrl: avatarUrl || null,
+        createdAt: now4,
+        updatedAt: now4,
+        lastLoginAt: now4
+      });
+      if (process.env.TCB_SECRET_ID && process.env.TCB_SECRET_KEY) {
+        const resourceId = nanoid5();
+        const provisionMode = process.env.TCB_PROVISION_MODE || "shared";
+        if (provisionMode === "isolated") {
+          await getDb().userResources.create({
+            id: resourceId,
+            userId,
+            status: "processing",
+            envId: null,
+            camUsername: null,
+            camSecretId: null,
+            camSecretKey: null,
+            policyId: null,
+            failStep: null,
+            failReason: null,
+            createdAt: now4,
+            updatedAt: now4
+          });
+          provisionUserResources(userId, username).then(async (result) => {
+            await getDb().userResources.update(resourceId, {
+              status: "success",
+              envId: result.envId,
+              camUsername: result.camUsername,
+              camSecretId: result.camSecretId,
+              camSecretKey: result.camSecretKey || null,
+              policyId: result.policyId,
+              updatedAt: Date.now()
+            });
+          }).catch(async (err) => {
+            await getDb().userResources.update(resourceId, {
+              status: "failed",
+              failReason: err.message,
+              updatedAt: Date.now()
+            });
+          });
+        } else {
+          await getDb().userResources.create({
+            id: resourceId,
+            userId,
+            status: "success",
+            envId: process.env.TCB_ENV_ID || null,
+            camUsername: null,
+            camSecretId: process.env.TCB_SECRET_ID || null,
+            camSecretKey: process.env.TCB_SECRET_KEY || null,
+            policyId: null,
+            failStep: null,
+            failReason: null,
+            createdAt: now4,
+            updatedAt: now4
+          });
+        }
+      }
+    }
+    const session = {
+      created: now4,
+      authProvider: "cloudbase",
+      user: {
+        id: userId,
+        username,
+        email: email || void 0,
+        name: nickName || username,
+        avatar: avatarUrl || `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=6366f1&color=fff`
+      }
+    };
+    const sessionValue = await encryptJWE(session, "1y");
+    setCookie3(c, SESSION_COOKIE_NAME4, sessionValue, {
+      path: "/",
+      maxAge: COOKIE_MAX_AGE3,
+      httpOnly: true,
+      sameSite: "Lax",
+      secure: process.env.NODE_ENV === "production"
+    });
+    return c.json({ success: true, username });
+  } catch (error) {
+    console.error("CloudBase auth error:", error);
+    return c.json({ error: "Authentication failed" }, 500);
+  }
+});
+var cloudbase_auth_default = cloudbaseAuth;
+
+// src/routes/github.ts
+import { Hono as Hono4 } from "hono";
 import { Octokit } from "@octokit/rest";
-var github = new Hono3();
+var github = new Hono4();
 async function getGitHubToken(userId) {
   try {
     const account = await getDb().accounts.findByUserIdAndProvider(userId, "github");
@@ -2625,9 +2959,9 @@ async function populateRepoFromTemplate(octokit, repoOwner, repoName, template) 
 var github_default = github;
 
 // src/routes/acp.ts
-import { Hono as Hono4 } from "hono";
+import { Hono as Hono5 } from "hono";
 import { streamSSE } from "hono/streaming";
-import { v4 as uuidv43 } from "uuid";
+import { v4 as uuidv44 } from "uuid";
 import {
   ACP_PROTOCOL_VERSION,
   NEX_AGENT_INFO,
@@ -2639,7 +2973,7 @@ import { mkdirSync as mkdirSync2 } from "fs";
 import path4 from "path";
 import { fileURLToPath } from "url";
 import { query, ExecutionError } from "@tencent-ai/agent-sdk";
-import { v4 as uuidv42 } from "uuid";
+import { v4 as uuidv43 } from "uuid";
 
 // src/agent/persistence.service.ts
 import * as fs2 from "fs/promises";
@@ -2675,6 +3009,7 @@ function loadConfig() {
 // src/agent/persistence.service.ts
 import { AGENT_ID } from "@coder/shared";
 var COLLECTION_NAME = "vibe_agent_messages";
+var STREAM_EVENTS_COLLECTION = "vibe_agent_stream_events";
 function getHomeDir() {
   return process.env.HOME || process.env.USERPROFILE || "";
 }
@@ -2720,9 +3055,10 @@ var PersistenceService = class {
     });
   }
   collectionEnsured = false;
+  streamCollectionEnsured = false;
   async getCollection() {
-    const app8 = await this.getCloudBaseApp();
-    const db = app8.database();
+    const app9 = await this.getCloudBaseApp();
+    const db = app9.database();
     if (!this.collectionEnsured) {
       try {
         await db.createCollection(COLLECTION_NAME);
@@ -2731,6 +3067,58 @@ var PersistenceService = class {
       this.collectionEnsured = true;
     }
     return db.collection(COLLECTION_NAME);
+  }
+  async getStreamEventsCollection() {
+    const app9 = await this.getCloudBaseApp();
+    const db = app9.database();
+    if (!this.streamCollectionEnsured) {
+      try {
+        await db.createCollection(STREAM_EVENTS_COLLECTION);
+      } catch {
+      }
+      this.streamCollectionEnsured = true;
+    }
+    return db.collection(STREAM_EVENTS_COLLECTION);
+  }
+  // ========== Stream Event Operations ==========
+  async appendStreamEvents(events) {
+    if (events.length === 0) return;
+    try {
+      const collection = await this.getStreamEventsCollection();
+      for (const event of events) {
+        await collection.add(event);
+      }
+    } catch (error) {
+      console.error("Failed to append stream events:", error);
+    }
+  }
+  async getStreamEvents(conversationId, turnId, afterSeq = -1, limit = 500) {
+    try {
+      const collection = await this.getStreamEventsCollection();
+      const app9 = await this.getCloudBaseApp();
+      const _ = app9.database().command;
+      const { data } = await collection.where({
+        conversationId: _.eq(conversationId),
+        turnId: _.eq(turnId),
+        seq: _.gt(afterSeq)
+      }).orderBy("seq", "asc").limit(limit).get();
+      return data;
+    } catch (error) {
+      console.error("Failed to get stream events:", error);
+      return [];
+    }
+  }
+  async cleanupStreamEvents(conversationId, turnId) {
+    try {
+      const collection = await this.getStreamEventsCollection();
+      const app9 = await this.getCloudBaseApp();
+      const _ = app9.database().command;
+      await collection.where({
+        conversationId: _.eq(conversationId),
+        turnId: _.eq(turnId)
+      }).remove();
+    } catch {
+    }
   }
   // ========== Message Conversion ==========
   transformDBMessagesToCodeBuddyMessages(records, sessionId) {
@@ -2872,8 +3260,8 @@ var PersistenceService = class {
   async loadDBMessages(conversationId, envId, userId, limit = 20) {
     try {
       const collection = await this.getCollection();
-      const app8 = await this.getCloudBaseApp();
-      const _ = app8.database().command;
+      const app9 = await this.getCloudBaseApp();
+      const _ = app9.database().command;
       const { data } = await collection.where({
         conversationId: _.eq(conversationId),
         envId: _.eq(envId),
@@ -2916,15 +3304,15 @@ var PersistenceService = class {
   }
   async updateRecordStatus(recordId, status) {
     const collection = await this.getCollection();
-    const app8 = await this.getCloudBaseApp();
-    const _ = app8.database().command;
+    const app9 = await this.getCloudBaseApp();
+    const _ = app9.database().command;
     await collection.where({ recordId: _.eq(recordId) }).update({ status, updateTime: Date.now() });
   }
   async appendPartsToRecord(recordId, parts) {
     if (parts.length === 0) return;
     const collection = await this.getCollection();
-    const app8 = await this.getCloudBaseApp();
-    const _ = app8.database().command;
+    const app9 = await this.getCloudBaseApp();
+    const _ = app9.database().command;
     const { data } = await collection.where({ recordId: _.eq(recordId) }).get();
     if (!data || data.length === 0) return;
     const existingRecord = data[0];
@@ -2934,8 +3322,8 @@ var PersistenceService = class {
   }
   async replacePartsInRecord(recordId, parts) {
     const collection = await this.getCollection();
-    const app8 = await this.getCloudBaseApp();
-    const _ = app8.database().command;
+    const app9 = await this.getCloudBaseApp();
+    const _ = app9.database().command;
     await collection.where({ recordId: _.eq(recordId) }).update({ parts, updateTime: Date.now() });
   }
   // ========== Message Grouping ==========
@@ -3193,8 +3581,8 @@ var PersistenceService = class {
   async getLatestRecordStatus(conversationId, userId, envId) {
     try {
       const collection = await this.getCollection();
-      const app8 = await this.getCloudBaseApp();
-      const _ = app8.database().command;
+      const app9 = await this.getCloudBaseApp();
+      const _ = app9.database().command;
       const { data } = await collection.where({
         conversationId: _.eq(conversationId),
         envId: _.eq(envId),
@@ -3213,8 +3601,8 @@ var PersistenceService = class {
   async conversationExists(conversationId, userId, envId) {
     try {
       const collection = await this.getCollection();
-      const app8 = await this.getCloudBaseApp();
-      const _ = app8.database().command;
+      const app9 = await this.getCloudBaseApp();
+      const _ = app9.database().command;
       const { data } = await collection.where({
         conversationId: _.eq(conversationId),
         envId: _.eq(envId),
@@ -3244,8 +3632,8 @@ var PersistenceService = class {
     const outputStr = typeof output === "string" ? output : JSON.stringify(output);
     try {
       const collection = await this.getCollection();
-      const app8 = await this.getCloudBaseApp();
-      const _ = app8.database().command;
+      const app9 = await this.getCloudBaseApp();
+      const _ = app9.database().command;
       const { data } = await collection.where({
         conversationId: _.eq(conversationId),
         recordId: _.eq(recordId)
@@ -3353,8 +3741,8 @@ var PersistenceService = class {
   async getToolCallInfo(conversationId, recordId, callId) {
     try {
       const collection = await this.getCollection();
-      const app8 = await this.getCloudBaseApp();
-      const _ = app8.database().command;
+      const app9 = await this.getCloudBaseApp();
+      const _ = app9.database().command;
       const { data } = await collection.where({
         conversationId: _.eq(conversationId),
         recordId: _.eq(recordId)
@@ -3389,8 +3777,8 @@ var PersistenceService = class {
   async deleteConversationMessages(conversationId, envId, userId) {
     try {
       const collection = await this.getCollection();
-      const app8 = await this.getCloudBaseApp();
-      const _ = app8.database().command;
+      const app9 = await this.getCloudBaseApp();
+      const _ = app9.database().command;
       await collection.where({
         conversationId: _.eq(conversationId),
         envId: _.eq(envId),
@@ -3648,7 +4036,7 @@ var ScfSandboxManager = class {
   async createFunction(functionName) {
     const envConfig = this.getEnvConfig();
     try {
-      const app8 = new CloudBase3({
+      const app9 = new CloudBase3({
         secretId: envConfig.secretId,
         secretKey: envConfig.secretKey,
         token: envConfig.token,
@@ -3692,7 +4080,7 @@ var ScfSandboxManager = class {
         },
         Description: "SCF Sandbox for conversation (Image-based)"
       };
-      await app8.commonService("scf").call({
+      await app9.commonService("scf").call({
         Action: "CreateFunction",
         Param: createParams
       });
@@ -3707,14 +4095,14 @@ var ScfSandboxManager = class {
   async createGatewayApi(functionName) {
     const envConfig = this.getEnvConfig();
     try {
-      const app8 = new CloudBase3({
+      const app9 = new CloudBase3({
         secretId: envConfig.secretId,
         secretKey: envConfig.secretKey,
         token: envConfig.token,
         envId: envConfig.envId
       });
       const domain = `${envConfig.envId}.ap-shanghai.app.tcloudbase.com`;
-      await app8.commonService().call({
+      await app9.commonService().call({
         Action: "CreateCloudBaseGWAPI",
         Param: {
           ServiceId: envConfig.envId,
@@ -3739,13 +4127,13 @@ var ScfSandboxManager = class {
   async checkFunctionExists(functionName) {
     const envConfig = this.getEnvConfig();
     try {
-      const app8 = new CloudBase3({
+      const app9 = new CloudBase3({
         secretId: envConfig.secretId,
         secretKey: envConfig.secretKey,
         token: envConfig.token,
         envId: envConfig.envId
       });
-      const result = await app8.commonService().call({
+      const result = await app9.commonService().call({
         Action: "GetFunction",
         Param: {
           FunctionName: functionName,
@@ -3765,7 +4153,7 @@ var ScfSandboxManager = class {
   }
   async waitForFunctionReady(functionName, maxRetries = 120, retryInterval = 3e3) {
     const envConfig = this.getEnvConfig();
-    const app8 = new CloudBase3({
+    const app9 = new CloudBase3({
       secretId: envConfig.secretId,
       secretKey: envConfig.secretKey,
       token: envConfig.token,
@@ -3773,7 +4161,7 @@ var ScfSandboxManager = class {
     });
     for (let i = 0; i < maxRetries; i++) {
       try {
-        const result = await app8.commonService().call({
+        const result = await app9.commonService().call({
           Action: "GetFunction",
           Param: {
             FunctionName: functionName,
@@ -3814,13 +4202,13 @@ var ScfSandboxManager = class {
   async deleteFunction(functionName) {
     const envConfig = this.getEnvConfig();
     try {
-      const app8 = new CloudBase3({
+      const app9 = new CloudBase3({
         secretId: envConfig.secretId,
         secretKey: envConfig.secretKey,
         token: envConfig.token,
         envId: envConfig.envId
       });
-      await app8.commonService().call({
+      await app9.commonService().call({
         Action: "DeleteFunction",
         Param: {
           FunctionName: functionName,
@@ -4476,6 +4864,106 @@ async function deleteConversationViaSandbox(sandbox, envId, conversationId) {
   }
 }
 
+// src/agent/agent-registry.ts
+var runningAgents = /* @__PURE__ */ new Map();
+function registerAgent(run) {
+  const agentRun = {
+    ...run,
+    status: "running",
+    startTime: Date.now(),
+    lastSeq: -1
+  };
+  runningAgents.set(run.conversationId, agentRun);
+  return agentRun;
+}
+function getAgentRun(conversationId) {
+  return runningAgents.get(conversationId);
+}
+function completeAgent(conversationId, status, error) {
+  const run = runningAgents.get(conversationId);
+  if (run) {
+    run.status = status;
+    if (error) run.error = error;
+  }
+}
+function removeAgent(conversationId) {
+  runningAgents.delete(conversationId);
+}
+function isAgentRunning(conversationId) {
+  const run = runningAgents.get(conversationId);
+  return run?.status === "running";
+}
+function getNextSeq(conversationId) {
+  const run = runningAgents.get(conversationId);
+  if (!run) return 0;
+  run.lastSeq += 1;
+  return run.lastSeq;
+}
+
+// src/agent/event-buffer.ts
+import { v4 as uuidv42 } from "uuid";
+var MILESTONE_SESSION_UPDATES = /* @__PURE__ */ new Set([
+  "tool_call",
+  "tool_call_update",
+  "ask_user",
+  "tool_confirm",
+  "deploy_url",
+  "artifact"
+]);
+var EventBuffer = class {
+  constructor(conversationId, turnId, envId, userId) {
+    this.conversationId = conversationId;
+    this.turnId = turnId;
+    this.envId = envId;
+    this.userId = userId;
+  }
+  conversationId;
+  turnId;
+  envId;
+  userId;
+  buffer = [];
+  flushTimer = null;
+  flushPromise = null;
+  MAX_BUFFER_SIZE = 10;
+  FLUSH_INTERVAL_MS = 500;
+  push(event) {
+    const seq = getNextSeq(this.conversationId);
+    this.buffer.push({
+      eventId: uuidv42(),
+      conversationId: this.conversationId,
+      turnId: this.turnId,
+      envId: this.envId,
+      userId: this.userId,
+      event,
+      seq,
+      createTime: Date.now()
+    });
+    const isMilestone = "sessionUpdate" in event && MILESTONE_SESSION_UPDATES.has(event.sessionUpdate);
+    if (isMilestone || this.buffer.length >= this.MAX_BUFFER_SIZE) {
+      this.flush();
+    } else if (!this.flushTimer) {
+      this.flushTimer = setTimeout(() => this.flush(), this.FLUSH_INTERVAL_MS);
+    }
+  }
+  flush() {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (this.buffer.length === 0) return;
+    const batch = this.buffer.splice(0);
+    this.flushPromise = persistenceService.appendStreamEvents(batch).catch((err) => {
+      console.error("EventBuffer flush failed:", err);
+    });
+  }
+  async close() {
+    this.flush();
+    if (this.flushPromise) {
+      await this.flushPromise;
+    }
+  }
+};
+
 // src/agent/cloudbase-agent.service.ts
 var DEFAULT_MODEL = "glm-5.0";
 var OAUTH_TOKEN_ENDPOINT = "https://copilot.tencent.com/oauth2/token";
@@ -4675,9 +5163,130 @@ ${false ? `\u5C0F\u7A0B\u5E8F\u5F00\u53D1\u89C4\u5219\uFF1A
   return base;
 }
 var CloudbaseAgentService = class _CloudbaseAgentService {
+  /**
+   * 将内部 AgentCallbackMessage 转换为 ACP ExtendedSessionUpdate 格式
+   */
+  convertToSessionUpdate(msg, sessionId) {
+    if (msg.type === "text" && msg.content) {
+      return {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: msg.content }
+      };
+    }
+    if (msg.type === "thinking" && msg.content) {
+      return {
+        sessionUpdate: "thinking",
+        content: msg.content
+      };
+    }
+    if (msg.type === "tool_use") {
+      return {
+        sessionUpdate: "tool_call",
+        toolCallId: msg.id || "",
+        title: msg.name || "tool",
+        kind: "function",
+        status: "in_progress",
+        input: msg.input,
+        assistantMessageId: msg.assistantMessageId
+      };
+    }
+    if (msg.type === "tool_result") {
+      return {
+        sessionUpdate: "tool_call_update",
+        toolCallId: msg.tool_use_id || "",
+        status: msg.is_error ? "failed" : "completed",
+        result: msg.content
+      };
+    }
+    if (msg.type === "error") {
+      return {
+        sessionUpdate: "log",
+        level: "error",
+        message: msg.content || "Unknown error",
+        timestamp: Date.now()
+      };
+    }
+    if (msg.type === "deploy_url") {
+      return {
+        sessionUpdate: "deploy_url",
+        url: msg.url,
+        type: msg.deploymentType || "web",
+        qrCodeUrl: msg.qrCodeUrl,
+        pagePath: msg.pagePath,
+        appId: msg.appId,
+        label: msg.label
+      };
+    }
+    if (msg.type === "artifact" && msg.artifact) {
+      return {
+        sessionUpdate: "artifact",
+        artifact: msg.artifact
+      };
+    }
+    if (msg.type === "ask_user") {
+      return {
+        sessionUpdate: "ask_user",
+        toolCallId: msg.id || "",
+        assistantMessageId: msg.assistantMessageId || "",
+        questions: msg.input?.questions || []
+      };
+    }
+    if (msg.type === "tool_confirm") {
+      return {
+        sessionUpdate: "tool_confirm",
+        toolCallId: msg.id || "",
+        assistantMessageId: msg.assistantMessageId || "",
+        toolName: msg.name || "",
+        input: msg.input || {}
+      };
+    }
+    if (msg.type === "result") {
+      return null;
+    }
+    return null;
+  }
+  /**
+   * 启动 agent 执行。检查是否已有正在运行的 agent。
+   * 如果已在运行，返回 { turnId, alreadyRunning: true }。
+   * 否则在后台启动 agent，立即返回 { turnId, alreadyRunning: false }。
+   */
   async chatStream(prompt, callback, options = {}) {
+    const conversationId = options.conversationId || uuidv43();
+    if (isAgentRunning(conversationId)) {
+      const run = getAgentRun(conversationId);
+      return { turnId: run.turnId, alreadyRunning: true };
+    }
+    const turnId = await this.computeTurnId(conversationId, options);
+    registerAgent({
+      conversationId,
+      turnId,
+      envId: options.envId || "",
+      userId: options.userId || "anonymous",
+      abortController: new AbortController()
+    });
+    this.launchAgent(prompt, callback, options, turnId).catch((err) => {
+      console.error("[Agent] Background agent error:", err);
+    });
+    return { turnId, alreadyRunning: false };
+  }
+  /**
+   * 计算本轮的 turnId (assistantMessageId)
+   */
+  async computeTurnId(conversationId, options) {
+    const { askAnswers, toolConfirmation, envId, userId } = options;
+    const isResumeFromInterrupt = askAnswers && Object.keys(askAnswers).length > 0 || !!toolConfirmation;
+    if (isResumeFromInterrupt && conversationId && envId) {
+      const record = await persistenceService.getLatestRecordStatus(conversationId, userId || "anonymous", envId);
+      if (record) return record.recordId;
+    }
+    return uuidv43();
+  }
+  /**
+   * 后台执行 agent，包含完整的消息历史恢复、沙箱管理、SDK 调用、持久化等逻辑。
+   */
+  async launchAgent(prompt, liveCallback, options = {}, assistantMessageId) {
     const {
-      conversationId = uuidv42(),
+      conversationId = uuidv43(),
       envId,
       userId,
       userCredentials,
@@ -4689,7 +5298,7 @@ var CloudbaseAgentService = class _CloudbaseAgentService {
     } = options;
     const modelId = model || DEFAULT_MODEL;
     console.log(
-      "[Agent] chatStream start, model:",
+      "[Agent] launchAgent start, model:",
       modelId,
       "conversationId:",
       conversationId,
@@ -4701,22 +5310,12 @@ var CloudbaseAgentService = class _CloudbaseAgentService {
     const actualCwd = cwd || `/tmp/workspace/${userContext.envId}/${conversationId}`;
     mkdirSync2(actualCwd, { recursive: true });
     console.log("[Agent] cwd:", actualCwd);
+    const eventBuffer = new EventBuffer(conversationId, assistantMessageId, userContext.envId, userContext.userId);
     let historicalMessages = [];
     let lastRecordId = null;
     let hasHistory = false;
     let sandboxMcpClient = null;
     const isResumeFromInterrupt = askAnswers && Object.keys(askAnswers).length > 0 || !!toolConfirmation;
-    let assistantMessageId = uuidv42();
-    if (isResumeFromInterrupt && conversationId && userContext.envId) {
-      const record = await persistenceService.getLatestRecordStatus(
-        conversationId,
-        userContext.userId,
-        userContext.envId
-      );
-      if (record) {
-        assistantMessageId = record.recordId;
-      }
-    }
     if (conversationId && userContext.envId) {
       if (askAnswers && Object.keys(askAnswers).length > 0) {
         for (const [recordId, { toolCallId, answers }] of Object.entries(askAnswers)) {
@@ -4819,10 +5418,16 @@ var CloudbaseAgentService = class _CloudbaseAgentService {
       preSavedUserRecordId = preSaved.userRecordId;
     }
     const wrappedCallback = (msg) => {
-      if (msg.type === "ask_user" || msg.type === "tool_confirm") {
-        callback({ ...msg, assistantMessageId });
-      } else {
-        callback({ ...msg, id: msg.id || assistantMessageId, assistantMessageId });
+      const enrichedMsg = msg.type === "ask_user" || msg.type === "tool_confirm" ? { ...msg, assistantMessageId } : { ...msg, id: msg.id || assistantMessageId, assistantMessageId };
+      const acpEvent = this.convertToSessionUpdate(enrichedMsg, conversationId);
+      if (acpEvent) {
+        eventBuffer.push(acpEvent);
+      }
+      if (liveCallback) {
+        try {
+          liveCallback(enrichedMsg);
+        } catch {
+        }
       }
     };
     let sandboxInstance = null;
@@ -4870,9 +5475,9 @@ var CloudbaseAgentService = class _CloudbaseAgentService {
               wrappedCallback({ type: "deploy_url", url });
             },
             getMpDeployCredentials: async (appId) => {
-              const app8 = await getDb().miniprogramApps.findByAppIdAndUserId(appId, userContext.userId);
-              if (!app8) return null;
-              return { appId: app8.appId, privateKey: decrypt(app8.privateKey) };
+              const app9 = await getDb().miniprogramApps.findByAppIdAndUserId(appId, userContext.userId);
+              if (!app9) return null;
+              return { appId: app9.appId, privateKey: decrypt(app9.privateKey) };
             }
           });
           console.log("[Agent] Sandbox ready");
@@ -5119,6 +5724,10 @@ var CloudbaseAgentService = class _CloudbaseAgentService {
       console.log("[Agent] entering finally block");
       if (connectTimer) clearTimeout(connectTimer);
       if (iterationTimeoutTimer) clearTimeout(iterationTimeoutTimer);
+      try {
+        await eventBuffer.close();
+      } catch {
+      }
       if (sandboxInstance) {
         try {
           await archiveToGit(sandboxInstance, conversationId, prompt);
@@ -5133,6 +5742,7 @@ var CloudbaseAgentService = class _CloudbaseAgentService {
         }
       }
       let syncError;
+      let finalStatus = "completed";
       try {
         await persistenceService.syncMessages(
           conversationId,
@@ -5148,6 +5758,7 @@ var CloudbaseAgentService = class _CloudbaseAgentService {
         await persistenceService.finalizePendingRecords(assistantMessageId, "done");
       } catch (err) {
         syncError = err instanceof Error ? err : new Error(String(err));
+        finalStatus = "error";
         console.error("[Agent] syncAndCleanup failed:", syncError.message);
         if (preSavedUserRecordId && conversationId) {
           try {
@@ -5156,6 +5767,20 @@ var CloudbaseAgentService = class _CloudbaseAgentService {
           }
         }
       }
+      try {
+        await persistenceService.cleanupStreamEvents(conversationId, assistantMessageId);
+      } catch {
+      }
+      try {
+        await getDb().tasks.update(conversationId, {
+          status: finalStatus === "error" ? "error" : "completed",
+          completedAt: Date.now(),
+          updatedAt: Date.now()
+        });
+      } catch {
+      }
+      completeAgent(conversationId, finalStatus, syncError?.message);
+      setTimeout(() => removeAgent(conversationId), 3e4);
       if (syncError) {
         throw syncError;
       }
@@ -5392,8 +6017,7 @@ var CloudbaseAgentService = class _CloudbaseAgentService {
 var cloudbaseAgentService = new CloudbaseAgentService();
 
 // src/routes/acp.ts
-import { nanoid as nanoid5 } from "nanoid";
-var acp = new Hono4();
+var acp = new Hono5();
 acp.use("/*", async (c, next) => {
   if (c.req.path.endsWith("/health") || c.req.path.endsWith("/config")) {
     return next();
@@ -5415,7 +6039,7 @@ acp.get("/health", (c) => {
 });
 acp.post("/conversation", async (c) => {
   const body = await c.req.json();
-  const conversationId = body?.conversationId || uuidv43();
+  const conversationId = body?.conversationId || uuidv44();
   const { envId, userId, credentials: userCredentials } = c.get("userEnv");
   if (!envId) {
     return c.json({ error: "CloudBase environment not bound" }, 400);
@@ -5500,85 +6124,15 @@ acp.post("/chat", async (c) => {
   if (!envId) {
     return c.json({ error: "CloudBase environment not bound" }, 400);
   }
-  const actualConversationId = conversationId || uuidv43();
-  return streamSSE(c, async (stream) => {
-    await stream.writeSSE({
-      data: JSON.stringify({
-        type: "session",
-        conversationId: actualConversationId
-      })
-    });
-    let fullContent = "";
-    let stopReason = "end_turn";
-    const callback = async (msg) => {
-      if (msg.type === "text" && msg.content) {
-        fullContent += msg.content;
-        await stream.writeSSE({
-          data: JSON.stringify({
-            type: "text",
-            content: msg.content
-          })
-        });
-      } else if (msg.type === "thinking" && msg.content) {
-        await stream.writeSSE({
-          data: JSON.stringify({
-            type: "thinking",
-            content: msg.content
-          })
-        });
-      } else if (msg.type === "tool_use") {
-        await stream.writeSSE({
-          data: JSON.stringify({
-            type: "tool_use",
-            name: msg.name,
-            input: msg.input,
-            id: msg.id
-          })
-        });
-      } else if (msg.type === "tool_result") {
-        await stream.writeSSE({
-          data: JSON.stringify({
-            type: "tool_result",
-            tool_use_id: msg.tool_use_id,
-            content: msg.content,
-            is_error: msg.is_error
-          })
-        });
-      } else if (msg.type === "error") {
-        stopReason = "error";
-        await stream.writeSSE({
-          data: JSON.stringify({
-            type: "error",
-            content: msg.content
-          })
-        });
-      } else if (msg.type === "result") {
-        await stream.writeSSE({
-          data: JSON.stringify({
-            type: "result"
-          })
-        });
-      }
-    };
-    try {
-      await cloudbaseAgentService.chatStream(prompt, callback, {
-        conversationId: actualConversationId,
-        envId,
-        userId,
-        userCredentials,
-        model
-      });
-    } catch (error) {
-      stopReason = "error";
-      await stream.writeSSE({
-        data: JSON.stringify({
-          type: "error",
-          content: error instanceof Error ? error.message : String(error)
-        })
-      });
-    }
-    await stream.writeSSE({ data: "[DONE]" });
+  const actualConversationId = conversationId || uuidv44();
+  const { turnId } = await cloudbaseAgentService.chatStream(prompt, null, {
+    conversationId: actualConversationId,
+    envId,
+    userId,
+    userCredentials,
+    model
   });
+  return observeStream(c, null, actualConversationId, turnId, envId, userId);
 });
 acp.post("/acp", async (c) => {
   const body = await c.req.json();
@@ -5626,7 +6180,7 @@ async function handleInitialize(c, id) {
   return c.json(rpcOk(id, result));
 }
 async function handleSessionNew(c, id, params) {
-  const conversationId = params?.conversationId || uuidv43();
+  const conversationId = params?.conversationId || uuidv44();
   const sessionId = conversationId;
   const { envId, userId, credentials: userCredentials } = c.get("userEnv");
   if (!envId) {
@@ -5666,7 +6220,10 @@ async function handleSessionPrompt(c, id, params) {
   if (!envId) {
     return c.json(rpcErr(id, JSON_RPC_ERRORS.INTERNAL, "CloudBase environment not bound"));
   }
-  const exists = await persistenceService.conversationExists(sessionId, userId, envId);
+  const existingRun = getAgentRun(sessionId);
+  if (existingRun && existingRun.status === "running") {
+    return observeStream(c, id, sessionId, existingRun.turnId, envId, userId);
+  }
   const latestStatus = await persistenceService.getLatestRecordStatus(sessionId, userId, envId);
   if (latestStatus && (latestStatus.status === "pending" || latestStatus.status === "streaming")) {
     return c.json(rpcErr(id, JSON_RPC_ERRORS.INVALID_REQUEST, "A prompt turn is already in progress"));
@@ -5687,194 +6244,79 @@ async function handleSessionPrompt(c, id, params) {
     await getDb().tasks.update(sessionId, { status: "pending", updatedAt: Date.now() });
   } catch {
   }
+  const { turnId } = await cloudbaseAgentService.chatStream(effectivePrompt, null, {
+    conversationId: sessionId,
+    envId,
+    userId,
+    userCredentials,
+    model: selectedModel,
+    askAnswers: params.askAnswers,
+    toolConfirmation: params.toolConfirmation
+  });
+  return observeStream(c, id, sessionId, turnId, envId, userId);
+}
+acp.get("/observe/:sessionId", requireUserEnv, async (c) => {
+  const sessionId = c.req.param("sessionId");
+  const { envId, userId } = c.get("userEnv");
+  if (!envId) {
+    return c.json({ error: "CloudBase environment not bound" }, 400);
+  }
+  let turnId = c.req.query("turnId") || void 0;
+  if (!turnId) {
+    const latest = await persistenceService.getLatestRecordStatus(sessionId, userId, envId);
+    if (!latest || latest.status !== "pending" && latest.status !== "streaming") {
+      return c.json({ error: "No active turn to observe" }, 404);
+    }
+    turnId = latest.recordId;
+  }
+  return observeStream(c, null, sessionId, turnId, envId, userId);
+});
+async function observeStream(c, rpcId, sessionId, turnId, _envId, _userId) {
   return streamSSE(c, async (stream) => {
-    let fullContent = "";
-    let stopReason = "end_turn";
-    const notify = async (method, notifParams) => {
-      await stream.writeSSE({
-        data: JSON.stringify({
-          jsonrpc: "2.0",
-          method,
-          params: notifParams
-        })
-      });
-    };
-    const callback = async (msg) => {
-      if (msg.type === "text" && msg.content) {
-        fullContent += msg.content;
-        await notify("session/update", {
-          sessionId,
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: msg.content }
-          }
+    let lastSeq = -1;
+    const POLL_INTERVAL = 500;
+    const MAX_POLL_DURATION = 10 * 60 * 1e3;
+    try {
+      const existingEvents = await persistenceService.getStreamEvents(sessionId, turnId);
+      for (const evt of existingEvents) {
+        await stream.writeSSE({
+          data: JSON.stringify({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: { sessionId, update: evt.event }
+          })
         });
-      } else if (msg.type === "thinking" && msg.content) {
-        await notify("session/update", {
-          sessionId,
-          update: { sessionUpdate: "agent_thought_chunk", content: msg.content }
-        });
-      } else if (msg.type === "tool_use") {
-        const toolCallId = msg.id || uuidv43();
-        await notify("session/update", {
-          sessionId,
-          update: {
-            sessionUpdate: "tool_call",
-            toolCallId,
-            title: msg.name || "tool",
-            kind: "function",
-            status: "in_progress",
-            input: msg.input,
-            assistantMessageId: msg.assistantMessageId
-          }
-        });
-      } else if (msg.type === "tool_result") {
-        await notify("session/update", {
-          sessionId,
-          update: {
-            sessionUpdate: "tool_call_update",
-            toolCallId: msg.tool_use_id || "",
-            status: msg.is_error ? "failed" : "completed",
-            result: msg.content
-          }
-        });
-      } else if (msg.type === "error") {
-        stopReason = "error";
-        await notify("session/update", {
-          sessionId,
-          update: {
-            sessionUpdate: "log",
-            level: "error",
-            message: msg.content || "Unknown error",
-            timestamp: Date.now()
-          }
-        });
-      } else if (msg.type === "deploy_url") {
-        const deploymentType = msg.deploymentType || "web";
-        const now4 = Date.now();
-        try {
-          if (deploymentType === "miniprogram") {
-            const existing = await getDb().deployments.findByTaskIdAndTypePath(sessionId, "miniprogram", null);
-            if (existing) {
-              await getDb().deployments.update(existing.id, {
-                qrCodeUrl: msg.qrCodeUrl || existing.qrCodeUrl,
-                pagePath: msg.pagePath || existing.pagePath,
-                appId: msg.appId || existing.appId,
-                label: msg.label || existing.label,
-                metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : existing.metadata,
-                updatedAt: now4
-              });
-            } else {
-              await getDb().deployments.create({
-                id: nanoid5(12),
-                taskId: sessionId,
-                type: "miniprogram",
-                url: null,
-                path: null,
-                qrCodeUrl: msg.qrCodeUrl || null,
-                pagePath: msg.pagePath || null,
-                appId: msg.appId || null,
-                label: msg.label || null,
-                metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : null,
-                createdAt: now4,
-                updatedAt: now4
-              });
-            }
-          } else if (msg.url) {
-            let path5 = null;
-            try {
-              const urlObj = new URL(msg.url);
-              path5 = urlObj.pathname;
-            } catch {
-            }
-            if (path5) {
-              const existing = await getDb().deployments.findByTaskIdAndTypePath(sessionId, "web", path5);
-              if (existing) {
-                await getDb().deployments.update(existing.id, {
-                  url: msg.url,
-                  label: msg.label || existing.label,
-                  metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : existing.metadata,
-                  updatedAt: now4
-                });
-              } else {
-                await getDb().deployments.create({
-                  id: nanoid5(12),
-                  taskId: sessionId,
-                  type: "web",
-                  url: msg.url,
-                  path: path5,
-                  qrCodeUrl: null,
-                  pagePath: null,
-                  appId: null,
-                  label: msg.label || null,
-                  metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : null,
-                  createdAt: now4,
-                  updatedAt: now4
-                });
-              }
-            }
-          }
-          if (msg.url) {
-            await getDb().tasks.update(sessionId, { previewUrl: msg.url });
-          }
-        } catch (err) {
-          console.error("Failed to create deployment:", err);
-        }
-        await notify("session/update", {
-          sessionId,
-          update: {
-            sessionUpdate: "deploy_url",
-            url: msg.url,
-            type: deploymentType,
-            qrCodeUrl: msg.qrCodeUrl,
-            pagePath: msg.pagePath,
-            appId: msg.appId,
-            label: msg.label
-          }
-        });
-      } else if (msg.type === "artifact" && msg.artifact) {
-        await notify("session/update", {
-          sessionId,
-          update: { sessionUpdate: "artifact", artifact: msg.artifact }
-        });
+        lastSeq = Math.max(lastSeq, evt.seq);
       }
-    };
-    try {
-      await cloudbaseAgentService.chatStream(effectivePrompt, callback, {
-        conversationId: sessionId,
-        envId,
-        userId,
-        userCredentials,
-        model: selectedModel,
-        askAnswers: params.askAnswers,
-        toolConfirmation: params.toolConfirmation
-      });
-    } catch (error) {
-      stopReason = "error";
-      const errMsg = error instanceof Error ? error.message : String(error);
-      console.error("[ACP] chatStream error:", errMsg);
-      await notify("session/update", {
-        sessionId,
-        update: {
-          sessionUpdate: "log",
-          level: "error",
-          message: errMsg,
-          timestamp: Date.now()
+    } catch {
+    }
+    const startTime = Date.now();
+    while (Date.now() - startTime < MAX_POLL_DURATION) {
+      const run = getAgentRun(sessionId);
+      const isDone = !run || run.status !== "running";
+      try {
+        const newEvents = await persistenceService.getStreamEvents(sessionId, turnId, lastSeq);
+        for (const evt of newEvents) {
+          await stream.writeSSE({
+            data: JSON.stringify({
+              jsonrpc: "2.0",
+              method: "session/update",
+              params: { sessionId, update: evt.event }
+            })
+          });
+          lastSeq = Math.max(lastSeq, evt.seq);
         }
-      });
+        if (isDone && newEvents.length === 0) break;
+      } catch {
+        if (isDone) break;
+      }
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL));
     }
-    try {
-      await getDb().tasks.update(sessionId, {
-        status: stopReason === "error" ? "error" : "completed",
-        completedAt: Date.now(),
-        updatedAt: Date.now()
-      });
-    } catch (dbErr) {
-      console.error("[ACP] Failed to update task status:", dbErr);
+    if (rpcId !== null) {
+      const run = getAgentRun(sessionId);
+      const stopReason = run?.status === "error" ? "error" : "end_turn";
+      await stream.writeSSE({ data: JSON.stringify(rpcOk(rpcId, { stopReason })) });
     }
-    await stream.writeSSE({
-      data: JSON.stringify(rpcOk(id, { stopReason }))
-    });
     await stream.writeSSE({ data: "[DONE]" });
   });
 }
@@ -5902,7 +6344,7 @@ acp.get("/config", (c) => {
 var acp_default = acp;
 
 // src/routes/tasks.ts
-import { Hono as Hono5 } from "hono";
+import { Hono as Hono6 } from "hono";
 import { nanoid as nanoid6 } from "nanoid";
 
 // src/lib/task-logger.ts
@@ -6192,7 +6634,7 @@ async function getFileContentFromGitHub(octokit, owner, repo, path5, ref, isImag
     throw error;
   }
 }
-var tasksRouter = new Hono5();
+var tasksRouter = new Hono6();
 tasksRouter.get("/", async (c) => {
   const authErr = requireAuth(c);
   if (authErr) return authErr;
@@ -6399,7 +6841,10 @@ tasksRouter.get("/:taskId/files", requireUserEnv, async (c) => {
     const { envId } = c.get("userEnv");
     const { taskId } = c.req.param();
     const mode = c.req.query("mode") || "remote";
-    const task = await findActiveTask(taskId, session.user.id);
+    const db = getDb();
+    const currentUser = await db.users.findById(session.user.id);
+    const isAdmin = currentUser?.role === "admin";
+    const task = isAdmin ? await db.tasks.findById(taskId).then((t) => t && !t.deletedAt ? t : null) : await findActiveTask(taskId, session.user.id);
     if (!task) return c.json({ success: false, error: "Task not found" }, 404);
     if (!task.branchName) return c.json({ success: true, files: [], fileTree: {}, branchName: null });
     const repoUrl = task.repoUrl;
@@ -6628,6 +7073,57 @@ tasksRouter.get("/:taskId/files", requireUserEnv, async (c) => {
   } catch (error) {
     console.error("Error fetching task files:", error);
     return c.json({ success: false, error: "Failed to fetch task files" }, 500);
+  }
+});
+tasksRouter.get("/:taskId/files/list-dir", requireUserEnv, async (c) => {
+  try {
+    const session = c.get("session");
+    const { envId } = c.get("userEnv");
+    const { taskId } = c.req.param();
+    const dirPath = c.req.query("path") || ".";
+    const db = getDb();
+    const currentUser = await db.users.findById(session.user.id);
+    const isAdmin = currentUser?.role === "admin";
+    const task = isAdmin ? await db.tasks.findById(taskId).then((t) => t && !t.deletedAt ? t : null) : await findActiveTask(taskId, session.user.id);
+    if (!task) return c.json({ success: false, error: "Task not found" }, 404);
+    if (!task.sandboxId) return c.json({ success: false, error: "Sandbox is not running" }, 410);
+    const sandbox = await getScfSandbox(task, envId);
+    if (!sandbox) return c.json({ success: false, error: "Sandbox not found" }, 410);
+    const safePath = dirPath.replace(/\.\./g, "").replace(/^\/+/, "");
+    const targetPath = safePath || ".";
+    const lsResult = await runCommandInScfSandbox(
+      sandbox,
+      `ls -1AF '${targetPath.replace(/'/g, "'\\''")}'`
+    );
+    if (!lsResult.success) {
+      return c.json({ success: false, error: "Failed to list directory" }, 500);
+    }
+    const output = lsResult.output || "";
+    const lines = output.trim().split("\n").filter((l) => l.trim());
+    const entries = [];
+    const hiddenDirs = /* @__PURE__ */ new Set([".git", "node_modules", ".next", "dist", "build", ".vercel"]);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (trimmed.endsWith("/")) {
+        const name = trimmed.slice(0, -1);
+        if (hiddenDirs.has(name)) continue;
+        const fullPath = targetPath === "." ? name : `${targetPath}/${name}`;
+        entries.push({ name, type: "directory", path: fullPath });
+      } else {
+        const name = trimmed.replace(/[*@|=]$/, "");
+        if (!name) continue;
+        const fullPath = targetPath === "." ? name : `${targetPath}/${name}`;
+        entries.push({ name, type: "file", path: fullPath });
+      }
+    }
+    entries.sort((a, b) => {
+      if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    return c.json({ success: true, entries });
+  } catch {
+    return c.json({ success: false, error: "Failed to list directory" }, 500);
   }
 });
 tasksRouter.get("/:taskId/file-content", requireUserEnv, async (c) => {
@@ -7859,9 +8355,9 @@ tasksRouter.post("/:taskId/file-operation", requireUserEnv, async (c) => {
 var tasks_default = tasksRouter;
 
 // src/routes/connectors.ts
-import { Hono as Hono6 } from "hono";
+import { Hono as Hono7 } from "hono";
 import { nanoid as nanoid7 } from "nanoid";
-var app2 = new Hono6();
+var app2 = new Hono7();
 app2.get("/", async (c) => {
   try {
     const authErr = requireAuth(c);
@@ -8047,17 +8543,17 @@ app2.patch("/:id/status", async (c) => {
 var connectors_default = app2;
 
 // src/routes/miniprogram.ts
-import { Hono as Hono7 } from "hono";
+import { Hono as Hono8 } from "hono";
 import { nanoid as nanoid8 } from "nanoid";
-var app3 = new Hono7();
+var app3 = new Hono8();
 app3.get("/", async (c) => {
   const authErr = requireAuth(c);
   if (authErr) return authErr;
   const session = c.get("session");
   const userId = session.user.id;
   const apps = await getDb().miniprogramApps.findByUserId(userId);
-  const masked = apps.map((app8) => ({
-    ...app8,
+  const masked = apps.map((app9) => ({
+    ...app9,
     privateKey: "***"
   }));
   return c.json({ success: true, data: masked });
@@ -8072,7 +8568,7 @@ app3.post("/", async (c) => {
   if (!name || !appId || !privateKey) {
     return c.json({ error: "name, appId, and privateKey are required" }, 400);
   }
-  const app8 = await getDb().miniprogramApps.create({
+  const app9 = await getDb().miniprogramApps.create({
     id: nanoid8(),
     userId,
     name,
@@ -8080,7 +8576,7 @@ app3.post("/", async (c) => {
     privateKey: encrypt(privateKey),
     description: description || null
   });
-  return c.json({ success: true, data: { ...app8, privateKey: "***" } }, 201);
+  return c.json({ success: true, data: { ...app9, privateKey: "***" } }, 201);
 });
 app3.patch("/:id", async (c) => {
   const authErr = requireAuth(c);
@@ -8128,9 +8624,174 @@ app3.get("/by-appid/:appId", async (c) => {
 });
 var miniprogram_default = app3;
 
-// src/routes/api-keys.ts
-import { Hono as Hono8 } from "hono";
+// src/routes/crontask.ts
+import { Hono as Hono9 } from "hono";
+import { nanoid as nanoid10 } from "nanoid";
+import cron2 from "node-cron";
+
+// src/services/cron-scheduler.ts
+import cron from "node-cron";
 import { nanoid as nanoid9 } from "nanoid";
+var scheduledJobs = /* @__PURE__ */ new Map();
+async function initCronScheduler() {
+  const enabledTasks = await getDb().cronTasks.findAllEnabled();
+  console.log("Cron scheduler initializing, loading enabled tasks");
+  for (const task of enabledTasks) {
+    scheduleTask(task);
+  }
+}
+function scheduleTask(cronTask) {
+  unscheduleTask(cronTask.id);
+  if (!cronTask.enabled) return;
+  if (!cron.validate(cronTask.cronExpression)) {
+    console.error("Invalid cron expression for cron task");
+    return;
+  }
+  const job = cron.schedule(cronTask.cronExpression, () => {
+    executeCronTask(cronTask.id, cronTask.userId).catch((err) => {
+      console.error("Cron task execution failed:", err);
+    });
+  });
+  scheduledJobs.set(cronTask.id, job);
+}
+function unscheduleTask(cronTaskId) {
+  const existing = scheduledJobs.get(cronTaskId);
+  if (existing) {
+    existing.stop();
+    scheduledJobs.delete(cronTaskId);
+  }
+}
+async function executeCronTask(cronTaskId, userId) {
+  const task = await getDb().cronTasks.findByIdAndUserId(cronTaskId, userId);
+  if (!task || !task.enabled) {
+    unscheduleTask(cronTaskId);
+    return;
+  }
+  const ts = Date.now();
+  const taskId = nanoid9(12);
+  await getDb().tasks.create({
+    id: taskId,
+    userId: task.userId,
+    prompt: task.prompt,
+    title: null,
+    repoUrl: task.repoUrl || null,
+    selectedAgent: task.selectedAgent || "codebuddy",
+    selectedModel: task.selectedModel || "gml-5.0",
+    installDependencies: false,
+    maxDuration: 300,
+    keepAlive: false,
+    enableBrowser: false,
+    status: "pending",
+    progress: 0,
+    logs: "[]",
+    error: null,
+    branchName: null,
+    sandboxId: null,
+    agentSessionId: null,
+    sandboxUrl: null,
+    previewUrl: null,
+    prUrl: null,
+    prNumber: null,
+    prStatus: null,
+    prMergeCommitSha: null,
+    mcpServerIds: null,
+    createdAt: ts,
+    updatedAt: ts
+  });
+  await getDb().cronTasks.update(task.id, task.userId, {
+    lastRunAt: ts
+  });
+  console.log("Cron task created new task");
+}
+
+// src/routes/crontask.ts
+var app4 = new Hono9();
+app4.get("/", async (c) => {
+  const authErr = requireAuth(c);
+  if (authErr) return authErr;
+  const session = c.get("session");
+  const userId = session.user.id;
+  const tasks2 = await getDb().cronTasks.findByUserId(userId);
+  return c.json({ success: true, data: tasks2 });
+});
+app4.post("/", async (c) => {
+  const authErr = requireAuth(c);
+  if (authErr) return authErr;
+  const session = c.get("session");
+  const userId = session.user.id;
+  const body = await c.req.json();
+  const { name, prompt, cronExpression, enabled = true, repoUrl, selectedAgent, selectedModel } = body;
+  if (!name || !prompt || !cronExpression) {
+    return c.json({ error: "name, prompt, and cronExpression are required" }, 400);
+  }
+  if (!cron2.validate(cronExpression)) {
+    return c.json({ error: "Invalid cron expression" }, 400);
+  }
+  const newTask = await getDb().cronTasks.create({
+    id: nanoid10(),
+    userId,
+    name,
+    prompt,
+    cronExpression,
+    enabled,
+    repoUrl: repoUrl || null,
+    selectedAgent: selectedAgent || "codebuddy",
+    selectedModel: selectedModel || "gml-5.0",
+    lastRunAt: null,
+    nextRunAt: null
+  });
+  if (newTask.enabled) {
+    scheduleTask(newTask);
+  }
+  return c.json({ success: true, data: newTask }, 201);
+});
+app4.patch("/:id", async (c) => {
+  const authErr = requireAuth(c);
+  if (authErr) return authErr;
+  const session = c.get("session");
+  const userId = session.user.id;
+  const { id } = c.req.param();
+  const body = await c.req.json();
+  const existing = await getDb().cronTasks.findByIdAndUserId(id, userId);
+  if (!existing) return c.json({ error: "Not found" }, 404);
+  if (body.cronExpression !== void 0 && !cron2.validate(body.cronExpression)) {
+    return c.json({ error: "Invalid cron expression" }, 400);
+  }
+  const update = {};
+  if (body.name !== void 0) update.name = body.name;
+  if (body.prompt !== void 0) update.prompt = body.prompt;
+  if (body.cronExpression !== void 0) update.cronExpression = body.cronExpression;
+  if (body.enabled !== void 0) update.enabled = body.enabled;
+  if (body.repoUrl !== void 0) update.repoUrl = body.repoUrl;
+  if (body.selectedAgent !== void 0) update.selectedAgent = body.selectedAgent;
+  if (body.selectedModel !== void 0) update.selectedModel = body.selectedModel;
+  const updated = await getDb().cronTasks.update(id, userId, update);
+  if (updated) {
+    if (updated.enabled) {
+      scheduleTask(updated);
+    } else {
+      unscheduleTask(updated.id);
+    }
+  }
+  return c.json({ success: true, data: updated });
+});
+app4.delete("/:id", async (c) => {
+  const authErr = requireAuth(c);
+  if (authErr) return authErr;
+  const session = c.get("session");
+  const userId = session.user.id;
+  const { id } = c.req.param();
+  const existing = await getDb().cronTasks.findByIdAndUserId(id, userId);
+  if (!existing) return c.json({ error: "Not found" }, 404);
+  unscheduleTask(id);
+  await getDb().cronTasks.delete(id, userId);
+  return c.json({ success: true, message: "Deleted" });
+});
+var crontask_default = app4;
+
+// src/routes/api-keys.ts
+import { Hono as Hono10 } from "hono";
+import { nanoid as nanoid11 } from "nanoid";
 var VALID_PROVIDERS = ["openai", "gemini", "cursor", "anthropic", "aigateway"];
 var AGENT_PROVIDER_MAP = {
   claude: "aigateway",
@@ -8182,8 +8843,8 @@ async function getUserApiKey(userId, provider) {
   }
   return systemKeys[provider];
 }
-var app4 = new Hono8();
-app4.get("/", async (c) => {
+var app5 = new Hono10();
+app5.get("/", async (c) => {
   try {
     const authErr = requireAuth(c);
     if (authErr) return authErr;
@@ -8199,7 +8860,7 @@ app4.get("/", async (c) => {
     return c.json({ error: "Failed to fetch API keys" }, 500);
   }
 });
-app4.post("/", async (c) => {
+app5.post("/", async (c) => {
   try {
     const authErr = requireAuth(c);
     if (authErr) return authErr;
@@ -8215,7 +8876,7 @@ app4.post("/", async (c) => {
     }
     const encryptedKey = encrypt(apiKey);
     await getDb().keys.upsert({
-      id: nanoid9(),
+      id: nanoid11(),
       userId,
       provider,
       value: encryptedKey
@@ -8226,7 +8887,7 @@ app4.post("/", async (c) => {
     return c.json({ error: "Failed to save API key" }, 500);
   }
 });
-app4.delete("/", async (c) => {
+app5.delete("/", async (c) => {
   try {
     const authErr = requireAuth(c);
     if (authErr) return authErr;
@@ -8243,7 +8904,7 @@ app4.delete("/", async (c) => {
     return c.json({ error: "Failed to delete API key" }, 500);
   }
 });
-app4.get("/check", async (c) => {
+app5.get("/check", async (c) => {
   try {
     const agent = c.req.query("agent");
     const model = c.req.query("model");
@@ -8289,16 +8950,16 @@ app4.get("/check", async (c) => {
     return c.json({ error: "Failed to check API key" }, 500);
   }
 });
-var api_keys_default = app4;
+var api_keys_default = app5;
 
 // src/routes/misc.ts
-import { Hono as Hono9 } from "hono";
+import { Hono as Hono11 } from "hono";
 var GITHUB_REPO = "vercel-labs/coding-agent-template";
 var CACHE_DURATION_MS = 5 * 60 * 1e3;
 var cachedStars = null;
 var lastFetch = 0;
-var app5 = new Hono9();
-app5.get("/github-stars", async (c) => {
+var app6 = new Hono11();
+app6.get("/github-stars", async (c) => {
   try {
     const now4 = Date.now();
     if (cachedStars !== null && now4 - lastFetch < CACHE_DURATION_MS) {
@@ -8322,7 +8983,7 @@ app5.get("/github-stars", async (c) => {
     return c.json({ stars: cachedStars || 1200 });
   }
 });
-app5.get("/sandboxes", async (c) => {
+app6.get("/sandboxes", async (c) => {
   try {
     const authErr = requireAuth(c);
     if (authErr) return authErr;
@@ -8348,15 +9009,15 @@ app5.get("/sandboxes", async (c) => {
     return c.json({ error: "Failed to fetch sandboxes" }, 500);
   }
 });
-app5.get("/vercel/teams", (c) => {
+app6.get("/vercel/teams", (c) => {
   return c.json({ scopes: [] });
 });
-var misc_default = app5;
+var misc_default = app6;
 
 // src/routes/repos.ts
-import { Hono as Hono10 } from "hono";
+import { Hono as Hono12 } from "hono";
 import { Octokit as Octokit3 } from "@octokit/rest";
-var app6 = new Hono10();
+var app7 = new Hono12();
 async function getGitHubToken2(userId) {
   try {
     const account = await getDb().accounts.findByUserIdAndProvider(userId, "github");
@@ -8372,7 +9033,7 @@ async function getGitHubToken2(userId) {
     return null;
   }
 }
-app6.get("/:owner/:repo/commits", async (c) => {
+app7.get("/:owner/:repo/commits", async (c) => {
   try {
     const owner = c.req.param("owner");
     const repo = c.req.param("repo");
@@ -8393,7 +9054,7 @@ app6.get("/:owner/:repo/commits", async (c) => {
     return c.json({ error: "Failed to fetch commits" }, 500);
   }
 });
-app6.get("/:owner/:repo/issues", async (c) => {
+app7.get("/:owner/:repo/issues", async (c) => {
   try {
     const owner = c.req.param("owner");
     const repo = c.req.param("repo");
@@ -8416,7 +9077,7 @@ app6.get("/:owner/:repo/issues", async (c) => {
     return c.json({ error: "Failed to fetch issues" }, 500);
   }
 });
-app6.get("/:owner/:repo/pull-requests", async (c) => {
+app7.get("/:owner/:repo/pull-requests", async (c) => {
   try {
     const owner = c.req.param("owner");
     const repo = c.req.param("repo");
@@ -8440,7 +9101,7 @@ app6.get("/:owner/:repo/pull-requests", async (c) => {
     return c.json({ error: "Failed to fetch pull requests" }, 500);
   }
 });
-app6.get("/:owner/:repo/pull-requests/:pr_number/check-task", async (c) => {
+app7.get("/:owner/:repo/pull-requests/:pr_number/check-task", async (c) => {
   try {
     const authErr = requireAuth(c);
     if (authErr) return authErr;
@@ -8464,7 +9125,7 @@ app6.get("/:owner/:repo/pull-requests/:pr_number/check-task", async (c) => {
     return c.json({ error: "Failed to check for existing task" }, 500);
   }
 });
-app6.patch("/:owner/:repo/pull-requests/:pr_number/close", async (c) => {
+app7.patch("/:owner/:repo/pull-requests/:pr_number/close", async (c) => {
   try {
     const owner = c.req.param("owner");
     const repo = c.req.param("repo");
@@ -8491,10 +9152,10 @@ app6.patch("/:owner/:repo/pull-requests/:pr_number/close", async (c) => {
     return c.json({ error: "Failed to close pull request" }, 500);
   }
 });
-var repos_default = app6;
+var repos_default = app7;
 
 // src/routes/database.ts
-import { Hono as Hono11 } from "hono";
+import { Hono as Hono13 } from "hono";
 
 // src/cloudbase/database.ts
 import CloudBase4 from "@cloudbase/manager-node";
@@ -8634,7 +9295,7 @@ async function waitForCollectionReady(manager, name, timeoutMs = 1e4, intervalMs
 }
 
 // src/routes/database.ts
-var router = new Hono11();
+var router = new Hono13();
 function getCreds(c) {
   const { envId, credentials } = c.get("userEnv");
   return {
@@ -8720,7 +9381,7 @@ router.delete("/collections/:name/documents/:id", requireUserEnv, async (c) => {
 var database_default = router;
 
 // src/routes/storage.ts
-import { Hono as Hono12 } from "hono";
+import { Hono as Hono14 } from "hono";
 
 // src/cloudbase/storage.ts
 async function getBuckets(creds) {
@@ -8856,7 +9517,7 @@ async function deleteHostingFile(creds, cloudPath) {
 }
 
 // src/routes/storage.ts
-var router2 = new Hono12();
+var router2 = new Hono14();
 function getCreds2(c) {
   const { envId, credentials } = c.get("userEnv");
   return {
@@ -8912,8 +9573,8 @@ router2.delete("/files", requireUserEnv, async (c) => {
 var storage_default = router2;
 
 // src/routes/functions.ts
-import { Hono as Hono13 } from "hono";
-var router3 = new Hono13();
+import { Hono as Hono15 } from "hono";
+var router3 = new Hono15();
 function getCreds3(c) {
   const { envId, credentials } = c.get("userEnv");
   return {
@@ -8958,17 +9619,17 @@ router3.post("/:name/invoke", requireUserEnv, async (c) => {
 var functions_default = router3;
 
 // src/routes/sql.ts
-import { Hono as Hono14 } from "hono";
-var router4 = new Hono14();
+import { Hono as Hono16 } from "hono";
+var router4 = new Hono16();
 router4.post("/query", async (c) => {
   return c.json({ error: "\u8BF7\u5148\u914D\u7F6E SQL \u6570\u636E\u5E93\u8FDE\u63A5\uFF08MySQL/PostgreSQL\uFF09" }, 501);
 });
 var sql_default = router4;
 
 // src/routes/capi.ts
-import { Hono as Hono15 } from "hono";
+import { Hono as Hono17 } from "hono";
 import CloudBase5 from "@cloudbase/manager-node";
-var router5 = new Hono15();
+var router5 = new Hono17();
 router5.post("/", requireUserEnv, async (c) => {
   const { envId, credentials } = c.get("userEnv");
   let body;
@@ -8982,13 +9643,13 @@ router5.post("/", requireUserEnv, async (c) => {
     return c.json({ error: "\u7F3A\u5C11 service / action \u53C2\u6570" }, 400);
   }
   try {
-    const app8 = new CloudBase5({
+    const app9 = new CloudBase5({
       secretId: credentials.secretId,
       secretKey: credentials.secretKey,
       token: credentials.sessionToken || "",
       envId
     });
-    const result = await app8.commonService(service).call({
+    const result = await app9.commonService(service).call({
       Action: action,
       Param: params
     });
@@ -9000,7 +9661,7 @@ router5.post("/", requireUserEnv, async (c) => {
 var capi_default = router5;
 
 // src/routes/admin.ts
-import { Hono as Hono16 } from "hono";
+import { Hono as Hono18 } from "hono";
 
 // src/middleware/admin.ts
 import { deleteCookie as deleteCookie3 } from "hono/cookie";
@@ -9021,10 +9682,10 @@ async function requireAdmin(c, next) {
 }
 
 // src/routes/admin.ts
-import { nanoid as nanoid10 } from "nanoid";
+import { nanoid as nanoid12 } from "nanoid";
 import bcrypt2 from "bcryptjs";
 import CloudBase6 from "@cloudbase/manager-node";
-var admin = new Hono16();
+var admin = new Hono18();
 admin.use("/*", requireAdmin);
 var proxyCredentialCache = /* @__PURE__ */ new Map();
 async function getProxyCreds(envId) {
@@ -9143,7 +9804,7 @@ admin.post("/users/:userId/disable", async (c) => {
   }
   await db.users.disable(userId, reason || "No reason provided", adminUser.id);
   await db.adminLogs.create({
-    id: nanoid10(),
+    id: nanoid12(),
     adminUserId: adminUser.id,
     action: "user_disable",
     targetUserId: userId,
@@ -9163,7 +9824,7 @@ admin.post("/users/:userId/enable", async (c) => {
   }
   await db.users.enable(userId);
   await db.adminLogs.create({
-    id: nanoid10(),
+    id: nanoid12(),
     adminUserId: adminUser.id,
     action: "user_enable",
     targetUserId: userId,
@@ -9190,7 +9851,7 @@ admin.post("/users/:userId/set-role", async (c) => {
   const oldRole = user.role;
   await db.users.updateRole(userId, role);
   await db.adminLogs.create({
-    id: nanoid10(),
+    id: nanoid12(),
     adminUserId: adminUser.id,
     action: "user_role_change",
     targetUserId: userId,
@@ -9218,7 +9879,7 @@ admin.post("/users/:userId/reset-password", async (c) => {
   const passwordHash = await bcrypt2.hash(newPassword, 12);
   await db.localCredentials.update(userId, { passwordHash, updatedAt: Date.now() });
   await db.adminLogs.create({
-    id: nanoid10(),
+    id: nanoid12(),
     adminUserId: adminUser.id,
     action: "password_reset",
     targetUserId: userId,
@@ -9244,7 +9905,7 @@ admin.post("/users/create", async (c) => {
   if (existingUser) {
     return c.json({ error: "User already exists" }, 400);
   }
-  const userId = nanoid10();
+  const userId = nanoid12();
   const now4 = Date.now();
   await db.users.create({
     id: userId,
@@ -9269,7 +9930,7 @@ admin.post("/users/create", async (c) => {
   });
   const provisionMode = process.env.TCB_PROVISION_MODE || "shared";
   if (process.env.TCB_SECRET_ID && process.env.TCB_SECRET_KEY) {
-    const resourceId = nanoid10();
+    const resourceId = nanoid12();
     if (provisionMode === "isolated") {
       await db.userResources.create({
         id: resourceId,
@@ -9323,7 +9984,7 @@ admin.post("/users/create", async (c) => {
     }
   }
   await db.adminLogs.create({
-    id: nanoid10(),
+    id: nanoid12(),
     adminUserId: adminUser.id,
     action: "user_create",
     targetUserId: userId,
@@ -9636,13 +10297,13 @@ admin.post("/proxy/:envId/capi", async (c) => {
   }
   try {
     const creds = await getProxyCreds(envId);
-    const app8 = new CloudBase6({
+    const app9 = new CloudBase6({
       secretId: creds.secretId,
       secretKey: creds.secretKey,
       token: creds.sessionToken || "",
       envId
     });
-    const result = await app8.commonService(service).call({
+    const result = await app9.commonService(service).call({
       Action: action,
       Param: params
     });
@@ -9691,39 +10352,41 @@ var __dirname = dirname2(__filename);
 process.on("unhandledRejection", (err) => {
   console.error("[Server] Unhandled rejection:", err);
 });
-var app7 = new Hono17();
-app7.use(
+var app8 = new Hono19();
+app8.use(
   "*",
   cors({
     origin: (origin) => origin || "*",
     credentials: true
   })
 );
-app7.use("*", authMiddleware);
-app7.get("/health", (c) => c.json({ status: "ok" }));
-app7.route("/api/auth", auth_default);
-app7.route("/api/auth/github", github_auth_default);
-app7.route("/api/github", github_default);
-app7.route("/api/agent", acp_default);
-app7.route("/api/tasks", tasks_default);
-app7.route("/api/connectors", connectors_default);
-app7.route("/api/miniprogram", miniprogram_default);
-app7.route("/api/api-keys", api_keys_default);
-app7.route("/api", misc_default);
-app7.route("/api/repos", repos_default);
-app7.route("/api/database", database_default);
-app7.route("/api/storage", storage_default);
-app7.route("/api/functions", functions_default);
-app7.route("/api/sql", sql_default);
-app7.route("/api/capi", capi_default);
-app7.route("/api/admin", admin_default);
+app8.use("*", authMiddleware);
+app8.get("/health", (c) => c.json({ status: "ok" }));
+app8.route("/api/auth", auth_default);
+app8.route("/api/auth/github", github_auth_default);
+app8.route("/api/auth/cloudbase", cloudbase_auth_default);
+app8.route("/api/github", github_default);
+app8.route("/api/agent", acp_default);
+app8.route("/api/tasks", tasks_default);
+app8.route("/api/connectors", connectors_default);
+app8.route("/api/miniprogram", miniprogram_default);
+app8.route("/api/crontask", crontask_default);
+app8.route("/api/api-keys", api_keys_default);
+app8.route("/api", misc_default);
+app8.route("/api/repos", repos_default);
+app8.route("/api/database", database_default);
+app8.route("/api/storage", storage_default);
+app8.route("/api/functions", functions_default);
+app8.route("/api/sql", sql_default);
+app8.route("/api/capi", capi_default);
+app8.route("/api/admin", admin_default);
 var webDistPath = resolve(__dirname, "../web/dist");
 var serveStaticFiles = existsSync2(webDistPath);
 if (serveStaticFiles) {
   console.log(`[Server] Serving static files from: ${webDistPath}`);
-  app7.use("/assets/*", serveStatic({ root: webDistPath }));
-  app7.use("/*", serveStatic({ root: webDistPath }));
-  app7.get("*", async (c, next) => {
+  app8.use("/assets/*", serveStatic({ root: webDistPath }));
+  app8.use("/*", serveStatic({ root: webDistPath }));
+  app8.get("*", async (c, next) => {
     const path5 = c.req.path;
     if (path5.startsWith("/api")) {
       return next();
@@ -9749,7 +10412,7 @@ if (serveStaticFiles) {
   console.log("[Server] For full-stack mode, build the web package first: pnpm build:web");
 }
 var PORT = Number(process.env.PORT) || 3001;
-serve({ fetch: app7.fetch, port: PORT }, () => {
+serve({ fetch: app8.fetch, port: PORT }, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   if (serveStaticFiles) {
     console.log(`Open http://localhost:${PORT} in your browser`);
@@ -9757,8 +10420,11 @@ serve({ fetch: app7.fetch, port: PORT }, () => {
     console.log(`API endpoint: http://localhost:${PORT}/api`);
     console.log(`For development, run: pnpm dev:web`);
   }
+  initCronScheduler().catch((err) => {
+    console.error("Failed to initialize cron scheduler:", err);
+  });
 });
-var index_default = app7;
+var index_default = app8;
 export {
   index_default as default
 };

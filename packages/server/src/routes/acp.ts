@@ -10,11 +10,10 @@ import {
   type InitializeResult,
   type SessionNewResult,
   type SessionPromptParams,
-  type AgentCallbackMessage,
-  type ExtendedSessionUpdate,
 } from '@coder/shared'
 import { cloudbaseAgentService, getSupportedModels } from '../agent/cloudbase-agent.service.js'
 import { persistenceService } from '../agent/persistence.service.js'
+import { getAgentRun } from '../agent/agent-registry.js'
 import { loadConfig } from '../config/store.js'
 import { getDb } from '../db/index.js'
 import { nanoid } from 'nanoid'
@@ -196,93 +195,17 @@ acp.post('/chat', async (c) => {
     return c.json({ error: 'CloudBase environment not bound' }, 400)
   }
 
-  // 创建或使用现有会话
   const actualConversationId = conversationId || uuidv4()
 
-  return streamSSE(c, async (stream) => {
-    // 发送会话信息
-    await stream.writeSSE({
-      data: JSON.stringify({
-        type: 'session',
-        conversationId: actualConversationId,
-      }),
-    })
-
-    let fullContent = ''
-    let stopReason: 'end_turn' | 'cancelled' | 'error' = 'end_turn'
-
-    const callback = async (msg: AgentCallbackMessage) => {
-      if (msg.type === 'text' && msg.content) {
-        fullContent += msg.content
-        await stream.writeSSE({
-          data: JSON.stringify({
-            type: 'text',
-            content: msg.content,
-          }),
-        })
-      } else if (msg.type === 'thinking' && msg.content) {
-        await stream.writeSSE({
-          data: JSON.stringify({
-            type: 'thinking',
-            content: msg.content,
-          }),
-        })
-      } else if (msg.type === 'tool_use') {
-        await stream.writeSSE({
-          data: JSON.stringify({
-            type: 'tool_use',
-            name: msg.name,
-            input: msg.input,
-            id: msg.id,
-          }),
-        })
-      } else if (msg.type === 'tool_result') {
-        await stream.writeSSE({
-          data: JSON.stringify({
-            type: 'tool_result',
-            tool_use_id: msg.tool_use_id,
-            content: msg.content,
-            is_error: msg.is_error,
-          }),
-        })
-      } else if (msg.type === 'error') {
-        stopReason = 'error'
-        await stream.writeSSE({
-          data: JSON.stringify({
-            type: 'error',
-            content: msg.content,
-          }),
-        })
-      } else if (msg.type === 'result') {
-        await stream.writeSSE({
-          data: JSON.stringify({
-            type: 'result',
-          }),
-        })
-      }
-    }
-
-    try {
-      await cloudbaseAgentService.chatStream(prompt, callback, {
-        conversationId: actualConversationId,
-        envId,
-        userId,
-        userCredentials,
-        model,
-      })
-    } catch (error) {
-      stopReason = 'error'
-      await stream.writeSSE({
-        data: JSON.stringify({
-          type: 'error',
-          content: error instanceof Error ? error.message : String(error),
-        }),
-      })
-    }
-
-    // 发送结束标记
-    await stream.writeSSE({ data: '[DONE]' })
+  const { turnId } = await cloudbaseAgentService.chatStream(prompt, null, {
+    conversationId: actualConversationId,
+    envId,
+    userId,
+    userCredentials,
+    model,
   })
+
+  return observeStream(c, null, actualConversationId, turnId, envId, userId)
 })
 
 // ─── ACP JSON-RPC 2.0 Endpoint ─────────────────────────────────────────────
@@ -412,17 +335,19 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
     return c.json(rpcErr(id, JSON_RPC_ERRORS.INTERNAL, 'CloudBase environment not bound'))
   }
 
-  // 检查会话是否存在，不存在则自动创建
-  const exists = await persistenceService.conversationExists(sessionId, userId, envId)
-  // Session will be auto-created by agent during chatStream (first prompt creates it)
+  // Check if agent is already running via registry
+  const existingRun = getAgentRun(sessionId)
+  if (existingRun && existingRun.status === 'running') {
+    return observeStream(c, id, sessionId, existingRun.turnId, envId, userId)
+  }
 
-  // 检查是否正在处理中
+  // Check DB status as fallback
   const latestStatus = await persistenceService.getLatestRecordStatus(sessionId, userId, envId)
   if (latestStatus && (latestStatus.status === 'pending' || latestStatus.status === 'streaming')) {
     return c.json(rpcErr(id, JSON_RPC_ERRORS.INVALID_REQUEST, 'A prompt turn is already in progress'))
   }
 
-  // 提取 prompt 文本
+  // Extract prompt text
   const prompt: string = (params?.prompt ?? [])
     .filter((b) => b.type === 'text')
     .map((b) => b.text)
@@ -437,7 +362,7 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
 
   const effectivePrompt = prompt.trim() ? prompt : hasResumePayload ? 'continue' : prompt
 
-  // 读取 task 的 selectedModel
+  // Read task's selectedModel
   let selectedModel: string | undefined
   try {
     const task = await getDb().tasks.findById(sessionId)
@@ -453,216 +378,110 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
     // write failure doesn't affect main flow
   }
 
-  // 返回 SSE 流式响应
-  return streamSSE(c, async (stream) => {
-    let fullContent = ''
-    let stopReason: 'end_turn' | 'cancelled' | 'error' = 'end_turn'
+  // Launch agent in background and observe via SSE
+  const { turnId } = await cloudbaseAgentService.chatStream(effectivePrompt, null, {
+    conversationId: sessionId,
+    envId,
+    userId,
+    userCredentials,
+    model: selectedModel,
+    askAnswers: params.askAnswers,
+    toolConfirmation: params.toolConfirmation,
+  })
 
-    // Helper to send extended session updates
-    const notify = async (method: string, notifParams: { sessionId: string; update: ExtendedSessionUpdate }) => {
-      await stream.writeSSE({
-        data: JSON.stringify({
-          jsonrpc: '2.0',
-          method,
-          params: notifParams,
-        }),
-      })
+  return observeStream(c, id, sessionId, turnId, envId, userId)
+}
+
+// ─── Observe Stream (SSE replay + poll) ──────────────────────────────────────
+
+/**
+ * GET /api/agent/observe/:sessionId
+ *
+ * SSE endpoint: replay existing ACP events + poll for new events until turn completes
+ */
+acp.get('/observe/:sessionId', requireUserEnv, async (c) => {
+  const sessionId = c.req.param('sessionId')
+  const { envId, userId } = c.get('userEnv')!
+
+  if (!envId) {
+    return c.json({ error: 'CloudBase environment not bound' }, 400)
+  }
+
+  let turnId = c.req.query('turnId') || undefined
+  if (!turnId) {
+    const latest = await persistenceService.getLatestRecordStatus(sessionId, userId, envId)
+    if (!latest || (latest.status !== 'pending' && latest.status !== 'streaming')) {
+      return c.json({ error: 'No active turn to observe' }, 404)
+    }
+    turnId = latest.recordId
+  }
+
+  return observeStream(c, null, sessionId, turnId, envId, userId)
+})
+
+async function observeStream(
+  c: any,
+  rpcId: number | string | null,
+  sessionId: string,
+  turnId: string,
+  _envId: string,
+  _userId: string,
+) {
+  return streamSSE(c, async (stream) => {
+    let lastSeq = -1
+    const POLL_INTERVAL = 500
+    const MAX_POLL_DURATION = 10 * 60 * 1000
+
+    // 1. Replay existing events
+    try {
+      const existingEvents = await persistenceService.getStreamEvents(sessionId, turnId)
+      for (const evt of existingEvents) {
+        await stream.writeSSE({
+          data: JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: { sessionId, update: evt.event },
+          }),
+        })
+        lastSeq = Math.max(lastSeq, evt.seq)
+      }
+    } catch {
+      // Replay failure is non-fatal
     }
 
-    const callback = async (msg: AgentCallbackMessage) => {
-      if (msg.type === 'text' && msg.content) {
-        fullContent += msg.content
-        await notify('session/update', {
-          sessionId,
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: msg.content },
-          },
-        })
-      } else if (msg.type === 'thinking' && msg.content) {
-        await notify('session/update', {
-          sessionId,
-          update: { sessionUpdate: 'agent_thought_chunk', content: msg.content },
-        })
-      } else if (msg.type === 'tool_use') {
-        const toolCallId = msg.id || uuidv4()
-        await notify('session/update', {
-          sessionId,
-          update: {
-            sessionUpdate: 'tool_call',
-            toolCallId,
-            title: msg.name || 'tool',
-            kind: 'function',
-            status: 'in_progress',
-            input: msg.input,
-            assistantMessageId: msg.assistantMessageId,
-          },
-        })
-      } else if (msg.type === 'tool_result') {
-        await notify('session/update', {
-          sessionId,
-          update: {
-            sessionUpdate: 'tool_call_update',
-            toolCallId: msg.tool_use_id || '',
-            status: msg.is_error ? 'failed' : 'completed',
-            result: msg.content,
-          },
-        })
-      } else if (msg.type === 'error') {
-        stopReason = 'error'
-        await notify('session/update', {
-          sessionId,
-          update: {
-            sessionUpdate: 'log',
-            level: 'error',
-            message: msg.content || 'Unknown error',
-            timestamp: Date.now(),
-          },
-        })
-      } else if (msg.type === 'deploy_url') {
-        // Create or update deployment
-        const deploymentType = msg.deploymentType || 'web'
-        const now = Date.now()
+    // 2. Poll loop
+    const startTime = Date.now()
+    while (Date.now() - startTime < MAX_POLL_DURATION) {
+      const run = getAgentRun(sessionId)
+      const isDone = !run || run.status !== 'running'
 
-        try {
-          if (deploymentType === 'miniprogram') {
-            // Single miniprogram per task
-            const existing = await getDb().deployments.findByTaskIdAndTypePath(sessionId, 'miniprogram', null)
-
-            if (existing) {
-              await getDb().deployments.update(existing.id, {
-                qrCodeUrl: msg.qrCodeUrl || existing.qrCodeUrl,
-                pagePath: msg.pagePath || existing.pagePath,
-                appId: msg.appId || existing.appId,
-                label: msg.label || existing.label,
-                metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : existing.metadata,
-                updatedAt: now,
-              })
-            } else {
-              await getDb().deployments.create({
-                id: nanoid(12),
-                taskId: sessionId,
-                type: 'miniprogram',
-                url: null,
-                path: null,
-                qrCodeUrl: msg.qrCodeUrl || null,
-                pagePath: msg.pagePath || null,
-                appId: msg.appId || null,
-                label: msg.label || null,
-                metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : null,
-                createdAt: now,
-                updatedAt: now,
-              })
-            }
-          } else if (msg.url) {
-            // Web deployment with URL
-            let path: string | null = null
-            try {
-              const urlObj = new URL(msg.url)
-              path = urlObj.pathname
-            } catch {
-              /* ignore */
-            }
-
-            if (path) {
-              const existing = await getDb().deployments.findByTaskIdAndTypePath(sessionId, 'web', path)
-
-              if (existing) {
-                await getDb().deployments.update(existing.id, {
-                  url: msg.url,
-                  label: msg.label || existing.label,
-                  metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : existing.metadata,
-                  updatedAt: now,
-                })
-              } else {
-                await getDb().deployments.create({
-                  id: nanoid(12),
-                  taskId: sessionId,
-                  type: 'web',
-                  url: msg.url,
-                  path,
-                  qrCodeUrl: null,
-                  pagePath: null,
-                  appId: null,
-                  label: msg.label || null,
-                  metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : null,
-                  createdAt: now,
-                  updatedAt: now,
-                })
-              }
-            }
-          }
-
-          // Also update legacy previewUrl for backward compatibility
-          if (msg.url) {
-            await getDb().tasks.update(sessionId, { previewUrl: msg.url })
-          }
-        } catch (err) {
-          console.error('Failed to create deployment:', err)
+      try {
+        const newEvents = await persistenceService.getStreamEvents(sessionId, turnId, lastSeq)
+        for (const evt of newEvents) {
+          await stream.writeSSE({
+            data: JSON.stringify({
+              jsonrpc: '2.0',
+              method: 'session/update',
+              params: { sessionId, update: evt.event },
+            }),
+          })
+          lastSeq = Math.max(lastSeq, evt.seq)
         }
 
-        await notify('session/update', {
-          sessionId,
-          update: {
-            sessionUpdate: 'deploy_url',
-            url: msg.url,
-            type: deploymentType,
-            qrCodeUrl: msg.qrCodeUrl,
-            pagePath: msg.pagePath,
-            appId: msg.appId,
-            label: msg.label,
-          },
-        })
-      } else if (msg.type === 'artifact' && msg.artifact) {
-        await notify('session/update', {
-          sessionId,
-          update: { sessionUpdate: 'artifact', artifact: msg.artifact },
-        })
+        if (isDone && newEvents.length === 0) break
+      } catch {
+        if (isDone) break
       }
+
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL))
     }
 
-    try {
-      await cloudbaseAgentService.chatStream(effectivePrompt, callback, {
-        conversationId: sessionId,
-        envId,
-        userId,
-        userCredentials,
-        model: selectedModel,
-        askAnswers: params.askAnswers,
-        toolConfirmation: params.toolConfirmation,
-      })
-    } catch (error) {
-      stopReason = 'error'
-      const errMsg = error instanceof Error ? error.message : String(error)
-      console.error('[ACP] chatStream error:', errMsg)
-      await notify('session/update', {
-        sessionId,
-        update: {
-          sessionUpdate: 'log',
-          level: 'error',
-          message: errMsg,
-          timestamp: Date.now(),
-        },
-      })
+    // 3. Send final response + [DONE]
+    if (rpcId !== null) {
+      const run = getAgentRun(sessionId)
+      const stopReason = run?.status === 'error' ? 'error' : 'end_turn'
+      await stream.writeSSE({ data: JSON.stringify(rpcOk(rpcId, { stopReason })) })
     }
-
-    // 更新 task 状态（消息已由 PersistenceService 存入 CloudBase，不需再写 SQLite）
-    try {
-      await getDb().tasks.update(sessionId, {
-        status: stopReason === 'error' ? 'error' : 'completed',
-        completedAt: Date.now(),
-        updatedAt: Date.now(),
-      })
-    } catch (dbErr) {
-      console.error('[ACP] Failed to update task status:', dbErr)
-    }
-
-    // 发送最终响应
-    await stream.writeSSE({
-      data: JSON.stringify(rpcOk(id, { stopReason })),
-    })
-
-    // 发送结束标记
     await stream.writeSSE({ data: '[DONE]' })
   })
 }

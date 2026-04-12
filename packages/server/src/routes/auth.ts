@@ -67,7 +67,7 @@ auth.post('/register', async (c) => {
     // Create session
     const session: AppSession = {
       created: now,
-      authProvider: 'github',
+      authProvider: 'local',
       user: {
         id: userId,
         username: trimmedUsername,
@@ -201,7 +201,7 @@ auth.post('/login', async (c) => {
     // Create session
     const session: AppSession = {
       created: Date.now(),
-      authProvider: 'github',
+      authProvider: 'local',
       user: {
         id: user.id,
         username: user.username,
@@ -302,6 +302,14 @@ auth.get('/rate-limit', async (c) => {
     total: 100,
     resetAt: new Date(Date.now() + 86400000).toISOString(),
   })
+})
+
+// GET /auth-config - Expose auth configuration to frontend (no session required)
+auth.get('/auth-config', (c) => {
+  const providers = (process.env.NEXT_PUBLIC_AUTH_PROVIDERS || 'local').split(',').map((s) => s.trim())
+  const githubMode = process.env.AUTH_GITHUB_MODE || 'direct' // 'direct' | 'cloudbase'
+  const tcbEnvId = process.env.TCB_ENV_ID || ''
+  return c.json({ providers, githubMode, tcbEnvId })
 })
 
 export default auth

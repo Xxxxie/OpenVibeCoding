@@ -8,6 +8,7 @@ import { TaskPage } from './pages/TaskPage'
 import { TasksListPage } from './pages/TasksListPage'
 import { LoginPage } from './pages/LoginPage'
 import { MiniProgramPage } from './pages/miniprogram-page'
+import { CronTaskPage } from './pages/crontask-page'
 import { RequireAdmin } from './components/require-admin'
 import { AdminLayout } from './components/admin/admin-layout'
 import { AdminUsersPage } from './pages/admin/users-page'
@@ -20,6 +21,8 @@ import { sessionAtom, sessionLoadedAtom } from './lib/atoms/session'
 import { api } from './lib/api'
 import { Loader2 } from 'lucide-react'
 import { ThemeProvider } from './components/theme-provider'
+import { setAuthConfig } from './lib/auth/providers'
+import type { AuthConfig } from './lib/auth/providers'
 import './index.css'
 
 // Error boundary to catch runtime errors
@@ -51,6 +54,16 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 function AuthProvider({ children }: { children: React.ReactNode }) {
   const [, setSession] = useAtom(sessionAtom)
   const [, setLoaded] = useAtom(sessionLoadedAtom)
+
+  useEffect(() => {
+    // Fetch auth config in parallel with session check
+    fetch('/api/auth/auth-config', { credentials: 'include' })
+      .then((res) => res.json())
+      .then((config: AuthConfig) => setAuthConfig(config))
+      .catch(() => {
+        /* use defaults */
+      })
+  }, [])
 
   useEffect(() => {
     console.log('[AuthProvider] Checking session...')
@@ -189,6 +202,16 @@ function App() {
               <RequireAuth>
                 <AppLayout>
                   <MiniProgramPage />
+                </AppLayout>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/crontask"
+            element={
+              <RequireAuth>
+                <AppLayout>
+                  <CronTaskPage />
                 </AppLayout>
               </RequireAuth>
             }

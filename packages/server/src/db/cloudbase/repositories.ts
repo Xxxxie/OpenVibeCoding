@@ -11,6 +11,8 @@ import type {
   NewConnector,
   MiniProgramApp,
   NewMiniProgramApp,
+  CronTask,
+  NewCronTask,
   Account,
   NewAccount,
   Key,
@@ -28,6 +30,7 @@ import type {
   TaskRepository,
   ConnectorRepository,
   MiniProgramAppRepository,
+  CronTaskRepository,
   AccountRepository,
   KeyRepository,
   UserResourceRepository,
@@ -410,6 +413,74 @@ class CloudBaseMiniProgramAppRepository implements MiniProgramAppRepository {
   }
 }
 
+// ─── CronTask Repository ────────────────────────────────────────────────────
+
+class CloudBaseCronTaskRepository implements CronTaskRepository {
+  async findByUserId(userId: string): Promise<CronTask[]> {
+    const _ = getCommand()
+    const collection = await getCollection('cron_tasks')
+    const { data } = await collection
+      .where({ userId: _.eq(userId) })
+      .limit(1000)
+      .get()
+    return (data as Record<string, unknown>[]).map((doc) => stripCloudBaseId<CronTask>(doc))
+  }
+
+  async findByIdAndUserId(id: string, userId: string): Promise<CronTask | null> {
+    const _ = getCommand()
+    const collection = await getCollection('cron_tasks')
+    const { data } = await collection
+      .where({ id: _.eq(id), userId: _.eq(userId) })
+      .limit(1)
+      .get()
+    if (!data || data.length === 0) return null
+    return stripCloudBaseId<CronTask>(data[0] as Record<string, unknown>)
+  }
+
+  async findAllEnabled(): Promise<CronTask[]> {
+    const _ = getCommand()
+    const collection = await getCollection('cron_tasks')
+    const { data } = await collection
+      .where({ enabled: _.eq(true) })
+      .limit(1000)
+      .get()
+    return (data as Record<string, unknown>[]).map((doc) => stripCloudBaseId<CronTask>(doc))
+  }
+
+  async create(task: NewCronTask): Promise<CronTask> {
+    const collection = await getCollection('cron_tasks')
+    const ts = now()
+    const doc: CronTask = {
+      ...task,
+      createdAt: task.createdAt ?? ts,
+      updatedAt: task.updatedAt ?? ts,
+    }
+    await collection.add(doc)
+    return doc
+  }
+
+  async update(id: string, userId: string, data: Partial<Omit<CronTask, 'id' | 'userId'>>): Promise<CronTask | null> {
+    const _ = getCommand()
+    const collection = await getCollection('cron_tasks')
+    await collection
+      .where({ id: _.eq(id), userId: _.eq(userId) })
+      .update({ ...data, updatedAt: data.updatedAt ?? now() })
+    return this.findByIdAndUserId(id, userId)
+  }
+
+  async delete(id: string, userId: string): Promise<void> {
+    const _ = getCommand()
+    const collection = await getCollection('cron_tasks')
+    await collection.where({ id: _.eq(id), userId: _.eq(userId) }).remove()
+  }
+
+  async updateUserId(fromUserId: string, toUserId: string): Promise<void> {
+    const _ = getCommand()
+    const collection = await getCollection('cron_tasks')
+    await collection.where({ userId: _.eq(fromUserId) }).update({ userId: toUserId })
+  }
+}
+
 // ─── Account Repository ─────────────────────────────────────────────────────
 
 class CloudBaseAccountRepository implements AccountRepository {
@@ -743,6 +814,7 @@ export function createCloudBaseProvider(): DatabaseProvider {
     tasks: new CloudBaseTaskRepository(),
     connectors: new CloudBaseConnectorRepository(),
     miniprogramApps: new CloudBaseMiniProgramAppRepository(),
+    cronTasks: new CloudBaseCronTaskRepository(),
     accounts: new CloudBaseAccountRepository(),
     keys: new CloudBaseKeyRepository(),
     userResources: new CloudBaseUserResourceRepository(),

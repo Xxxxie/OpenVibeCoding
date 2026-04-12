@@ -4,6 +4,7 @@ import { DiffView, DiffModeEnum } from '@git-diff-view/react'
 import { generateDiffFile } from '@git-diff-view/file'
 import '@git-diff-view/react/styles/diff-view-pure.css'
 import { FileEditor } from '@/components/file-editor'
+import { toast } from 'sonner'
 
 interface DiffData {
   filename: string
@@ -51,6 +52,13 @@ export function FileDiffViewer({
   const [mounted, setMounted] = useState(false)
   // Internal cache for file contents (used for 'all' and 'all-local' modes)
   const internalCacheRef = useRef<Record<string, DiffData>>({})
+  const prevTaskIdRef = useRef(taskId)
+
+  // Clear cache when task changes
+  if (prevTaskIdRef.current !== taskId) {
+    prevTaskIdRef.current = taskId
+    internalCacheRef.current = {}
+  }
 
   // Detect theme from parent window or system - only on client
   useEffect(() => {
@@ -58,13 +66,17 @@ export function FileDiffViewer({
 
     const detectTheme = () => {
       try {
-        const parentHasDarkClass = document.documentElement.classList.contains('dark')
-        const parentMediaQuery = window.matchMedia('(prefers-color-scheme: dark)').matches
-        const parentTheme = parentHasDarkClass || parentMediaQuery ? 'dark' : 'light'
-        setTheme(parentTheme)
+        const htmlEl = document.documentElement
+        // Prefer explicit class on <html>, fall back to system preference
+        if (htmlEl.classList.contains('dark')) {
+          setTheme('dark')
+        } else if (htmlEl.classList.contains('light')) {
+          setTheme('light')
+        } else {
+          setTheme(window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+        }
       } catch {
-        const systemTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-        setTheme(systemTheme)
+        setTheme(window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
       }
     }
 
@@ -106,14 +118,49 @@ export function FileDiffViewer({
         return
       }
 
-      // For files mode (all/all-local), use internal cache
-      if ((viewMode === 'all' || viewMode === 'all-local') && internalCacheRef.current[selectedFile]) {
-        setDiffData(internalCacheRef.current[selectedFile])
+      // For files mode (all/all-local), use internal cache — show immediately, refresh in background
+      const cached = viewMode === 'all' || viewMode === 'all-local' ? internalCacheRef.current[selectedFile] : undefined
+
+      if (cached) {
+        // Show cached content immediately
+        setDiffData(cached)
         setError(null)
         setLoading(false)
+
+        // Background refresh
+        const toastId = toast.loading('Syncing file...')
+        try {
+          const params = new URLSearchParams()
+          params.set('filename', selectedFile)
+          const endpoint =
+            viewMode === 'all' || viewMode === 'all-local'
+              ? `/api/tasks/${taskId}/file-content`
+              : `/api/tasks/${taskId}/diff`
+          if (viewMode === 'local' || viewMode === 'all-local') {
+            params.set('mode', 'local')
+          }
+          const response = await fetch(`${endpoint}?${params.toString()}`)
+          const result = await response.json()
+          if (response.ok && result.success) {
+            const newData = result.data
+            internalCacheRef.current[selectedFile] = newData
+            // Only update UI if content actually changed
+            if (newData.newContent !== cached.newContent) {
+              setDiffData(newData)
+              toast.success('File updated', { id: toastId, duration: 1500 })
+            } else {
+              toast.dismiss(toastId)
+            }
+          } else {
+            toast.dismiss(toastId)
+          }
+        } catch {
+          toast.dismiss(toastId)
+        }
         return
       }
 
+      // No cache — full loading state
       setLoading(true)
       setError(null)
 
@@ -121,13 +168,11 @@ export function FileDiffViewer({
         const params = new URLSearchParams()
         params.set('filename', selectedFile)
 
-        // In "all" or "all-local" mode, fetch file content; in "local" or "remote" mode, fetch diff
         const endpoint =
           viewMode === 'all' || viewMode === 'all-local'
             ? `/api/tasks/${taskId}/file-content`
             : `/api/tasks/${taskId}/diff`
 
-        // For local mode, add a query parameter to get local diff instead of PR diff
         if (viewMode === 'local' || viewMode === 'all-local') {
           params.set('mode', 'local')
         }

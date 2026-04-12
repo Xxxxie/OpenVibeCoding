@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router'
 import { api } from '../../lib/api'
 import { Button } from '../../components/ui/button'
@@ -11,6 +11,7 @@ interface TaskItem {
   userId: string
   username: string
   title: string | null
+  prompt: string
   status: string
   selectedAgent: string | null
   repoUrl: string | null
@@ -18,11 +19,17 @@ interface TaskItem {
   completedAt: number | null
 }
 
+interface UserOption {
+  userId: string
+  username: string
+}
+
 const statusLabels: Record<string, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }> = {
   pending: { label: '等待中', variant: 'outline' },
   processing: { label: '执行中', variant: 'default' },
   completed: { label: '已完成', variant: 'secondary' },
   error: { label: '失败', variant: 'destructive' },
+  stopped: { label: '已停止', variant: 'outline' },
 }
 
 function formatTimeAgo(ts: number) {
@@ -44,16 +51,25 @@ export function AdminTasksPage() {
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
   const [statusFilter, setStatusFilter] = useState('')
+  const [userFilter, setUserFilter] = useState('')
+  const [userOptions, setUserOptions] = useState<UserOption[]>([])
 
+  // Load user list for filter dropdown
   useEffect(() => {
-    loadTasks()
-  }, [page, statusFilter])
+    api
+      .get<{ users: { id: string; username: string }[] }>('/api/admin/users')
+      .then((data) => {
+        setUserOptions(data.users.map((u) => ({ userId: u.id, username: u.username })))
+      })
+      .catch(() => {})
+  }, [])
 
-  async function loadTasks() {
+  const loadTasks = useCallback(async () => {
     setLoading(true)
     try {
       const params = new URLSearchParams({ page: String(page), limit: '20' })
       if (statusFilter) params.set('status', statusFilter)
+      if (userFilter) params.set('userId', userFilter)
       const data = (await api.get(`/api/admin/tasks?${params}`)) as {
         tasks: TaskItem[]
         pagination: { totalPages: number }
@@ -65,7 +81,11 @@ export function AdminTasksPage() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [page, statusFilter, userFilter])
+
+  useEffect(() => {
+    loadTasks()
+  }, [loadTasks])
 
   return (
     <div className="max-w-6xl mx-auto">
@@ -76,6 +96,23 @@ export function AdminTasksPage() {
           <p className="text-sm text-muted-foreground mt-0.5">查看所有用户的任务执行情况</p>
         </div>
         <div className="flex items-center gap-2">
+          {/* User filter */}
+          <select
+            value={userFilter}
+            onChange={(e) => {
+              setUserFilter(e.target.value)
+              setPage(1)
+            }}
+            className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+          >
+            <option value="">全部用户</option>
+            {userOptions.map((u) => (
+              <option key={u.userId} value={u.userId}>
+                {u.username}
+              </option>
+            ))}
+          </select>
+          {/* Status filter */}
           <select
             value={statusFilter}
             onChange={(e) => {
@@ -89,6 +126,7 @@ export function AdminTasksPage() {
             <option value="processing">执行中</option>
             <option value="completed">已完成</option>
             <option value="error">失败</option>
+            <option value="stopped">已停止</option>
           </select>
         </div>
       </div>
@@ -103,7 +141,7 @@ export function AdminTasksPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-[200px]">标题</TableHead>
+                <TableHead>Prompt / ID</TableHead>
                 <TableHead className="w-[100px]">用户</TableHead>
                 <TableHead className="w-[80px]">状态</TableHead>
                 <TableHead className="w-[80px]">Agent</TableHead>
@@ -121,9 +159,11 @@ export function AdminTasksPage() {
                     onClick={() => navigate(`/admin/tasks/${task.id}`)}
                   >
                     <TableCell>
-                      <div className="min-w-0">
-                        <div className="text-sm truncate">{task.title || task.id.slice(0, 8)}</div>
-                        <div className="text-xs text-muted-foreground truncate font-mono">{task.id}</div>
+                      <div className="min-w-0 max-w-[320px]">
+                        <div className="text-sm truncate" title={task.prompt}>
+                          {task.prompt || task.title || '-'}
+                        </div>
+                        <div className="text-xs text-muted-foreground font-mono mt-0.5">{task.id}</div>
                       </div>
                     </TableCell>
                     <TableCell className="text-sm">{task.username}</TableCell>

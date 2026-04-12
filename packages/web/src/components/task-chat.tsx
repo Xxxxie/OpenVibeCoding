@@ -129,6 +129,7 @@ export function TaskChat({
     sendMessage: chatSendMessage,
     answerQuestion: chatAnswerQuestion,
     confirmTool: chatConfirmTool,
+    reconnectToStream,
   } = chat
 
   // useEffect(()=>{
@@ -154,6 +155,11 @@ export function TaskChat({
         if (!canFetchMessages()) return
         if (response.ok && data.messages) {
           setMessages(data.messages)
+          // Auto-reconnect if the latest agent message is still pending (agent running in background)
+          const latestAgent = [...data.messages].reverse().find((m: any) => m.role === 'agent')
+          if (latestAgent && (latestAgent.status === 'pending' || latestAgent.status === 'streaming')) {
+            reconnectToStream(latestAgent.id)
+          }
         } else {
           setError(data.error || 'Failed to fetch messages')
         }
@@ -163,7 +169,7 @@ export function TaskChat({
         if (showLoading) setIsLoading(false)
       }
     },
-    [canFetchMessages, setMessages, taskId, messagesApiBase],
+    [canFetchMessages, setMessages, taskId, messagesApiBase, reconnectToStream],
   )
 
   const fetchPRComments = useCallback(async () => {

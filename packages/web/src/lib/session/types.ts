@@ -1,7 +1,7 @@
 // Session types for compatibility with original components
 export interface Session {
   created: number
-  authProvider: 'github' | 'vercel' | 'local'
+  authProvider: 'github' | 'vercel' | 'local' | 'cloudbase'
   user: {
     id: string
     username: string

@@ -58,9 +58,15 @@ function useEditorTheme() {
 
   useEffect(() => {
     const detectTheme = () => {
-      const hasDarkClass = document.documentElement.classList.contains('dark')
-      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-      setCurrentTheme(hasDarkClass || prefersDark ? 'dark' : 'light')
+      const htmlEl = document.documentElement
+      // Prefer explicit class on <html>, fall back to system preference
+      if (htmlEl.classList.contains('dark')) {
+        setCurrentTheme('dark')
+      } else if (htmlEl.classList.contains('light')) {
+        setCurrentTheme('light')
+      } else {
+        setCurrentTheme(window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+      }
     }
 
     detectTheme()
@@ -602,29 +608,28 @@ export function FileEditor({
         beforeMount={handleBeforeMount}
         onMount={handleEditorMount}
         theme={currentTheme === 'dark' ? 'vercel-dark' : 'vercel-light'}
+        keepCurrentModel={true}
         options={{
           readOnly: isReadOnly,
           minimap: { enabled: false },
           fontSize: fontSize,
-          fontFamily: 'var(--font-geist-mono), "Geist Mono", Menlo, Monaco, "Courier New", monospace',
+          lineHeight: 20,
+          fontFamily: 'Menlo, Monaco, "Courier New", monospace',
           lineNumbers: 'on',
           wordWrap: 'on',
           automaticLayout: true,
           scrollBeyondLastLine: false,
-          renderWhitespace: 'selection',
+          renderWhitespace: 'none',
           tabSize: 2,
           insertSpaces: true,
           folding: true,
-          foldingStrategy: 'indentation',
-          showFoldingControls: 'mouseover',
           matchBrackets: 'always',
-          autoClosingBrackets: 'always',
-          autoClosingQuotes: 'always',
-          suggestOnTriggerCharacters: true,
-          quickSuggestions: true,
-          suggest: {
-            showKeywords: true,
-            showSnippets: true,
+          padding: { top: 8 },
+          renderLineHighlight: 'line',
+          overviewRulerBorder: false,
+          scrollbar: {
+            verticalScrollbarSize: 8,
+            horizontalScrollbarSize: 8,
           },
         }}
       />

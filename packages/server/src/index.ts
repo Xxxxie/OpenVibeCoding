@@ -19,11 +19,13 @@ import { authMiddleware } from './middleware/auth'
 import type { AppEnv } from './middleware/auth'
 import authRoutes from './routes/auth'
 import githubAuthRoutes from './routes/github-auth'
+import cloudbaseAuthRoutes from './routes/cloudbase-auth'
 import githubRoutes from './routes/github'
 import acpRoutes from './routes/acp'
 import tasksRoutes from './routes/tasks'
 import connectorsRoutes from './routes/connectors'
 import miniprogramRoutes from './routes/miniprogram'
+import crontaskRoutes from './routes/crontask'
 import apiKeysRoutes from './routes/api-keys'
 import miscRoutes from './routes/misc'
 import reposRoutes from './routes/repos'
@@ -51,11 +53,13 @@ app.use('*', authMiddleware)
 app.get('/health', (c) => c.json({ status: 'ok' }))
 app.route('/api/auth', authRoutes)
 app.route('/api/auth/github', githubAuthRoutes)
+app.route('/api/auth/cloudbase', cloudbaseAuthRoutes)
 app.route('/api/github', githubRoutes)
 app.route('/api/agent', acpRoutes)
 app.route('/api/tasks', tasksRoutes)
 app.route('/api/connectors', connectorsRoutes)
 app.route('/api/miniprogram', miniprogramRoutes)
+app.route('/api/crontask', crontaskRoutes)
 app.route('/api/api-keys', apiKeysRoutes)
 app.route('/api', miscRoutes)
 app.route('/api/repos', reposRoutes)
@@ -108,6 +112,8 @@ if (serveStaticFiles) {
   console.log('[Server] For full-stack mode, build the web package first: pnpm build:web')
 }
 
+import { initCronScheduler } from './services/cron-scheduler.js'
+
 const PORT = Number(process.env.PORT) || 3001
 
 serve({ fetch: app.fetch, port: PORT }, () => {
@@ -118,6 +124,11 @@ serve({ fetch: app.fetch, port: PORT }, () => {
     console.log(`API endpoint: http://localhost:${PORT}/api`)
     console.log(`For development, run: pnpm dev:web`)
   }
+
+  // Initialize cron scheduler
+  initCronScheduler().catch((err) => {
+    console.error('Failed to initialize cron scheduler:', err)
+  })
 })
 
 export default app

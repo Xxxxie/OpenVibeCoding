@@ -11,7 +11,7 @@ export interface SessionUser {
 
 export interface SessionUserInfo {
   user?: SessionUser
-  authProvider?: 'github' | 'vercel' | 'local'
+  authProvider?: 'github' | 'vercel' | 'local' | 'cloudbase'
   envId?: string
 }
 

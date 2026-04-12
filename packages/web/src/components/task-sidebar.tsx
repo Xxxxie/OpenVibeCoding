@@ -1,7 +1,7 @@
 import type { Task } from '@coder/shared'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { AlertCircle, Plus, Trash2, GitBranch, Loader2, Search, X, MoreVertical, Smartphone } from 'lucide-react'
+import { AlertCircle, Plus, Trash2, GitBranch, Loader2, Search, X, MoreVertical, Smartphone, Clock } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Link, useLocation } from 'react-router'
 import { Claude, CodeBuddy, Codex, Copilot, Cursor, Gemini, OpenCode } from '@/components/logos'
@@ -393,16 +393,31 @@ export function TaskSidebar({ tasks, width = 288 }: TaskSidebarProps) {
       >
         <div className="mb-2">
           <Link to="/miniprogram">
-          <Button
-            variant="ghost"
-            size="sm"
-            className={cn(
-              'w-full justify-start h-8 px-2 text-xs',
-              pathname === '/miniprogram' && 'bg-accent text-accent-foreground',
-            )}
-          >
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                'w-full justify-start h-8 px-2 text-xs',
+                pathname === '/miniprogram' && 'bg-accent text-accent-foreground',
+              )}
+            >
               <Smartphone className="h-3.5 w-3.5 mr-2" />
               小程序管理
+            </Button>
+          </Link>
+        </div>
+        <div className="mb-2">
+          <Link to="/crontask">
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                'w-full justify-start h-8 px-2 text-xs',
+                pathname === '/crontask' && 'bg-accent text-accent-foreground',
+              )}
+            >
+              <Clock className="h-3.5 w-3.5 mr-2" />
+              定时任务
             </Button>
           </Link>
         </div>
@@ -442,6 +457,23 @@ export function TaskSidebar({ tasks, width = 288 }: TaskSidebarProps) {
           >
             <Smartphone className="h-3.5 w-3.5 mr-2" />
             小程序管理
+          </Button>
+        </Link>
+      </div>
+
+      {/* Cron Tasks Link */}
+      <div className="mb-2">
+        <Link to="/crontask">
+          <Button
+            variant="ghost"
+            size="sm"
+            className={cn(
+              'w-full justify-start h-8 px-2 text-xs',
+              pathname === '/crontask' && 'bg-accent text-accent-foreground',
+            )}
+          >
+            <Clock className="h-3.5 w-3.5 mr-2" />
+            定时任务
           </Button>
         </Link>
       </div>

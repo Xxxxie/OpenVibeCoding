@@ -15,7 +15,7 @@ export interface SessionUser {
 
 export interface AppSession {
   created: number
-  authProvider: 'github' | 'vercel'
+  authProvider: 'github' | 'vercel' | 'local' | 'cloudbase'
   user: SessionUser
 }
 

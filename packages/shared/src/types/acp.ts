@@ -97,3 +97,18 @@ export type {
   ToolCallStatusUpdate,
   AvailableCommandsUpdate,
 }
+
+// ─── Stream Event Persistence Types ──────────────────────────────────
+
+export type AgentRunStatus = 'running' | 'completed' | 'error' | 'cancelled'
+
+export interface StreamEvent {
+  eventId: string
+  conversationId: string
+  turnId: string
+  envId: string
+  userId: string
+  event: ExtendedSessionUpdate
+  seq: number
+  createTime: number
+}

@@ -562,6 +562,36 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
     [enterStreaming, exitStreaming, readSSEStream, taskId, toolConfirm],
   )
 
+  /** Reconnect to an ongoing agent stream after page refresh. */
+  const reconnectToStream = useCallback(
+    async (assistantMsgId: string) => {
+      // Add a placeholder agent message if not already present
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === assistantMsgId)) return prev
+        return [
+          ...prev,
+          { id: assistantMsgId, taskId, role: 'agent' as const, content: '', parts: [], createdAt: Date.now() },
+        ]
+      })
+      enterStreaming()
+      try {
+        const res = await fetch(`/api/agent/observe/${taskId}?turnId=${assistantMsgId}`, {
+          credentials: 'include',
+        })
+        if (!res.ok || !res.body) {
+          console.error('Observe stream failed')
+          return
+        }
+        await readSSEStream(res, assistantMsgId)
+      } catch (err) {
+        console.error('Reconnect to stream failed:', err)
+      } finally {
+        await exitStreaming()
+      }
+    },
+    [enterStreaming, exitStreaming, readSSEStream, setMessages, taskId],
+  )
+
   // ════════════════════════════════════════════════════════════════════
   // Public API
   // ════════════════════════════════════════════════════════════════════
@@ -594,5 +624,6 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
     sendMessage,
     answerQuestion,
     confirmTool,
+    reconnectToStream,
   }
 }

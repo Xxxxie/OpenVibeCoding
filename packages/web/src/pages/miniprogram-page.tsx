@@ -330,13 +330,17 @@ export function MiniProgramPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>删除小程序</AlertDialogTitle>
             <AlertDialogDescription>
-              确定要删除 <strong>{deleteTarget?.name}</strong>（
-              <code className="text-xs">{deleteTarget?.appId}</code>）吗？此操作无法撤销。
+              确定要删除 <strong>{deleteTarget?.name}</strong>（<code className="text-xs">{deleteTarget?.appId}</code>
+              ）吗？此操作无法撤销。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete} disabled={deleting} className="bg-destructive hover:bg-destructive/90">
+            <AlertDialogAction
+              onClick={handleDelete}
+              disabled={deleting}
+              className="bg-destructive hover:bg-destructive/90"
+            >
               {deleting ? '删除中...' : '确认删除'}
             </AlertDialogAction>
           </AlertDialogFooter>

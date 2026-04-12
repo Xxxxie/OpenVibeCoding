@@ -7,6 +7,7 @@ import { toast } from 'sonner'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import type { Task } from '@coder/shared'
 import { TaskChat } from '../../components/task-chat'
+import { FileBrowser } from '../../components/file-browser'
 
 const statusLabels: Record<string, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }> = {
   pending: { label: '等待中', variant: 'outline' },
@@ -27,9 +28,9 @@ export function AdminTaskDetailPage() {
     if (!taskId) return
     setLoading(true)
     try {
-      const data = (await api.get(`/api/admin/tasks/${taskId}`)) as { task: Task; username?: string }
+      const data = (await api.get(`/api/admin/tasks/${taskId}`)) as { task: Task & { username?: string } }
       setTask(data.task)
-      setUsername((data as any).username || data.task.userId)
+      setUsername((data.task as any).username || data.task.userId)
     } catch {
       toast.error('加载任务详情失败')
     } finally {
@@ -57,7 +58,7 @@ export function AdminTaskDetailPage() {
 
   return (
     <div className="flex flex-col h-full -mx-4 -mb-4 -mt-0">
-      {/* Top bar with back navigation and task info */}
+      {/* Top bar */}
       <div className="flex items-center gap-3 px-4 py-2 border-b flex-shrink-0">
         <Button variant="outline" size="sm" onClick={() => navigate('/admin/tasks')}>
           <ArrowLeft className="h-4 w-4 mr-1" />
@@ -76,9 +77,26 @@ export function AdminTaskDetailPage() {
         </div>
       </div>
 
-      {/* TaskChat in read-only mode */}
-      <div className="flex-1 min-h-0">
-        <TaskChat taskId={taskId!} task={task} readOnly messagesApiBase="/api/admin" />
+      {/* Content: FileBrowser + TaskChat side by side */}
+      <div className="flex flex-1 min-h-0">
+        {/* File Browser */}
+        {task.branchName && task.repoUrl && (
+          <div className="w-64 flex-shrink-0 border-r overflow-hidden">
+            <FileBrowser
+              taskId={taskId!}
+              branchName={task.branchName}
+              repoUrl={task.repoUrl}
+              sandboxId={task.sandboxId}
+              viewMode="remote"
+              hideHeader={false}
+            />
+          </div>
+        )}
+
+        {/* TaskChat in read-only mode */}
+        <div className="flex-1 min-w-0 min-h-0">
+          <TaskChat taskId={taskId!} task={task} readOnly messagesApiBase="/api/admin" />
+        </div>
       </div>
     </div>
   )

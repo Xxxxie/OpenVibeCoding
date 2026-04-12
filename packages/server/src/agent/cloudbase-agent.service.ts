@@ -12,7 +12,9 @@ import { createSandboxMcpClient } from '../sandbox/sandbox-mcp-proxy.js'
 import { archiveToGit } from '../sandbox/git-archive.js'
 import { getDb } from '../db/index.js'
 import { decrypt } from '../lib/crypto.js'
-import type { AgentCallbackMessage, AgentOptions, CodeBuddyMessage } from '@coder/shared'
+import type { AgentCallbackMessage, AgentOptions, CodeBuddyMessage, ExtendedSessionUpdate } from '@coder/shared'
+import { registerAgent, getAgentRun, completeAgent, removeAgent, isAgentRunning } from './agent-registry.js'
+import { EventBuffer } from './event-buffer.js'
 
 // ─── Constants ────────────────────────────────────────────────────────────
 
@@ -320,7 +322,151 @@ ${
 // ─── CloudbaseAgentService ─────────────────────────────────────────────────
 
 export class CloudbaseAgentService {
-  async chatStream(prompt: string, callback: AgentCallback, options: AgentOptions = {}): Promise<void> {
+  /**
+   * 将内部 AgentCallbackMessage 转换为 ACP ExtendedSessionUpdate 格式
+   */
+  private convertToSessionUpdate(msg: AgentCallbackMessage, sessionId: string): ExtendedSessionUpdate | null {
+    if (msg.type === 'text' && msg.content) {
+      return {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: msg.content },
+      } as ExtendedSessionUpdate
+    }
+    if (msg.type === 'thinking' && msg.content) {
+      return {
+        sessionUpdate: 'thinking',
+        content: msg.content,
+      } as ExtendedSessionUpdate
+    }
+    if (msg.type === 'tool_use') {
+      return {
+        sessionUpdate: 'tool_call',
+        toolCallId: msg.id || '',
+        title: msg.name || 'tool',
+        kind: 'function',
+        status: 'in_progress',
+        input: msg.input,
+        assistantMessageId: msg.assistantMessageId,
+      } as ExtendedSessionUpdate
+    }
+    if (msg.type === 'tool_result') {
+      return {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: msg.tool_use_id || '',
+        status: msg.is_error ? 'failed' : 'completed',
+        result: msg.content,
+      } as ExtendedSessionUpdate
+    }
+    if (msg.type === 'error') {
+      return {
+        sessionUpdate: 'log',
+        level: 'error',
+        message: msg.content || 'Unknown error',
+        timestamp: Date.now(),
+      } as ExtendedSessionUpdate
+    }
+    if (msg.type === 'deploy_url') {
+      return {
+        sessionUpdate: 'deploy_url',
+        url: msg.url,
+        type: msg.deploymentType || 'web',
+        qrCodeUrl: msg.qrCodeUrl,
+        pagePath: msg.pagePath,
+        appId: msg.appId,
+        label: msg.label,
+      } as ExtendedSessionUpdate
+    }
+    if (msg.type === 'artifact' && msg.artifact) {
+      return {
+        sessionUpdate: 'artifact',
+        artifact: msg.artifact,
+      } as ExtendedSessionUpdate
+    }
+    if (msg.type === 'ask_user') {
+      return {
+        sessionUpdate: 'ask_user',
+        toolCallId: msg.id || '',
+        assistantMessageId: msg.assistantMessageId || '',
+        questions: (msg.input as any)?.questions || [],
+      } as ExtendedSessionUpdate
+    }
+    if (msg.type === 'tool_confirm') {
+      return {
+        sessionUpdate: 'tool_confirm',
+        toolCallId: msg.id || '',
+        assistantMessageId: msg.assistantMessageId || '',
+        toolName: msg.name || '',
+        input: (msg.input as Record<string, unknown>) || {},
+      } as ExtendedSessionUpdate
+    }
+    if (msg.type === 'result') {
+      // result events are not streamed as session updates
+      return null
+    }
+    return null
+  }
+
+  /**
+   * 启动 agent 执行。检查是否已有正在运行的 agent。
+   * 如果已在运行，返回 { turnId, alreadyRunning: true }。
+   * 否则在后台启动 agent，立即返回 { turnId, alreadyRunning: false }。
+   */
+  async chatStream(
+    prompt: string,
+    callback: AgentCallback | null,
+    options: AgentOptions = {},
+  ): Promise<{ turnId: string; alreadyRunning: boolean }> {
+    const conversationId = options.conversationId || uuidv4()
+
+    // Check if agent is already running
+    if (isAgentRunning(conversationId)) {
+      const run = getAgentRun(conversationId)!
+      return { turnId: run.turnId, alreadyRunning: true }
+    }
+
+    // Compute turnId (assistantMessageId) upfront for the registry
+    const turnId = await this.computeTurnId(conversationId, options)
+
+    // Register in agent registry
+    registerAgent({
+      conversationId,
+      turnId,
+      envId: options.envId || '',
+      userId: options.userId || 'anonymous',
+      abortController: new AbortController(),
+    })
+
+    // Launch agent in background (fire-and-forget)
+    this.launchAgent(prompt, callback, options, turnId).catch((err) => {
+      console.error('[Agent] Background agent error:', err)
+    })
+
+    return { turnId, alreadyRunning: false }
+  }
+
+  /**
+   * 计算本轮的 turnId (assistantMessageId)
+   */
+  private async computeTurnId(conversationId: string, options: AgentOptions): Promise<string> {
+    const { askAnswers, toolConfirmation, envId, userId } = options
+    const isResumeFromInterrupt = (askAnswers && Object.keys(askAnswers).length > 0) || !!toolConfirmation
+
+    if (isResumeFromInterrupt && conversationId && envId) {
+      const record = await persistenceService.getLatestRecordStatus(conversationId, userId || 'anonymous', envId)
+      if (record) return record.recordId
+    }
+    return uuidv4()
+  }
+
+  /**
+   * 后台执行 agent，包含完整的消息历史恢复、沙箱管理、SDK 调用、持久化等逻辑。
+   */
+  private async launchAgent(
+    prompt: string,
+    liveCallback: AgentCallback | null,
+    options: AgentOptions = {},
+    assistantMessageId: string,
+  ): Promise<void> {
     const {
       conversationId = uuidv4(),
       envId,
@@ -333,21 +479,14 @@ export class CloudbaseAgentService {
       model,
     } = options
     const modelId = model || DEFAULT_MODEL
-    console.log(
-      '[Agent] chatStream start, model:',
-      modelId,
-      'conversationId:',
-      conversationId,
-      'prompt:',
-      prompt.slice(0, 50),
-    )
 
     const userContext = { envId: envId || '', userId: userId || 'anonymous' }
-    console.log('[Agent] userContext:', JSON.stringify(userContext))
 
     const actualCwd = cwd || `/tmp/workspace/${userContext.envId}/${conversationId}`
     mkdirSync(actualCwd, { recursive: true })
-    console.log('[Agent] cwd:', actualCwd)
+
+    // ── 创建 EventBuffer 用于持久化 ACP 事件 ─────────────────────────
+    const eventBuffer = new EventBuffer(conversationId, assistantMessageId, userContext.envId, userContext.userId)
 
     // ── 从 DB 恢复消息历史 ────────────────────────────────────────────
     let historicalMessages: CodeBuddyMessage[] = []
@@ -357,22 +496,6 @@ export class CloudbaseAgentService {
 
     // askAnswers / toolConfirmation 场景标记为 resume
     const isResumeFromInterrupt = (askAnswers && Object.keys(askAnswers).length > 0) || !!toolConfirmation
-
-    // 本次 assistant 回复的统一 ID，与 DB recordId 保持一致
-    // resume 场景下会在 restoreMessages 后更新为 DB 中最后一条 assistant record 的 id
-    let assistantMessageId = uuidv4()
-
-    // resume 场景：先从 DB 获取最新的 assistant record id
-    if (isResumeFromInterrupt && conversationId && userContext.envId) {
-      const record = await persistenceService.getLatestRecordStatus(
-        conversationId,
-        userContext.userId,
-        userContext.envId,
-      )
-      if (record) {
-        assistantMessageId = record.recordId
-      }
-    }
 
     if (conversationId && userContext.envId) {
       // Resume + askAnswers 场景：先直接更新 DB，再 restore 即可拿到最新数据
@@ -501,11 +624,25 @@ export class CloudbaseAgentService {
     }
 
     const wrappedCallback: AgentCallback = (msg) => {
-      // 对于 ask_user 和 tool_confirm，保留原始 id (toolCallId)，同时添加 assistantMessageId
-      if (msg.type === 'ask_user' || msg.type === 'tool_confirm') {
-        callback({ ...msg, assistantMessageId })
-      } else {
-        callback({ ...msg, id: msg.id || assistantMessageId, assistantMessageId })
+      // Enrich message with assistantMessageId
+      const enrichedMsg =
+        msg.type === 'ask_user' || msg.type === 'tool_confirm'
+          ? { ...msg, assistantMessageId }
+          : { ...msg, id: msg.id || assistantMessageId, assistantMessageId }
+
+      // 1. Always persist ACP event to DB via EventBuffer
+      const acpEvent = this.convertToSessionUpdate(enrichedMsg, conversationId)
+      if (acpEvent) {
+        eventBuffer.push(acpEvent)
+      }
+
+      // 2. Forward to live SSE callback if present (ignore errors on disconnect)
+      if (liveCallback) {
+        try {
+          liveCallback(enrichedMsg)
+        } catch {
+          // SSE disconnected, ignore
+        }
       }
     }
 
@@ -881,6 +1018,13 @@ export class CloudbaseAgentService {
       if (connectTimer) clearTimeout(connectTimer)
       if (iterationTimeoutTimer) clearTimeout(iterationTimeoutTimer)
 
+      // Flush remaining events to DB
+      try {
+        await eventBuffer.close()
+      } catch {
+        // Non-critical
+      }
+
       // Archive to git if sandbox was used
       if (sandboxInstance) {
         try {
@@ -900,8 +1044,8 @@ export class CloudbaseAgentService {
       }
 
       // 同步消息 + 清理本地文件
-      // 存储失败是重大错误，必须通知客户端，但不能阻塞 Git 归档
       let syncError: Error | undefined
+      let finalStatus: 'completed' | 'error' = 'completed'
       try {
         await persistenceService.syncMessages(
           conversationId,
@@ -914,23 +1058,45 @@ export class CloudbaseAgentService {
           isResumeFromInterrupt,
           preSavedUserRecordId,
         )
-        // syncMessages 成功后，将 assistant record 标记为 done（否则 loadDBMessages 查不到）
         await persistenceService.finalizePendingRecords(assistantMessageId, 'done')
       } catch (err) {
         syncError = err instanceof Error ? err : new Error(String(err))
+        finalStatus = 'error'
         console.error('[Agent] syncAndCleanup failed:', syncError.message)
 
-        // sync 失败时，将预保存的 pending assistant 记录标记为 error
         if (preSavedUserRecordId && conversationId) {
           try {
             await persistenceService.finalizePendingRecords(assistantMessageId, 'error')
           } catch {
-            // finalize 也失败则忽略
+            // finalize failure ignored
           }
         }
       }
 
-      // 存储失败必须向上抛出，让调用方感知到
+      // Cleanup stream events (non-critical)
+      try {
+        await persistenceService.cleanupStreamEvents(conversationId, assistantMessageId)
+      } catch {
+        // Non-critical
+      }
+
+      // Update task status in SQLite
+      try {
+        await getDb().tasks.update(conversationId, {
+          status: finalStatus === 'error' ? 'error' : 'completed',
+          completedAt: Date.now(),
+          updatedAt: Date.now(),
+        })
+      } catch {
+        // Non-critical
+      }
+
+      // Update agent registry
+      completeAgent(conversationId, finalStatus, syncError?.message)
+
+      // Schedule registry cleanup after observers have time to detect completion
+      setTimeout(() => removeAgent(conversationId), 30_000)
+
       if (syncError) {
         throw syncError
       }

@@ -118,6 +118,26 @@ export const miniprogramApps = sqliteTable('miniprogram_apps', {
   updatedAt: integer('updated_at').notNull().$defaultFn(now),
 })
 
+// ─── Cron Tasks ──────────────────────────────────────────────────────────────
+
+export const cronTasks = sqliteTable('cron_tasks', {
+  id: text('id').primaryKey(),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  prompt: text('prompt').notNull(),
+  cronExpression: text('cron_expression').notNull(),
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+  repoUrl: text('repo_url'),
+  selectedAgent: text('selected_agent').default('codebuddy'),
+  selectedModel: text('selected_model'),
+  lastRunAt: integer('last_run_at'),
+  nextRunAt: integer('next_run_at'),
+  createdAt: integer('created_at').notNull().$defaultFn(now),
+  updatedAt: integer('updated_at').notNull().$defaultFn(now),
+})
+
 // ─── Accounts ─────────────────────────────────────────────────────────────────
 
 export const accounts = sqliteTable(

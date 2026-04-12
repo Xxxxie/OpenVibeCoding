@@ -7,7 +7,7 @@ import { decrypt } from '../lib/crypto'
 import { Octokit } from '@octokit/rest'
 import { SandboxInstance } from '../sandbox/index.js'
 import { persistenceService } from '../agent/persistence.service'
-import { deleteConversationViaSandbox, scfSandboxManager } from '../sandbox/index.js'
+import { deleteConversationViaSandbox, scfSandboxManager, archiveToGit } from '../sandbox/index.js'
 import type { Octokit as OctokitType } from '@octokit/rest'
 
 // ---------------------------------------------------------------------------
@@ -116,16 +116,11 @@ async function readFileFromSandbox(
   filePath: string,
 ): Promise<{ content: string; found: boolean }> {
   try {
-    const response = await sandbox.request('/api/tools/read', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: filePath }),
-    })
-    const data = (await response.json()) as { success: boolean; result?: { content: string } }
-    if (data.success && data.result?.content !== undefined) {
-      return { content: data.result.content, found: true }
-    }
-    return { content: '', found: false }
+    // Use e2b-compatible file read endpoint — returns raw content without line numbers
+    const response = await sandbox.request(`/e2b-compatible/files?path=${encodeURIComponent(filePath)}`)
+    if (!response.ok) return { content: '', found: false }
+    const content = await response.text()
+    return { content, found: true }
   } catch {
     return { content: '', found: false }
   }
@@ -133,13 +128,16 @@ async function readFileFromSandbox(
 
 async function writeFileToSandbox(sandbox: SandboxInstance, filePath: string, content: string): Promise<boolean> {
   try {
-    const response = await sandbox.request('/api/tools/write', {
+    // Use e2b-compatible file upload: POST /e2b-compatible/files with FormData
+    const formData = new FormData()
+    const blob = new Blob([content], { type: 'application/octet-stream' })
+    formData.append('file', blob, filePath)
+
+    const response = await sandbox.request(`/e2b-compatible/files?path=${encodeURIComponent(filePath)}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: filePath, content }),
+      body: formData,
     })
-    const data = (await response.json()) as { success: boolean }
-    return data.success
+    return response.ok
   } catch {
     return false
   }
@@ -521,7 +519,15 @@ tasksRouter.get('/:taskId/files', requireUserEnv, async (c) => {
     const { envId } = c.get('userEnv')!
     const { taskId } = c.req.param()
     const mode = c.req.query('mode') || 'remote'
-    const task = await findActiveTask(taskId, session.user.id)
+
+    // Allow admins to view any task's files (remote/GitHub mode only)
+    const db = getDb()
+    const currentUser = await db.users.findById(session.user.id)
+    const isAdmin = currentUser?.role === 'admin'
+
+    const task = isAdmin
+      ? await db.tasks.findById(taskId).then((t) => (t && !t.deletedAt ? t : null))
+      : await findActiveTask(taskId, session.user.id)
     if (!task) return c.json({ success: false, error: 'Task not found' }, 404)
     if (!task.branchName) return c.json({ success: true, files: [], fileTree: {}, branchName: null })
     const repoUrl = task.repoUrl
@@ -793,6 +799,80 @@ tasksRouter.get('/:taskId/files', requireUserEnv, async (c) => {
 })
 
 // ---------------------------------------------------------------------------
+// GET /:taskId/files/list-dir — Lazy load single directory level from sandbox
+// ---------------------------------------------------------------------------
+
+tasksRouter.get('/:taskId/files/list-dir', requireUserEnv, async (c) => {
+  try {
+    const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
+    const { taskId } = c.req.param()
+    const dirPath = c.req.query('path') || '.'
+
+    const db = getDb()
+    const currentUser = await db.users.findById(session.user.id)
+    const isAdmin = currentUser?.role === 'admin'
+
+    const task = isAdmin
+      ? await db.tasks.findById(taskId).then((t) => (t && !t.deletedAt ? t : null))
+      : await findActiveTask(taskId, session.user.id)
+    if (!task) return c.json({ success: false, error: 'Task not found' }, 404)
+    if (!task.sandboxId) return c.json({ success: false, error: 'Sandbox is not running' }, 410)
+
+    const sandbox = await getScfSandbox(task, envId)
+    if (!sandbox) return c.json({ success: false, error: 'Sandbox not found' }, 410)
+
+    // Sanitize path to prevent directory traversal
+    const safePath = dirPath.replace(/\.\./g, '').replace(/^\/+/, '')
+    const targetPath = safePath || '.'
+
+    // List single directory level: -1 = one entry per line, -A = exclude . and ..
+    const lsResult = await runCommandInScfSandbox(sandbox, `ls -1AF '${targetPath.replace(/'/g, "'\\''")}'`)
+    if (!lsResult.success) {
+      return c.json({ success: false, error: 'Failed to list directory' }, 500)
+    }
+
+    const output = lsResult.output || ''
+    const lines = output
+      .trim()
+      .split('\n')
+      .filter((l) => l.trim())
+
+    // Parse ls -F output: directories end with /, executables with *, symlinks with @
+    const entries: Array<{ name: string; type: 'file' | 'directory'; path: string }> = []
+    const hiddenDirs = new Set(['.git', 'node_modules', '.next', 'dist', 'build', '.vercel'])
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+
+      if (trimmed.endsWith('/')) {
+        const name = trimmed.slice(0, -1)
+        if (hiddenDirs.has(name)) continue
+        const fullPath = targetPath === '.' ? name : `${targetPath}/${name}`
+        entries.push({ name, type: 'directory', path: fullPath })
+      } else {
+        // Remove trailing indicator characters (* for executable, @ for symlink, etc.)
+        const name = trimmed.replace(/[*@|=]$/, '')
+        if (!name) continue
+        const fullPath = targetPath === '.' ? name : `${targetPath}/${name}`
+        entries.push({ name, type: 'file', path: fullPath })
+      }
+    }
+
+    // Sort: directories first, then alphabetically
+    entries.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1
+      return a.name.localeCompare(b.name)
+    })
+
+    return c.json({ success: true, entries })
+  } catch {
+    return c.json({ success: false, error: 'Failed to list directory' }, 500)
+  }
+})
+
+// ---------------------------------------------------------------------------
 // GET /:taskId/file-content
 // ---------------------------------------------------------------------------
 tasksRouter.get('/:taskId/file-content', requireUserEnv, async (c) => {
@@ -806,6 +886,44 @@ tasksRouter.get('/:taskId/file-content', requireUserEnv, async (c) => {
     const filename = decodeURIComponent(rawFilename)
     const task = await findActiveTask(taskId, session.user.id)
     if (!task) return c.json({ error: 'Task not found' }, 404)
+
+    // For local/sandbox mode, read directly from sandbox without requiring branch/repo
+    if (mode === 'local' && task.sandboxId && (!task.branchName || !task.repoUrl)) {
+      const sandbox = await getScfSandbox(task, envId)
+      if (!sandbox) return c.json({ error: 'Sandbox not found' }, 410)
+      const normalizedPath = filename.startsWith('/') ? filename.substring(1) : filename
+      const result = await readFileFromSandbox(sandbox, normalizedPath)
+      if (!result.found) return c.json({ error: 'File not found in sandbox' }, 404)
+      const ext = filename.split('.').pop()?.toLowerCase() || ''
+      const langMap: Record<string, string> = {
+        ts: 'typescript',
+        tsx: 'typescript',
+        js: 'javascript',
+        jsx: 'javascript',
+        css: 'css',
+        json: 'json',
+        md: 'markdown',
+        html: 'html',
+        py: 'python',
+        sh: 'shell',
+        yml: 'yaml',
+        yaml: 'yaml',
+        xml: 'xml',
+        sql: 'sql',
+      }
+      return c.json({
+        success: true,
+        data: {
+          filename,
+          oldContent: '',
+          newContent: result.content,
+          language: langMap[ext] || 'text',
+          isBinary: false,
+          isImage: false,
+        },
+      })
+    }
+
     if (!task.branchName || !task.repoUrl)
       return c.json({ error: 'Task does not have branch or repository information' }, 400)
     const octokit = await getOctokit(session.user.id)
@@ -926,6 +1044,12 @@ tasksRouter.post('/:taskId/save-file', requireUserEnv, async (c) => {
     if (!sandbox) return c.json({ error: 'Sandbox not available' }, 400)
     const success = await writeFileToSandbox(sandbox, filename, content)
     if (!success) return c.json({ error: 'Failed to write file to sandbox' }, 500)
+
+    // Persist changes to git archive in background (don't block response)
+    archiveToGit(sandbox, taskId, `Edit ${filename}`).catch(() => {
+      // Non-critical: file is saved in sandbox, git push is best-effort
+    })
+
     return c.json({ success: true, message: 'File saved successfully' })
   } catch (error) {
     console.error('Error in save-file API:', error)

@@ -214,8 +214,9 @@ export function TaskDetails({
   const [isClosingPR, setIsClosingPR] = useState(false)
   const [isReopeningPR, setIsReopeningPR] = useState(false)
   const [isMergingPR, setIsMergingPR] = useState(false)
-  const [filesPane, setFilesPane] = useState<'files' | 'changes'>('changes')
-  const [subMode, setSubMode] = useState<'local' | 'remote'>('remote')
+  const hasBranch = !!(task.branchName && task.branchName.trim().length > 0)
+  const [filesPane, setFilesPane] = useState<'files' | 'changes'>(hasBranch ? 'changes' : 'files')
+  const [subMode, setSubMode] = useState<'local' | 'remote'>(hasBranch ? 'remote' : 'local')
   const viewMode: 'local' | 'remote' | 'all' | 'all-local' =
     filesPane === 'files' ? (subMode === 'local' ? 'all-local' : 'all') : subMode
   const [activeTab, setActiveTab] = useState<'code' | 'chat' | 'preview'>('code')
@@ -329,6 +330,11 @@ export function TaskDetails({
   const activeTabIndex = activeTabIndexByMode[viewMode]
   const selectedFile = selectedFileByMode[viewMode]
   const selectedItemIsFolder = selectedItemIsFolderByMode[viewMode]
+
+  // ─── Derived pane visibility flags ──────────────────────────────────
+  const hasFilesSupport = hasBranch || !!task.sandboxId
+  const showCodeViewer = (showCodePane && hasBranch) || (!!selectedFile && showFilesPane)
+  const hasMiddlePane = showCodeViewer || showPreviewPane
 
   // Helper function to format dates - show only time if same day as today
   const formatDateTime = (date: Date) => {
@@ -1681,23 +1687,25 @@ export function TaskDetails({
 
           {/* Desktop Pane Toggles - Only show on desktop */}
           <div className="hidden md:flex items-center gap-1 ml-auto">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                const newValue = !showFilesPane
-                setShowFilesPane(newValue)
-                saveShowFilesPane(newValue)
-              }}
-              className={cn(
-                'h-7 px-3 text-xs font-medium transition-colors',
-                showFilesPane
-                  ? 'bg-accent text-accent-foreground'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-accent/50',
-              )}
-            >
-              Files
-            </Button>
+            {hasFilesSupport && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  const newValue = !showFilesPane
+                  setShowFilesPane(newValue)
+                  saveShowFilesPane(newValue)
+                }}
+                className={cn(
+                  'h-7 px-3 text-xs font-medium transition-colors',
+                  showFilesPane
+                    ? 'bg-accent text-accent-foreground'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-accent/50',
+                )}
+              >
+                Files
+              </Button>
+            )}
             {/* <Button
               variant="ghost"
               size="sm"
@@ -1754,13 +1762,13 @@ export function TaskDetails({
       </div>
 
       {/* Changes Section - Show when a branch or sandbox exists */}
-      {(task.branchName && task.branchName.trim().length > 0) || task.sandboxId ? (
+      {hasFilesSupport ? (
         <>
           {/* Desktop Layout */}
           <div ref={containerRef} className="hidden md:flex flex-1 min-h-0 overflow-hidden">
             {/* File Browser - Always rendered but hidden with CSS to ensure files are loaded */}
             <div
-              className={cn('h-auto overflow-y-auto min-h-0 flex-shrink-0', !showFilesPane && 'hidden')}
+              className={cn('h-full overflow-y-auto flex-shrink-0', !showFilesPane && 'hidden')}
               style={{ width: showFilesPane ? `${filesPaneWidth}px` : 0 }}
             >
               <FileBrowser
@@ -1787,8 +1795,8 @@ export function TaskDetails({
               </div>
             )}
 
-            {/* Code Viewer */}
-            {showCodePane && (
+            {/* Code Viewer - show when branch exists OR a file is selected with Files pane open */}
+            {showCodeViewer ? (
               <div className="flex-1 min-h-0 min-w-0">
                 <div className="overflow-hidden h-full flex flex-col">
                   {/* Tabs and Search Bar */}
@@ -1930,10 +1938,10 @@ export function TaskDetails({
                   </div>
                 </div>
               </div>
-            )}
+            ) : null}
 
             {/* Resize Handle - Code/Preview */}
-            {showPreviewPane && (showCodePane || showFilesPane) && (
+            {showPreviewPane && (showCodeViewer || showFilesPane) && (
               <div className="w-3 cursor-col-resize flex-shrink-0 relative group">
                 <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-px bg-border group-hover:bg-primary/50 transition-colors" />
               </div>
@@ -2127,7 +2135,7 @@ export function TaskDetails({
             )}
 
             {/* Resize Handle - Preview/Chat or Code/Chat */}
-            {showChatPane && (showPreviewPane || showCodePane || showFilesPane) && (
+            {showChatPane && (showPreviewPane || showCodeViewer || showFilesPane) && (
               <div
                 className="w-3 cursor-col-resize flex-shrink-0 relative group"
                 onMouseDown={() => setResizingPane('chat')}
@@ -2138,7 +2146,10 @@ export function TaskDetails({
 
             {/* Chat */}
             {showChatPane && (
-              <div className="h-auto min-h-0 flex-shrink-0" style={{ width: `${chatPaneWidth}px` }}>
+              <div
+                className={cn('min-h-0', hasMiddlePane ? 'flex-shrink-0' : 'flex-1 min-w-0')}
+                style={hasMiddlePane ? { width: `${chatPaneWidth}px` } : undefined}
+              >
                 <TaskChat
                   key={task.id}
                   taskId={task.id}

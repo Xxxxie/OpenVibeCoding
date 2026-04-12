@@ -920,6 +920,8 @@ MAX_SANDBOX_DURATION=${get('MAX_SANDBOX_DURATION', '300')}
 # ==================== Auth ====================
 
 NEXT_PUBLIC_AUTH_PROVIDERS=${get('NEXT_PUBLIC_AUTH_PROVIDERS', 'local')}
+# GitHub login approach: 'direct' (self-managed OAuth) or 'cloudbase' (CloudBase identity source)
+AUTH_GITHUB_MODE=${get('AUTH_GITHUB_MODE', 'direct')}
 
 # ==================== CloudBase ====================
 

@@ -19,7 +19,7 @@ export interface SessionUserInfo {
     avatar?: string
     name?: string
   }
-  authProvider?: 'github' | 'vercel'
+  authProvider?: 'github' | 'vercel' | 'local' | 'cloudbase'
 }
 
 // Multi-repo mode atoms

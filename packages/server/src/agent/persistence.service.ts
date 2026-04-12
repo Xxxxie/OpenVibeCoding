@@ -4,12 +4,19 @@ import * as path from 'node:path'
 import { v4 as uuidv4 } from 'uuid'
 import CloudBase from '@cloudbase/node-sdk'
 import { loadConfig } from '../config/store.js'
-import type { CodeBuddyMessage, CodeBuddyContentBlock, UnifiedMessageRecord, UnifiedMessagePart } from '@coder/shared'
+import type {
+  CodeBuddyMessage,
+  CodeBuddyContentBlock,
+  UnifiedMessageRecord,
+  UnifiedMessagePart,
+  StreamEvent,
+} from '@coder/shared'
 import { AGENT_ID } from '@coder/shared'
 
 // ─── Constants ────────────────────────────────────────────────────────────
 
 const COLLECTION_NAME = 'vibe_agent_messages'
+const STREAM_EVENTS_COLLECTION = 'vibe_agent_stream_events'
 
 // ─── Helper Functions ──────────────────────────────────────────────────────
 
@@ -79,6 +86,7 @@ export class PersistenceService {
   }
 
   private collectionEnsured = false
+  private streamCollectionEnsured = false
 
   private async getCollection() {
     const app = await this.getCloudBaseApp()
@@ -95,6 +103,81 @@ export class PersistenceService {
     }
 
     return db.collection(COLLECTION_NAME)
+  }
+
+  private async getStreamEventsCollection() {
+    const app = await this.getCloudBaseApp()
+    const db = app.database()
+
+    if (!this.streamCollectionEnsured) {
+      try {
+        await db.createCollection(STREAM_EVENTS_COLLECTION)
+      } catch {
+        // Collection already exists
+      }
+      this.streamCollectionEnsured = true
+    }
+
+    return db.collection(STREAM_EVENTS_COLLECTION)
+  }
+
+  // ========== Stream Event Operations ==========
+
+  async appendStreamEvents(events: StreamEvent[]): Promise<void> {
+    if (events.length === 0) return
+    try {
+      const collection = await this.getStreamEventsCollection()
+      for (const event of events) {
+        await collection.add(event)
+      }
+    } catch (error) {
+      console.error('Failed to append stream events:', error)
+    }
+  }
+
+  async getStreamEvents(
+    conversationId: string,
+    turnId: string,
+    afterSeq: number = -1,
+    limit: number = 500,
+  ): Promise<StreamEvent[]> {
+    try {
+      const collection = await this.getStreamEventsCollection()
+      const app = await this.getCloudBaseApp()
+      const _ = app.database().command
+
+      const { data } = await collection
+        .where({
+          conversationId: _.eq(conversationId),
+          turnId: _.eq(turnId),
+          seq: _.gt(afterSeq),
+        })
+        .orderBy('seq', 'asc')
+        .limit(limit)
+        .get()
+
+      return data as StreamEvent[]
+    } catch (error) {
+      console.error('Failed to get stream events:', error)
+      return []
+    }
+  }
+
+  async cleanupStreamEvents(conversationId: string, turnId: string): Promise<void> {
+    try {
+      const collection = await this.getStreamEventsCollection()
+      const app = await this.getCloudBaseApp()
+      const _ = app.database().command
+
+      await collection
+        .where({
+          conversationId: _.eq(conversationId),
+          turnId: _.eq(turnId),
+        })
+        .remove()
+    } catch {
+      // Non-critical, stale events don't affect correctness
+    }
   }
 
   // ========== Message Conversion ==========

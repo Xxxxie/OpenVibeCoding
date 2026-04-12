@@ -87,6 +87,22 @@ export interface MiniProgramApp {
   updatedAt: number
 }
 
+export interface CronTask {
+  id: string
+  userId: string
+  name: string
+  prompt: string
+  cronExpression: string
+  enabled: boolean
+  repoUrl: string | null
+  selectedAgent: string | null
+  selectedModel: string | null
+  lastRunAt: number | null
+  nextRunAt: number | null
+  createdAt: number
+  updatedAt: number
+}
+
 export interface Account {
   id: string
   userId: string
@@ -191,6 +207,11 @@ export type NewMiniProgramApp = Omit<MiniProgramApp, 'createdAt' | 'updatedAt'> 
   updatedAt?: number
 }
 
+export type NewCronTask = Omit<CronTask, 'createdAt' | 'updatedAt'> & {
+  createdAt?: number
+  updatedAt?: number
+}
+
 export type NewAccount = Omit<Account, 'createdAt' | 'updatedAt'> & {
   createdAt?: number
   updatedAt?: number
@@ -279,6 +300,16 @@ export interface MiniProgramAppRepository {
   updateUserId(fromUserId: string, toUserId: string): Promise<void>
 }
 
+export interface CronTaskRepository {
+  findByUserId(userId: string): Promise<CronTask[]>
+  findByIdAndUserId(id: string, userId: string): Promise<CronTask | null>
+  findAllEnabled(): Promise<CronTask[]>
+  create(task: NewCronTask): Promise<CronTask>
+  update(id: string, userId: string, data: Partial<Omit<CronTask, 'id' | 'userId'>>): Promise<CronTask | null>
+  delete(id: string, userId: string): Promise<void>
+  updateUserId(fromUserId: string, toUserId: string): Promise<void>
+}
+
 export interface AccountRepository {
   findByUserIdAndProvider(userId: string, provider: string): Promise<Account | null>
   findByProviderAndExternalUserId(provider: string, externalUserId: string): Promise<Account | null>
@@ -332,6 +363,7 @@ export interface DatabaseProvider {
   tasks: TaskRepository
   connectors: ConnectorRepository
   miniprogramApps: MiniProgramAppRepository
+  cronTasks: CronTaskRepository
   accounts: AccountRepository
   keys: KeyRepository
   userResources: UserResourceRepository

@@ -7,6 +7,7 @@ import {
   tasks,
   connectors,
   miniprogramApps,
+  cronTasks,
   accounts,
   keys,
   userResources,
@@ -25,6 +26,8 @@ import type {
   NewConnector,
   MiniProgramApp,
   NewMiniProgramApp,
+  CronTask,
+  NewCronTask,
   Account,
   NewAccount,
   Key,
@@ -42,6 +45,7 @@ import type {
   TaskRepository,
   ConnectorRepository,
   MiniProgramAppRepository,
+  CronTaskRepository,
   AccountRepository,
   KeyRepository,
   UserResourceRepository,
@@ -368,6 +372,58 @@ class DrizzleMiniProgramAppRepository implements MiniProgramAppRepository {
 
 // ─── Account Repository ─────────────────────────────────────────────────────
 
+// ─── CronTask Repository ────────────────────────────────────────────────────
+
+class DrizzleCronTaskRepository implements CronTaskRepository {
+  async findByUserId(userId: string): Promise<CronTask[]> {
+    const rows = await drizzleDb.select().from(cronTasks).where(eq(cronTasks.userId, userId))
+    return rows as CronTask[]
+  }
+
+  async findByIdAndUserId(id: string, userId: string): Promise<CronTask | null> {
+    const [row] = await drizzleDb
+      .select()
+      .from(cronTasks)
+      .where(and(eq(cronTasks.id, id), eq(cronTasks.userId, userId)))
+      .limit(1)
+    return (row as CronTask) ?? null
+  }
+
+  async findAllEnabled(): Promise<CronTask[]> {
+    const rows = await drizzleDb.select().from(cronTasks).where(eq(cronTasks.enabled, true))
+    return rows as CronTask[]
+  }
+
+  async create(task: NewCronTask): Promise<CronTask> {
+    const ts = now()
+    const values = {
+      ...task,
+      createdAt: task.createdAt ?? ts,
+      updatedAt: task.updatedAt ?? ts,
+    }
+    await drizzleDb.insert(cronTasks).values(values)
+    return values as CronTask
+  }
+
+  async update(id: string, userId: string, data: Partial<Omit<CronTask, 'id' | 'userId'>>): Promise<CronTask | null> {
+    await drizzleDb
+      .update(cronTasks)
+      .set({ ...data, updatedAt: data.updatedAt ?? now() })
+      .where(and(eq(cronTasks.id, id), eq(cronTasks.userId, userId)))
+    return this.findByIdAndUserId(id, userId)
+  }
+
+  async delete(id: string, userId: string): Promise<void> {
+    await drizzleDb.delete(cronTasks).where(and(eq(cronTasks.id, id), eq(cronTasks.userId, userId)))
+  }
+
+  async updateUserId(fromUserId: string, toUserId: string): Promise<void> {
+    await drizzleDb.update(cronTasks).set({ userId: toUserId }).where(eq(cronTasks.userId, fromUserId))
+  }
+}
+
+// ─── Account Repository ─────────────────────────────────────────────────────
+
 class DrizzleAccountRepository implements AccountRepository {
   async findByUserIdAndProvider(userId: string, provider: string): Promise<Account | null> {
     const [row] = await drizzleDb
@@ -638,6 +694,7 @@ export function createDrizzleProvider(): DatabaseProvider {
     tasks: new DrizzleTaskRepository(),
     connectors: new DrizzleConnectorRepository(),
     miniprogramApps: new DrizzleMiniProgramAppRepository(),
+    cronTasks: new DrizzleCronTaskRepository(),
     accounts: new DrizzleAccountRepository(),
     keys: new DrizzleKeyRepository(),
     userResources: new DrizzleUserResourceRepository(),
