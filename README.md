@@ -6,8 +6,6 @@
 
 - [Setup 指南](docs/setup.md) — 详细初始化流程、关键环境变量、验证清单与排障
 - [系统架构](docs/architecture.md) — 系统分层、用户环境绑定、任务与 Sandbox 链路
-- [SCF Session 共享方案](docs/scf-session-sharing.md) — 沙箱会话共享相关设计
-- [定时任务云函数方案](docs/crontask-cloudfunction-plan.md) — crontask 的云函数演进规划
 
 ## 项目特点
 
@@ -206,13 +204,13 @@ pnpm setup:tcr
 pnpm setup:tcr --namespace my-app --local-image node:20
 ```
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--namespace` | 命名空间前缀 | `cloudbase-vibecoding` |
-| `--local-image` | 本地镜像 | `ghcr.io/yhsunshining/cloudbase-workspace:latest` |
-| `--repo-name` | 仓库名称 | `sandbox` |
-| `--tag` | 镜像标签 | `latest` |
-| `--password` | TCR 密码 | 交互式输入 |
+| 参数            | 说明         | 默认值                                            |
+| --------------- | ------------ | ------------------------------------------------- |
+| `--namespace`   | 命名空间前缀 | `cloudbase-vibecoding`                            |
+| `--local-image` | 本地镜像     | `ghcr.io/yhsunshining/cloudbase-workspace:latest` |
+| `--repo-name`   | 仓库名称     | `sandbox`                                         |
+| `--tag`         | 镜像标签     | `latest`                                          |
+| `--password`    | TCR 密码     | 交互式输入                                        |
 
 也可通过 `.env.local` 配置：
 
@@ -280,26 +278,35 @@ pnpm setup:tcr        # 配置容器镜像服务
 - Google Gemini
 - @tencent-ai/agent-sdk
 
-## 与原项目的主要变化
+## 与上游项目的关系
 
-| 项目 | 原版 (coding-agent-template) | 本项目 |
-|------|------------------------------|--------|
-| 架构 | Next.js 全栈 | Monorepo 前后端分离 |
-| 前端 | Next.js 15 | React + Vite |
-| 后端 | Next.js API Routes | Hono |
-| 部署 | Vercel | CloudBase / TCR |
-| 数据库 | Neon Postgres | SQLite / CloudBase DB |
-| Sandbox | Vercel Sandbox | CloudBase SCF |
+本项目 fork 自 Vercel 的 [coding-agent-template](https://github.com/vercel-labs/coding-agent-template)，主要变化：将 Next.js 全栈架构重构为 Monorepo 前后端分离（React + Vite / Hono），部署平台从 Vercel 迁移到腾讯云 CloudBase，Sandbox 从 Vercel Sandbox 替换为 CloudBase SCF。
 
-## 继续参考 VibeSDK 文档
+## Contributing
 
-本项目新增的 README setup 组织方式与 architecture 图示表达，参考了 Cloudflare VibeSDK 的文档结构：
+欢迎参与贡献。
 
-- README / setup 参考：<https://github.com/cloudflare/vibesdk/blob/main/README.md>
-- architecture 参考：<https://github.com/cloudflare/vibesdk/blob/main/docs/architecture-diagrams.md>
+1. Fork 本仓库
+2. 创建功能分支 (`git checkout -b feature/xxx`)
+3. 提交修改，确保通过以下检查：
+   ```bash
+   pnpm type-check
+   pnpm lint
+   pnpm format
+   ```
+4. 提交 Pull Request
 
-这些参考主要用于文档组织方式和图示表达方式；具体内容已经按当前项目的 CloudBase 架构、本地脚本和运行流程进行了本地化。
+请遵循项目现有的代码风格。日志中不要包含动态值（详见 [AGENTS.md](./AGENTS.md) 中的安全规则）。
 
-## 许可证
+## Acknowledgments
 
-MIT
+- [coding-agent-template](https://github.com/vercel-labs/coding-agent-template) by Vercel — 本项目的上游基础
+- [CloudBase](https://cloudbase.net/) — 云开发基础设施
+- [CodeBuddy](https://copilot.tencent.com/) — AI 编程助手能力
+- [Hono](https://hono.dev/) — 轻量级 Web 框架
+
+## License
+
+本项目基于 [coding-agent-template](https://github.com/vercel-labs/coding-agent-template) (Copyright 2025 Vercel, Inc.) 重构改造，原项目采用 [Apache License 2.0](http://www.apache.org/licenses/LICENSE-2.0) 许可。
+
+本项目沿用 Apache License 2.0，详见 [LICENSE](./LICENSE) 和 [NOTICE](./NOTICE) 文件。

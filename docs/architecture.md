@@ -399,9 +399,222 @@ sequenceDiagram
 
 ---
 
+## API Routes
+
+所有 API 路由挂载在 `packages/server/src/index.ts`，全局应用 `authMiddleware`。
+
+| Route | Module | Auth | Description |
+| --- | --- | --- | --- |
+| `GET /health` | inline | None | 健康检查 |
+| `/api/auth/*` | `routes/auth.ts` | None / Cookie | 注册、登录、登出、用户信息、速率限制、API Key |
+| `/api/auth/github/*` | `routes/github-auth.ts` | Cookie | GitHub OAuth 登录、回调、关联、断开 |
+| `/api/auth/cloudbase/*` | `routes/cloudbase-auth.ts` | None | CloudBase 身份登录 |
+| `/api/agent/*` | `routes/acp.ts` | Cookie + UserEnv | ACP 协议、会话 CRUD、SSE chat、消息记录 |
+| `/api/tasks/*` | `routes/tasks.ts` | Cookie + UserEnv | 任务 CRUD、文件操作、PR 管理、Sandbox 命令 |
+| `/api/github/*` | `routes/github.ts` | Cookie | GitHub 用户、仓库、组织 |
+| `/api/repos/*` | `routes/repos.ts` | Cookie | 仓库 commits / issues / PRs 查询 |
+| `/api/connectors/*` | `routes/connectors.ts` | Cookie | MCP 连接器 CRUD |
+| `/api/miniprogram/*` | `routes/miniprogram.ts` | Cookie | 小程序应用管理 |
+| `/api/crontask/*` | `routes/crontask.ts` | Cookie | 定时任务 CRUD |
+| `/api/api-keys/*` | `routes/api-keys.ts` | Cookie | 用户 API Key 管理 |
+| `/api/database/*` | `routes/database.ts` | Cookie + UserEnv | CloudBase 集合与文档操作 |
+| `/api/storage/*` | `routes/storage.ts` | Cookie + UserEnv | CloudBase 文件管理 |
+| `/api/functions/*` | `routes/functions.ts` | Cookie + UserEnv | CloudBase 云函数列表与调用 |
+| `/api/sql/*` | `routes/sql.ts` | Cookie + UserEnv | SQL 查询（预留） |
+| `/api/capi` | `routes/capi.ts` | Cookie + UserEnv | 通用腾讯云 API 代理 |
+| `/api/admin/*` | `routes/admin.ts` | Cookie + Admin | 用户管理、任务巡检、环境代理、审计日志 |
+| `/api/github-stars` | `routes/misc.ts` | None | GitHub Star 数（缓存） |
+| `/api/sandboxes` | `routes/misc.ts` | Cookie + UserEnv | 活跃 Sandbox 列表 |
+
+**Auth 列说明：**
+- **None** — 无需认证
+- **Cookie** — 需要登录（`requireAuth`）
+- **Cookie + UserEnv** — 需要登录且用户环境已绑定（`requireUserEnv`）
+- **Cookie + Admin** — 需要登录且 `role=admin`（`requireAdmin`）
+
+---
+
+## Database Schema
+
+数据模型定义在 `packages/server/src/db/schema.ts`，使用 Drizzle ORM。CloudBase 模式下使用 CloudBase 文档数据库（集合名带 `vibe_agent_` 前缀），Drizzle 模式下使用 SQLite。
+
+```mermaid
+erDiagram
+    users ||--o{ tasks : creates
+    users ||--o{ connectors : owns
+    users ||--o{ miniprogramApps : owns
+    users ||--o{ cronTasks : owns
+    users ||--o{ accounts : has
+    users ||--o{ keys : stores
+    users ||--o| userResources : binds
+    users ||--o{ settings : configures
+    users ||--o| localCredentials : authenticates
+    tasks ||--o{ deployments : produces
+    users ||--o{ adminLogs : "audited by"
+
+    users {
+        text id PK
+        text provider "github | local"
+        text username
+        text email
+        text role "user | admin"
+        text status "active | disabled"
+        text apiKey "encrypted sak_xxx"
+        integer createdAt
+    }
+
+    localCredentials {
+        text userId PK,FK
+        text passwordHash "bcrypt"
+    }
+
+    tasks {
+        text id PK
+        text userId FK
+        text prompt
+        text status "pending | processing | completed | error"
+        text sandboxId
+        text selectedAgent
+        text selectedModel
+        text mcpServerIds "JSON array"
+        text prUrl
+        integer createdAt
+    }
+
+    deployments {
+        text id PK
+        text taskId FK
+        text type "web | miniprogram"
+        text url
+        text qrCodeUrl
+        text label
+        text metadata "JSON"
+        integer createdAt
+    }
+
+    connectors {
+        text id PK
+        text userId FK
+        text name
+        text type "local | remote"
+        text baseUrl
+        text oauthClientSecret "encrypted"
+        text env "encrypted"
+        text status "connected | disconnected"
+    }
+
+    miniprogramApps {
+        text id PK
+        text userId FK
+        text appId
+        text privateKey "encrypted"
+    }
+
+    cronTasks {
+        text id PK
+        text userId FK
+        text prompt
+        text cronExpression
+        integer enabled
+        text lockedBy "distributed lock"
+    }
+
+    userResources {
+        text id PK
+        text userId FK
+        text envId "CloudBase env"
+        text camSecretId
+        text camSecretKey
+        text status "pending | ready | failed"
+    }
+
+    accounts {
+        text id PK
+        text userId FK
+        text provider "github"
+        text accessToken "encrypted"
+    }
+
+    keys {
+        text id PK
+        text userId FK
+        text provider "anthropic | openai | gemini..."
+        text value "encrypted"
+    }
+
+    settings {
+        text id PK
+        text userId FK
+        text key
+        text value
+    }
+
+    adminLogs {
+        text id PK
+        text adminUserId FK
+        text action
+        text targetUserId FK
+        text details "JSON"
+        integer createdAt
+    }
+```
+
+### CloudBase 专有集合
+
+除上述表结构外，Agent 消息持久化使用 CloudBase 文档数据库的两个集合：
+
+| Collection | Description |
+| --- | --- |
+| `vibe_agent_messages` | Agent 会话消息记录（按 conversationId + userId 索引） |
+| `vibe_agent_stream_events` | SSE 流式事件（按 conversationId + turnId + seq 索引，用于回放） |
+
+---
+
+## Security Model
+
+### Credential Encryption
+
+所有敏感数据在入库前使用 AES-256-CBC 加密（`lib/crypto.ts`）：
+
+| Data | Storage |
+| --- | --- |
+| 用户 API Key (`sak_xxx`) | `users.apiKey` — 加密存储 |
+| GitHub Access Token | `accounts.accessToken` — 加密存储 |
+| MCP Connector OAuth Secret | `connectors.oauthClientSecret` — 加密存储 |
+| MCP Connector Env Vars | `connectors.env` — 加密存储 |
+| 小程序私钥 | `miniprogramApps.privateKey` — 加密存储 |
+| 用户 AI API Keys | `keys.value` — 加密存储 |
+| 本地用户密码 | `localCredentials.passwordHash` — bcrypt 哈希 |
+
+加密密钥通过 `ENCRYPTION_KEY` 环境变量配置（32 字节 hex），init 脚本自动生成。
+
+### Session Security
+
+- 会话通过 JWE (JSON Web Encryption) 加密存储在 HttpOnly Cookie 中
+- 加密密钥为 `JWE_SECRET`（base64 编码），init 脚本自动生成
+- Cookie 名称：`nex_session`
+
+### CloudBase Credential Isolation
+
+- 系统级密钥（`TCB_SECRET_ID` / `TCB_SECRET_KEY`）仅用于支撑环境操作
+- 用户级操作通过 STS 签发临时凭证，scope 限定在用户自己的 `envId` 内
+- 临时凭证有效期 2 小时，提前 5 分钟自动刷新，内存缓存
+- `isolated` 模式下每个用户拥有独立 CAM 子用户和密钥
+
+### Log Security
+
+所有日志输出必须使用静态字符串，禁止包含动态值（详见 `AGENTS.md`）。`redactSensitiveInfo()` 函数作为二级防护，自动脱敏已知敏感模式（API Key、Token、密钥等）。
+
+### Admin Access Control
+
+- 管理后台路由通过 `requireAdmin` 中间件保护
+- 管理员操作记录到 `adminLogs` 表，包含操作类型、目标用户、IP 和 User-Agent
+- 管理员代理访问用户环境时使用系统级凭证，不继承用户凭证
+
+---
+
 ## Related Documents
 
 - [Setup Guide](./setup.md) — 初始化流程、环境变量、验证与排障
 - [SCF Session Sharing](./scf-session-sharing.md) — 沙箱会话共享方案
 - [Cron Task Plan](./crontask-cloudfunction-plan.md) — 定时任务云函数演进规划
-- [Cloudflare VibeSDK Architecture](https://github.com/cloudflare/vibesdk/blob/main/docs/architecture-diagrams.md) — 图示风格参考

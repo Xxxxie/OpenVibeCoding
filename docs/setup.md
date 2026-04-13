@@ -7,11 +7,6 @@
 - 初始化完成后的验证方式
 - 常见问题排障
 
-> setup / quickstart 的组织方式参考了 Cloudflare VibeSDK 的 README：
-> https://github.com/cloudflare/vibesdk/blob/main/README.md
->
-> 但本文内容已经按当前项目的 CloudBase 架构、初始化脚本和配置方式做了本地化。
-
 ## 前置条件
 
 ### 必需项
@@ -274,4 +269,3 @@ pnpm rebuild better-sqlite3
 - [根目录 README](../README.md)
 - [系统架构文档](./architecture.md)
 - [SCF Session 共享方案](./scf-session-sharing.md)
-- [Cloudflare VibeSDK README](https://github.com/cloudflare/vibesdk/blob/main/README.md)

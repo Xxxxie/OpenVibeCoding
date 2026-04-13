@@ -5,7 +5,7 @@ import bcrypt from 'bcryptjs'
 import { nanoid } from 'nanoid'
 import { encryptJWE } from '../lib/session'
 import { encrypt } from '../lib/crypto'
-import type { AppEnv, AppSession } from '../middleware/auth'
+import { requireAuth, type AppEnv, type AppSession } from '../middleware/auth'
 import { provisionUserResources } from '../cloudbase/provision.js'
 
 const SESSION_COOKIE_NAME = 'nex_session'
@@ -356,7 +356,7 @@ auth.get('/rate-limit', async (c) => {
 
 // GET /auth-config - Expose auth configuration to frontend (no session required)
 auth.get('/auth-config', (c) => {
-  const providers = (process.env.NEXT_PUBLIC_AUTH_PROVIDERS || 'local').split(',').map((s) => s.trim())
+  const providers = 'local,github'.split(',').map((s) => s.trim())
   const githubMode = process.env.AUTH_GITHUB_MODE || 'direct' // 'direct' | 'cloudbase'
   const tcbEnvId = process.env.TCB_ENV_ID || ''
   return c.json({ providers, githubMode, tcbEnvId })
