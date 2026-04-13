@@ -374,17 +374,6 @@ export class CloudbaseAgentService {
         timestamp: Date.now(),
       } as ExtendedSessionUpdate
     }
-    if (msg.type === 'deploy_url') {
-      return {
-        sessionUpdate: 'deploy_url',
-        url: msg.url,
-        type: msg.deploymentType || 'web',
-        qrCodeUrl: msg.qrCodeUrl,
-        pagePath: msg.pagePath,
-        appId: msg.appId,
-        label: msg.label,
-      } as ExtendedSessionUpdate
-    }
     if (msg.type === 'artifact' && msg.artifact) {
       return {
         sessionUpdate: 'artifact',
@@ -645,9 +634,9 @@ export class CloudbaseAgentService {
         eventBuffer.push(acpEvent)
       }
 
-      // 2. Persist deployment records to SQLite (side-effect, fire-and-forget)
-      if (msg.type === 'deploy_url') {
-        this.persistDeployment(conversationId, msg).catch((err) => {
+      // 2. Persist deployment records (side-effect, fire-and-forget)
+      if (msg.type === 'artifact' && msg.artifact) {
+        this.persistDeploymentFromArtifact(conversationId, msg.artifact).catch((err) => {
           console.error('Failed to persist deployment:', err)
         })
       }
@@ -712,8 +701,8 @@ export class CloudbaseAgentService {
             }),
             workspaceFolderPaths: actualCwd,
             log: (msg) => console.log(msg),
-            onDeployUrl: (url) => {
-              wrappedCallback({ type: 'deploy_url', url })
+            onArtifact: (artifact) => {
+              wrappedCallback({ type: 'artifact', artifact })
             },
             getMpDeployCredentials: async (appId: string) => {
               const app = await getDb().miniprogramApps.findByAppIdAndUserId(appId, userContext.userId)
@@ -1123,20 +1112,30 @@ export class CloudbaseAgentService {
 
   // ─── Deployment Persistence ────────────────────────────────────────
 
-  private async persistDeployment(taskId: string, msg: AgentCallbackMessage): Promise<void> {
-    const deploymentType = msg.deploymentType || 'web'
+  private async persistDeploymentFromArtifact(
+    taskId: string,
+    artifact: NonNullable<AgentCallbackMessage['artifact']>,
+  ): Promise<void> {
     const now = Date.now()
+    const meta = artifact.metadata || {}
+    const deploymentType = (meta.deploymentType as string) || (artifact.contentType === 'link' ? 'web' : 'miniprogram')
+    const metadataJson = Object.keys(meta).length > 0 ? JSON.stringify(meta) : null
 
     if (deploymentType === 'miniprogram') {
+      const qrCodeUrl = artifact.contentType === 'image' ? artifact.data : (meta.qrCodeUrl as string) || null
+      const pagePath = (meta.pagePath as string) || null
+      const appId = (meta.appId as string) || null
+      const label = artifact.title || null
+
       const existing = await getDb().deployments.findByTaskIdAndTypePath(taskId, 'miniprogram', null)
 
       if (existing) {
         await getDb().deployments.update(existing.id, {
-          qrCodeUrl: msg.qrCodeUrl || existing.qrCodeUrl,
-          pagePath: msg.pagePath || existing.pagePath,
-          appId: msg.appId || existing.appId,
-          label: msg.label || existing.label,
-          metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : existing.metadata,
+          qrCodeUrl: qrCodeUrl || existing.qrCodeUrl,
+          pagePath: pagePath || existing.pagePath,
+          appId: appId || existing.appId,
+          label: label || existing.label,
+          metadata: metadataJson || existing.metadata,
           updatedAt: now,
         })
       } else {
@@ -1146,19 +1145,20 @@ export class CloudbaseAgentService {
           type: 'miniprogram',
           url: null,
           path: null,
-          qrCodeUrl: msg.qrCodeUrl || null,
-          pagePath: msg.pagePath || null,
-          appId: msg.appId || null,
-          label: msg.label || null,
-          metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : null,
+          qrCodeUrl,
+          pagePath,
+          appId,
+          label,
+          metadata: metadataJson,
           createdAt: now,
           updatedAt: now,
         })
       }
-    } else if (msg.url) {
+    } else if (artifact.contentType === 'link' && artifact.data) {
+      const url = artifact.data
       let urlPath: string | null = null
       try {
-        const urlObj = new URL(msg.url)
+        const urlObj = new URL(url)
         urlPath = urlObj.pathname
       } catch {
         /* ignore */
@@ -1169,9 +1169,9 @@ export class CloudbaseAgentService {
 
         if (existing) {
           await getDb().deployments.update(existing.id, {
-            url: msg.url,
-            label: msg.label || existing.label,
-            metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : existing.metadata,
+            url,
+            label: artifact.title || existing.label,
+            metadata: metadataJson || existing.metadata,
             updatedAt: now,
           })
         } else {
@@ -1179,27 +1179,41 @@ export class CloudbaseAgentService {
             id: nanoid(12),
             taskId,
             type: 'web',
-            url: msg.url,
+            url,
             path: urlPath,
             qrCodeUrl: null,
             pagePath: null,
             appId: null,
-            label: msg.label || null,
-            metadata: msg.deploymentMetadata ? JSON.stringify(msg.deploymentMetadata) : null,
+            label: artifact.title || null,
+            metadata: metadataJson,
             createdAt: now,
             updatedAt: now,
           })
         }
       }
-    }
 
-    // Also update legacy previewUrl for backward compatibility
-    if (msg.url) {
+      // Also update legacy previewUrl for backward compatibility
       try {
-        await getDb().tasks.update(taskId, { previewUrl: msg.url })
+        await getDb().tasks.update(taskId, { previewUrl: url })
       } catch {
         // Non-critical
       }
+    } else {
+      // Other artifact types (json, image without miniprogram context, etc.)
+      await getDb().deployments.create({
+        id: nanoid(12),
+        taskId,
+        type: deploymentType as 'web' | 'miniprogram',
+        url: artifact.contentType === 'link' ? artifact.data : null,
+        path: null,
+        qrCodeUrl: artifact.contentType === 'image' ? artifact.data : null,
+        pagePath: null,
+        appId: null,
+        label: artifact.title || null,
+        metadata: metadataJson,
+        createdAt: now,
+        updatedAt: now,
+      })
     }
   }
 
@@ -1329,7 +1343,7 @@ export class CloudbaseAgentService {
 
   /**
    * 尝试从 uploadFiles 工具结果中提取 CloudBase 静态托管部署 URL
-   * 结果包含 accessUrl 或 staticDomain 则触发 deploy_url callback
+   * 结果包含 accessUrl 或 staticDomain 则触发 artifact callback
    */
   private tryExtractDeployUrl(
     toolUseId: string,
@@ -1357,7 +1371,15 @@ export class CloudbaseAgentService {
       const isFile = localPath ? /\.[a-zA-Z0-9]+$/.test(localPath.replace(/\/+$/, '').split('/').pop() || '') : false
       const deployUrl = CloudbaseAgentService.extractDeployUrl(rawText, isFile)
       if (deployUrl) {
-        callback({ type: 'deploy_url', url: deployUrl })
+        callback({
+          type: 'artifact',
+          artifact: {
+            title: 'Web 应用已部署',
+            contentType: 'link',
+            data: deployUrl,
+            metadata: { deploymentType: 'web' },
+          },
+        })
       }
     } catch {
       // 提取失败不影响主流程

@@ -42,8 +42,13 @@ export interface SandboxMcpDeps {
   workspaceFolderPaths?: string
   /** 日志输出，默认 console.log */
   log?: (msg: string) => void
-  /** uploadFiles 工具成功返回时的回调，用于触发 deploy_url 事件 */
-  onDeployUrl?: (url: string) => void
+  /** uploadFiles 工具成功返回时的回调，用于触发 artifact 事件 */
+  onArtifact?: (artifact: {
+    title: string
+    contentType: 'image' | 'link' | 'json'
+    data: string
+    metadata?: Record<string, unknown>
+  }) => void
   /** 根据 appId 查询小程序部署凭证 */
   getMpDeployCredentials?: (appId: string) => Promise<{ appId: string; privateKey: string } | null>
   /** 当前用户 ID，用于 cronTask 等工具 */
@@ -151,7 +156,7 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
     bashTimeoutMs = 30_000,
     workspaceFolderPaths = '',
     log = (msg: string) => console.log(msg),
-    onDeployUrl,
+    onArtifact,
     getMpDeployCredentials,
     userId: depsUserId,
     currentModel: depsCurrentModel,
@@ -582,12 +587,17 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
             const output = result.output ?? ''
 
             // 检测 uploadFiles 结果，提取部署 URL
-            if (t.name === 'uploadFiles' && onDeployUrl && output) {
+            if (t.name === 'uploadFiles' && onArtifact && output) {
               try {
                 const deployUrl = extractDeployUrl(output, isFilePath(String(args.localPath || '')))
                 if (deployUrl) {
-                  log(`[sandbox-mcp] deploy_url detected: ${deployUrl}\n`)
-                  onDeployUrl(deployUrl)
+                  log(`[sandbox-mcp] deploy artifact detected\n`)
+                  onArtifact({
+                    title: 'Web 应用已部署',
+                    contentType: 'link',
+                    data: deployUrl,
+                    metadata: { deploymentType: 'web' },
+                  })
                 }
               } catch {
                 // 提取失败不影响主流程

@@ -409,7 +409,6 @@ export interface AgentCallbackMessage {
     | 'session'
     | 'tool_confirm'
     | 'ask_user'
-    | 'deploy_url'
     | 'artifact'
   content?: string
   name?: string
@@ -425,21 +424,7 @@ export interface AgentCallbackMessage {
   answers?: Record<string, string>
   /** tool_confirm 的确认动作 */
   action?: 'allow' | 'deny'
-  /** deploy_url: CloudBase 静态托管部署 URL */
-  url?: string
-  /** deploy_url: deployment type */
-  deploymentType?: 'web' | 'miniprogram'
-  /** deploy_url: QR code URL for miniprogram */
-  qrCodeUrl?: string
-  /** deploy_url: page path for miniprogram */
-  pagePath?: string
-  /** deploy_url: app ID for miniprogram */
-  appId?: string
-  /** deploy_url: label for display */
-  label?: string
-  /** deploy_url: additional metadata */
-  deploymentMetadata?: Record<string, unknown>
-  /** artifact: 结构化产物（小程序二维码、上传结果等） */
+  /** artifact: 结构化产物（部署 URL、小程序二维码、上传结果等） */
   artifact?: {
     title: string
     description?: string

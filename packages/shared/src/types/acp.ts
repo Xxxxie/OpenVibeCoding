@@ -54,18 +54,6 @@ export interface ToolConfirmUpdate {
   input: Record<string, unknown>
 }
 
-export interface DeployUrlUpdate {
-  sessionUpdate: 'deploy_url'
-  url?: string
-  // New fields for deployment types
-  type?: 'web' | 'miniprogram'
-  qrCodeUrl?: string
-  pagePath?: string
-  appId?: string
-  label?: string
-  metadata?: Record<string, unknown>
-}
-
 export interface ArtifactUpdate {
   sessionUpdate: 'artifact'
   artifact: {
@@ -86,7 +74,6 @@ export type ExtendedSessionUpdate =
   | ThinkingUpdate
   | AskUserUpdate
   | ToolConfirmUpdate
-  | DeployUrlUpdate
   | ArtifactUpdate
 
 // Re-export base types for convenience

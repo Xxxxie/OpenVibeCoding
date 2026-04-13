@@ -665,36 +665,48 @@ export function TaskChat({
                     </button>
                   </div>
                 ))}
-              {artifacts.map((artifact, idx) => (
-                <div key={idx} className="border border-border rounded-md p-3 space-y-2">
-                  <div className="text-xs font-medium">{artifact.title}</div>
-                  {artifact.description && <div className="text-xs text-muted-foreground">{artifact.description}</div>}
-                  {artifact.contentType === 'image' && (
-                    <img src={artifact.data} alt={artifact.title} className="max-w-[200px] mx-auto block rounded" />
-                  )}
-                  {artifact.contentType === 'link' && (
-                    <a
-                      href={artifact.data}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-blue-500 underline break-all"
-                    >
-                      {artifact.data}
-                    </a>
-                  )}
-                  {artifact.contentType === 'json' && (
-                    <pre className="text-xs bg-muted/50 rounded p-2 overflow-auto max-h-32 whitespace-pre-wrap break-all">
-                      {(() => {
-                        try {
-                          return JSON.stringify(JSON.parse(artifact.data), null, 2)
-                        } catch {
-                          return artifact.data
-                        }
-                      })()}
-                    </pre>
-                  )}
-                </div>
-              ))}
+              {artifacts
+                .filter((a) => {
+                  // Link artifacts are rendered as deployment cards via deploymentNotifications, skip here
+                  if (a.contentType === 'link') return false
+                  // Skip image artifacts that are already rendered as miniprogram QR codes above
+                  if (a.contentType === 'image' && a.metadata?.deploymentType === 'miniprogram') {
+                    return !deployments.some((d) => d.qrCodeUrl === a.data)
+                  }
+                  return true
+                })
+                .map((artifact, idx) => (
+                  <div key={idx} className="border border-border rounded-md p-3 space-y-2">
+                    <div className="text-xs font-medium">{artifact.title}</div>
+                    {artifact.description && (
+                      <div className="text-xs text-muted-foreground">{artifact.description}</div>
+                    )}
+                    {artifact.contentType === 'image' && (
+                      <img src={artifact.data} alt={artifact.title} className="max-w-[200px] mx-auto block rounded" />
+                    )}
+                    {artifact.contentType === 'link' && (
+                      <a
+                        href={artifact.data}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-blue-500 underline break-all"
+                      >
+                        {artifact.data}
+                      </a>
+                    )}
+                    {artifact.contentType === 'json' && (
+                      <pre className="text-xs bg-muted/50 rounded p-2 overflow-auto max-h-32 whitespace-pre-wrap break-all">
+                        {(() => {
+                          try {
+                            return JSON.stringify(JSON.parse(artifact.data), null, 2)
+                          } catch {
+                            return artifact.data
+                          }
+                        })()}
+                      </pre>
+                    )}
+                  </div>
+                ))}
             </div>
           )}
         </div>

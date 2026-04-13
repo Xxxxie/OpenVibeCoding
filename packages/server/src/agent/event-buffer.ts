@@ -5,14 +5,7 @@ import { v4 as uuidv4 } from 'uuid'
 
 // ─── Milestone event types that trigger immediate flush ─────────────
 
-const MILESTONE_SESSION_UPDATES = new Set([
-  'tool_call',
-  'tool_call_update',
-  'ask_user',
-  'tool_confirm',
-  'deploy_url',
-  'artifact',
-])
+const MILESTONE_SESSION_UPDATES = new Set(['tool_call', 'tool_call_update', 'ask_user', 'tool_confirm', 'artifact'])
 
 // ─── EventBuffer ───────────────────────────────────────────────────────
 

@@ -211,36 +211,38 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
           })
           break
 
-        case 'deploy_url': {
-          if (u.url) {
-            setDeploymentNotifications((prev) => {
-              if (prev.some((d) => d.url === u.url)) return prev
-              return [
-                ...prev,
-                {
-                  id: `notify-${Date.now()}`,
-                  taskId,
-                  type: u.type || 'web',
-                  url: u.url,
-                  path: null,
-                  qrCodeUrl: u.qrCodeUrl || null,
-                  pagePath: u.pagePath || null,
-                  appId: u.appId || null,
-                  label: u.label || null,
-                  metadata: null,
-                  createdAt: Date.now(),
-                  updatedAt: Date.now(),
-                },
-              ]
-            })
-            optionsRef.current.onDeploymentDetected?.()
-          }
-          break
-        }
-
         case 'artifact':
           if (u.artifact) {
-            setArtifacts((prev) => [...prev, u.artifact])
+            setArtifacts((prev) => {
+              // Deduplicate by contentType + data
+              if (prev.some((a) => a.contentType === u.artifact.contentType && a.data === u.artifact.data)) return prev
+              return [...prev, u.artifact]
+            })
+            // For link artifacts, also update deployment notifications
+            if (u.artifact.contentType === 'link' && u.artifact.data) {
+              const meta = u.artifact.metadata || {}
+              setDeploymentNotifications((prev) => {
+                if (prev.some((d) => d.url === u.artifact.data)) return prev
+                return [
+                  ...prev,
+                  {
+                    id: `notify-${Date.now()}`,
+                    taskId,
+                    type: (meta.deploymentType as 'web' | 'miniprogram') || 'web',
+                    url: u.artifact.data,
+                    path: null,
+                    qrCodeUrl: null,
+                    pagePath: (meta.pagePath as string) || null,
+                    appId: (meta.appId as string) || null,
+                    label: u.artifact.title || null,
+                    metadata: meta,
+                    createdAt: Date.now(),
+                    updatedAt: Date.now(),
+                  },
+                ]
+              })
+              optionsRef.current.onDeploymentDetected?.()
+            }
           }
           break
       }

@@ -1,277 +1,386 @@
-# 系统架构
+# Architecture
 
-本文档说明当前项目的整体架构、关键请求链路、用户环境绑定机制，以及任务执行与 Sandbox 的关系。
+## Overview
 
-> 图示组织方式参考了 Cloudflare VibeSDK 的 architecture 文档：
-> https://github.com/cloudflare/vibesdk/blob/main/docs/architecture-diagrams.md
->
-> 但本文内容已经按当前项目的 CloudBase 平台、Hono 服务、SCF Sandbox 和初始化流程做了本地化。
-
-## 系统概览
-
-当前项目是一个基于 pnpm workspace 的 monorepo，核心由以下几部分组成：
-
-- `packages/web`：面向最终用户的前端应用，负责对话、任务、日志、仓库等交互
-- `packages/server`：Hono 后端，负责认证、API 路由、Agent 编排、消息持久化、Sandbox 管理
-- `packages/dashboard`：CloudBase 管理向界面，偏向后台与资源管理能力
-- `packages/shared`：前后端共享类型，承载 ACP、任务消息和配置等协议定义
-- CloudBase 基础设施：数据库、云函数、存储、TCR 镜像服务
-- CodeBuddy / AI 模型：负责智能体推理与代码生成能力
-
-## 整体系统架构图
+CloudBase VibeCoding Platform 是一个基于腾讯云 CloudBase 的 AI 编程助手平台。用户通过 Web 界面向 Agent 下达编程指令，Agent 在隔离的 SCF Sandbox 容器中执行代码操作，结果通过 SSE 流式返回并持久化到 CloudBase 数据库。
 
 ```mermaid
 graph TB
-    subgraph Client[客户端]
-        Web[packages/web\nReact + Vite]
-        Dashboard[packages/dashboard\nCloudBase 管理界面]
+    subgraph Client["Client"]
+        Web["Web UI<br/>React + Vite"]
+        Dashboard["Dashboard<br/>CloudBase Console"]
     end
 
-    subgraph Server[服务端]
-        Hono[packages/server\nHono API Server]
-        Auth[authMiddleware / requireUserEnv]
-        ACP[ACP 与任务路由]
-        Agent[cloudbaseAgentService]
-        Persist[persistenceService]
+    subgraph Server["Server (Hono)"]
+        Auth["Auth & User Env"]
+        AgentSvc["Agent Service"]
+        TaskSvc["Task Service"]
+        Persist["Persistence"]
+        MCP["MCP Proxy"]
     end
 
-    subgraph Shared[共享层]
-        SharedPkg[packages/shared\n共享类型与协议]
+    subgraph Infra["CloudBase Infrastructure"]
+        DB[("CloudBase DB")]
+        SCF["SCF Sandbox"]
+        Storage["Cloud Storage"]
+        TCR["TCR Registry"]
     end
 
-    subgraph CloudBase[CloudBase 基础设施]
-        DB[(CloudBase DB)]
-        SCF[SCF Sandbox]
-        TCR[TCR Registry]
-        Storage[Cloud Storage]
+    subgraph AI["AI Layer"]
+        SDK["CodeBuddy SDK"]
+        Models["GLM / DeepSeek / Kimi"]
     end
 
-    subgraph AI[智能体能力]
-        CodeBuddy[CodeBuddy SDK]
-        Models[GLM / DeepSeek / Kimi]
+    subgraph Git["Git Archive"]
+        CNB["CNB / Git Remote"]
     end
 
-    Web --> Hono
-    Dashboard --> Hono
-    Hono --> Auth
-    Auth --> ACP
-    ACP --> Agent
-    Agent --> CodeBuddy
-    CodeBuddy --> Models
-    Agent --> SCF
-    Agent --> Persist
-    Persist --> DB
+    Web --> Auth
+    Dashboard --> Auth
+    Auth --> AgentSvc
+    Auth --> TaskSvc
+    AgentSvc --> SDK --> Models
+    AgentSvc --> MCP
+    MCP --> SCF
+    TaskSvc --> SCF
+    AgentSvc --> Persist --> DB
+    SCF --> CNB
     SCF --> TCR
-    Hono --> DB
-    Hono --> Storage
-    Hono --> SharedPkg
-    Web --> SharedPkg
+    TaskSvc --> Storage
 ```
 
-## Monorepo 包职责
+## Project Structure
 
-| 包 | 作用 | 说明 |
+```
+packages/
+├── web/          # User-facing frontend
+├── server/       # API server, agent orchestration, sandbox management
+├── dashboard/    # CloudBase resource management console
+└── shared/       # Shared types and protocol definitions
+```
+
+| Package | Responsibility |
+| --- | --- |
+| `packages/web` | Task creation, agent chat, log/terminal, PR operations, admin pages |
+| `packages/server` | Auth, API routes, agent lifecycle, sandbox, persistence, admin |
+| `packages/dashboard` | CloudBase database/storage/functions management UI |
+| `packages/shared` | ACP protocol types, task/message schemas, config types |
+
+---
+
+## User Module
+
+用户模块负责身份认证、会话管理和云开发环境分配。
+
+### Authentication
+
+支持多种认证方式，统一通过 JWE 加密 Cookie 维护会话：
+
+| 方式 | 说明 | 入口 |
 | --- | --- | --- |
-| `packages/web` | 用户前端 | 提供聊天、任务、仓库、日志等主交互界面 |
-| `packages/server` | 核心后端 | 统一承载 API、认证、Agent、Sandbox、数据库访问 |
-| `packages/dashboard` | 管理界面 | 提供数据库、存储等 CloudBase 管理能力 |
-| `packages/shared` | 共享协议层 | 统一前后端共享的类型、消息结构和 ACP 协议 |
+| 本地账密 | 用户名 + bcrypt 密码 | `routes/auth.ts` POST `/register`, `/login` |
+| GitHub OAuth | OAuth 2.0 登录或账号关联 | `routes/github-auth.ts` GET `/login`, `/callback` |
+| CloudBase 身份 | CloudBase 身份源登录 | `routes/cloudbase-auth.ts` POST `/login` |
+| API Key | Bearer `sak_xxx` 头部鉴权 | `middleware/auth.ts:49` |
 
-## 请求入口与运行时结构
+### Cloud Environment Binding
 
-服务端统一入口在 `packages/server/src/index.ts`，主要职责是：
-- 注册全局 `authMiddleware`
-- 挂载 `/api/auth`、`/api/agent`、`/api/tasks`、`/api/database` 等路由
-- 在生产模式下同时托管 Web 静态资源
-- 启动后初始化 cron scheduler 等后台能力
-
-这意味着当前架构并不是“前后端完全分散部署”，而是支持：
-- 本地开发时前后端分别启动
-- 生产模式下由 server 统一提供 API 和静态文件
-
-## 认证与用户环境绑定
-
-当前项目不仅要求用户已登录，还要求用户已经绑定可用的 CloudBase 环境。
-
-### 认证与环境绑定流程图
+认证成功后，系统还需要为用户绑定可用的 CloudBase 环境。这是当前平台的核心边界：
 
 ```mermaid
 sequenceDiagram
-    participant User as 用户
-    participant Web as Web 前端
-    participant Server as Hono Server
+    participant User
+    participant Server
     participant Auth as authMiddleware
     participant Env as requireUserEnv
     participant DB as userResources
-    participant STS as 临时凭证签发
+    participant STS as Temp Credentials
 
-    User->>Web: 登录或发起请求
-    Web->>Server: 携带 Cookie 或 API Key 请求
-    Server->>Auth: 解析 session / API Key
-    Auth-->>Server: 写入 session
-    Server->>Env: 校验用户环境
-    Env->>DB: 查询 userResources.envId
-    alt 已存在永久密钥
-        Env-->>Server: 返回 envId + permanent credentials
-    else 需要临时密钥
-        Env->>STS: issueTempCredentials
-        STS-->>Env: 返回临时凭证
-        Env-->>Server: 返回 envId + temp credentials
+    User->>Server: Request with Cookie / API Key
+    Server->>Auth: Parse session
+    Auth->>Env: Check user env
+    Env->>DB: Query envId
+    alt Has permanent key
+        Env-->>Server: envId + credentials
+    else No permanent key
+        Env->>STS: Issue temp credentials (STS)
+        STS-->>Env: TmpSecretId / TmpSecretKey / Token
+        Env-->>Server: envId + temp credentials
     end
-    alt 未绑定 envId
-        Server-->>Web: 400 User environment not ready
-    else 校验通过
-        Server-->>Web: 继续访问业务路由
+    alt No envId bound
+        Server-->>User: 400 User environment not ready
+    else OK
+        Server-->>User: Proceed to business route
     end
 ```
 
-### 为什么要有 `requireUserEnv`
+**Environment Provisioning Modes:**
 
-`requireUserEnv()` 是当前项目里一个非常关键的边界：
-- 仅登录成功还不够
-- 必须能为当前用户解析出 `envId`
-- 下游路由拿到的不是“裸 session”，而是可直接调用 CloudBase 的 `userEnv`
+| Mode | Description |
+| --- | --- |
+| `shared` | 所有用户共用一个 CloudBase 支撑环境（默认） |
+| `isolated` | 每个用户自动分配独立 CloudBase 环境 |
 
-这让后续路由可以直接使用：
-- 用户环境 ID
-- 用户 ID
-- 永久或临时的 CloudBase 凭证
+注册时系统根据 `TCB_PROVISION_MODE` 自动完成环境分配。下游所有需要 CloudBase 能力的路由都通过 `requireUserEnv()` 中间件获取 `{ envId, userId, credentials }`。
 
-这种设计让任务执行、ACP、数据库与文件操作都能够建立在“用户环境已就绪”的前提上。
+---
 
-## 任务执行与 Sandbox 链路
+## Agent Module
 
-当前项目有两条重要执行链路：
-- `/api/agent`：偏向 ACP、流式消息和会话能力
-- `/api/tasks`：偏向任务、仓库与工作区操作
+Agent 模块负责 AI 编程助手的会话管理、模型调用和流式交互。
 
-它们都会依赖：
-- 用户环境校验
-- SCF Sandbox
-- 消息持久化
-- Git 归档能力
+### ACP Protocol
 
-### 任务与智能体执行流程图
+Agent 通过 ACP (Agent Communication Protocol) 与前端交互，基于 JSON-RPC 2.0：
+
+| Method | Description |
+| --- | --- |
+| `initialize` | 协议握手，交换版本和能力 |
+| `session/new` | 创建新会话 |
+| `session/load` | 加载已有会话 |
+| `session/prompt` | 发送用户消息，触发 Agent 执行 |
+| `session/cancel` | 取消当前执行 |
+
+流式响应通过 SSE (Server-Sent Events) 返回，支持以下事件类型：
+
+- `text` — Agent 文本输出
+- `thinking` — 推理过程
+- `tool_use` / `tool_result` — 工具调用与结果
+- `log` — 日志输出
+- `ask_user` — Agent 向用户提问
+- `tool_confirm` — 敏感工具调用需用户确认
+- `deploy_url` — 部署结果（URL / 二维码）
+
+### Memory & Persistence
+
+Agent 消息采用双层持久化：
+
+```
+CloudBase DB (vibe_agent_messages)     ← 主存储，跨设备可恢复
+  └─ 按 conversationId + userId 索引
+Local .jsonl (~/.codebuddy/projects/)  ← 本地备份
+  └─ 按 projectHash + sessionId 存储
+```
+
+**持久化内容包括：**
+- 用户消息和 Agent 回复
+- 工具调用及其结果
+- 思考过程
+- AskUserQuestion / ToolConfirm 的交互状态
+- 流式事件（`vibe_agent_stream_events` 集合）
+
+会话可在中断后恢复：通过 `session/load` 从数据库加载历史记录并重建上下文。
+
+### Cron Tasks
+
+支持定时触发 Agent 执行：
+
+- 创建 / 更新 / 删除 / 启停定时任务
+- 基于 cron 表达式调度
+- 服务端 `cron-scheduler.ts` 在启动时加载并按计划触发
+
+---
+
+## Sandbox Module
+
+Sandbox 模块为每个任务 / 会话提供隔离的执行环境。
+
+### Architecture
 
 ```mermaid
 flowchart LR
-    A[用户在前端发起任务或对话] --> B[Hono 路由层]
-    B --> C[authMiddleware]
-    C --> D[requireUserEnv]
-    D --> E[ACP 或 Tasks 路由]
-    E --> F[cloudbaseAgentService]
-    F --> G[scfSandboxManager]
-    G --> H[SCF Sandbox 容器]
-    F --> I[CodeBuddy SDK / 模型]
-    F --> J[persistenceService]
-    J --> K[CloudBase DB]
-    H --> L[Git Archive / Workspace]
-    J --> M[SSE / 消息回放]
-    M --> N[前端实时展示]
+    Agent["Agent Service"] --> Manager["ScfSandboxManager"]
+    Manager --> SCF["SCF Container"]
+    SCF --> FS["File System"]
+    SCF --> Bash["Bash Execution"]
+    SCF --> MCPServer["MCP Server"]
+    SCF --> Git["Git Archive"]
+    MCPServer --> CloudBase["CloudBase Tools"]
+    MCPServer --> Deploy["Deployment Tools"]
 ```
 
-### 这条链路中的关键职责
+### SCF Sandbox Lifecycle
 
-#### 1. 路由层
-- `acp.ts` 负责会话、消息记录、SSE 和 JSON-RPC 风格接口
-- `tasks.ts` 负责任务、工作区、命令执行、文件操作与归档等能力
+1. **Create or Reuse** — `scfSandboxManager` 根据 conversationId 创建或复用云函数容器
+2. **Health Check** — 轮询 `/health` 等待容器就绪
+3. **Init Workspace** — 通过 `/api/session/init` 注入 CloudBase 凭证和环境变量
+4. **Execute** — Agent 通过 HTTP 调用容器内的工具接口
+5. **Archive** — 任务结束时通过 Git 归档工作区
 
-#### 2. Agent 层
-`cloudbaseAgentService` 负责：
-- 发起模型调用
-- 管理智能体运行状态
-- 建立与 Sandbox MCP 的通信
-- 驱动流式输出
+### Sandbox Capabilities
 
-#### 3. Sandbox 层
-`scfSandboxManager` 负责：
-- 创建或复用 SCF Sandbox
-- 生成访问 token
-- 向容器请求 `/health`、`/api/session/init`、`/api/tools/bash` 等接口
+每个 Sandbox 容器对外暴露以下能力：
 
-#### 4. 持久化层
-`persistenceService` 负责：
-- 将消息存入 CloudBase DB
-- 保存流式事件
-- 将数据库记录恢复为前端可消费的消息格式
-
-## ACP 与任务路由的分工
-
-### `/api/agent`
-更适合以下能力：
-- 创建会话
-- 拉取会话记录
-- 流式 chat
-- ACP 协议风格交互
-
-### `/api/tasks`
-更适合以下能力：
-- 创建和管理任务
-- 进入工作区执行命令
-- 读写文件
-- 与 GitHub / Git 归档集成
-- 驱动 sandbox 内的工程级操作
-
-这种分层让“对话协议”和“任务工作流”可以共享底层能力，但不会完全耦合在同一个路由文件里。
-
-## 用户环境模式
-
-初始化时可选择两种用户环境模式：
-
-| 模式 | 说明 | 适用场景 |
+| Capability | Endpoint | Description |
 | --- | --- | --- |
-| `shared` | 多个用户共用支撑环境 | 默认模式，启动门槛更低 |
-| `isolated` | 每个用户拥有单独环境 | 更强调隔离性与独立资源管理 |
+| File System | `/e2b-compatible/files` | 文件读写（兼容 e2b 协议） |
+| Bash | `/api/tools/bash` | Shell 命令执行 |
+| Git Push | `/api/tools/git_push` | 将工作区变更推送到远端 |
+| MCP Server | In-memory transport | CloudBase 工具和部署工具 |
+| Health | `/health` | 容器健康检查 |
 
-这两种模式最终都会影响用户是否能顺利通过 `requireUserEnv()` 的检查。
+### MCP Tool Proxy
 
-如果用户环境还没准备好，依赖 CloudBase 能力的接口会直接被阻断。
+Sandbox 内通过 MCP (Model Context Protocol) 向 Agent 提供工具能力：
 
-## 初始化与部署准备
+**动态工具** — 从 CloudBase mcporter 获取 schema，自动注册为 MCP tools：
+- 数据库操作（NoSQL CRUD、SQL 执行）
+- 存储操作（文件上传 / 删除）
+- 云函数操作（创建 / 更新 / 调用）
+- 域名管理、安全规则等
 
-除了运行时架构，当前项目还依赖一套明确的初始化准备流程。
+**静态工具：**
+- `publishMiniprogram` — 小程序构建与发布
+- `getDeployJobStatus` — 查询部署任务状态
 
-### 初始化与部署准备图
+### Workspace Persistence (Git Archive)
+
+工作区变更通过 Git 持久化到远端仓库：
+
+```
+Git Remote (GIT_ARCHIVE_REPO)
+├── branch: {envId}
+│   ├── {conversationId-1}/
+│   │   ├── src/
+│   │   └── package.json
+│   ├── {conversationId-2}/
+│   │   └── ...
+```
+
+- **分支策略**：每个用户环境 (`envId`) 对应一个分支
+- **目录策略**：每个会话 (`conversationId`) 对应分支下的一个目录
+- **推送方式**：通过 Sandbox 内的 `/api/tools/git_push` 执行
+- **清理方式**：通过 CNB Gateway API 删除远端目录或分支
+
+### Connector Management
+
+用户可配置额外的 MCP Server 连接器，在任务执行时注入 Agent：
+
+| Type | Description |
+| --- | --- |
+| `local` | 本地进程启动的 MCP Server |
+| `remote` | HTTP 远程 MCP Server |
+
+支持 OAuth 认证和环境变量注入，敏感数据加密存储。
+
+---
+
+## Deployment Module
+
+支持两种部署目标：
+
+### Web Deployment
+
+通过 CloudBase 静态托管发布 Web 应用：
+- Agent 将构建产物上传到 CloudBase Storage
+- 返回静态托管 URL
+
+### MiniProgram Deployment
+
+通过 MCP 工具 `publishMiniprogram` 发布微信小程序：
+- 管理小程序 AppId 和私钥
+- 触发 CI 构建
+- 返回预览二维码和页面路径
+- 通过 `getDeployJobStatus` 轮询发布状态
+
+Deployment 记录持久化到数据库，包含 URL、QR Code、标签和元数据。
+
+---
+
+## Admin Module
+
+管理后台提供平台治理能力，仅限 `role=admin` 的用户访问。
+
+### Capabilities
+
+| Feature | Description |
+| --- | --- |
+| User Management | 用户列表、创建、禁用 / 启用、角色设置、密码重置 |
+| Task Inspection | 全量任务查看、按用户筛选、消息详情 |
+| Environment Overview | 所有用户的 CloudBase 环境列表 |
+| Resource Proxy | 按 envId 代理访问 database / storage / functions / capi |
+| Audit Log | 管理员操作日志记录与查询 |
+
+### Resource Proxy
+
+管理员可通过 `/api/admin/proxy/:envId/*` 以指定用户环境的身份访问 CloudBase 资源，覆盖：
+- Database（集合与文档操作）
+- Storage（文件管理）
+- Functions（云函数调用）
+- CAPI（通用腾讯云 API）
+
+---
+
+## CloudBase Resource Management
+
+平台内置 CloudBase 资源管理能力，面向用户自己的云开发环境：
+
+| Resource | Capabilities |
+| --- | --- |
+| Database | 集合 CRUD、文档分页查询 / 增删改 |
+| Storage | 文件列表、上传 / 下载 / 删除、静态托管 |
+| Functions | 云函数列表、调用 |
+| CAPI | 通用腾讯云 API 代理 |
+
+`packages/dashboard` 提供独立的管理 UI，也可嵌入到主应用的管理后台中。
+
+---
+
+## Data Flow
+
+一次完整的任务执行流程：
 
 ```mermaid
-flowchart TD
-    A[init.sh] --> B[scripts/init.mjs]
-    B --> C[生成 .env.local]
-    B --> D[生成 packages/server/.env]
-    B --> E[CloudBase 凭证与 envId]
-    B --> F[CodeBuddy 认证配置]
-    B --> G[安装依赖]
-    B --> H[配置 TCR 镜像]
-    B --> I[初始化数据库]
-    H --> J[SCF Sandbox 运行镜像]
-    E --> K[CloudBase 运行时资源]
-    I --> L[服务端可启动]
-    J --> L
-    K --> L
+sequenceDiagram
+    participant User
+    participant Web
+    participant Server
+    participant Agent as Agent Service
+    participant Sandbox as SCF Sandbox
+    participant DB as CloudBase DB
+    participant Git as Git Archive
+
+    User->>Web: Create task with prompt
+    Web->>Server: POST /api/agent/chat
+    Server->>Server: authMiddleware + requireUserEnv
+    Server->>Agent: chatStream(prompt, options)
+    Agent->>Sandbox: Create or reuse sandbox
+    Sandbox-->>Agent: Health check OK
+    Agent->>Sandbox: Init workspace (inject credentials)
+    Agent->>Agent: Call LLM via CodeBuddy SDK
+
+    loop Agent execution
+        Agent->>Sandbox: Tool call (bash / file / mcp)
+        Sandbox-->>Agent: Tool result
+        Agent-->>Web: SSE event (text / tool / thinking)
+        Agent->>DB: Persist message
+    end
+
+    Agent->>Sandbox: Git archive workspace
+    Sandbox->>Git: git push
+    Agent-->>Web: SSE complete
+    Agent->>DB: Finalize messages
 ```
 
-如果缺少这些准备步骤，即使 Web 和 Server 代码完整，运行时能力也可能不完整，尤其是：
-- 用户环境绑定
-- Sandbox 镜像准备
-- CodeBuddy 认证
-- CloudBase 数据库访问
+---
 
-## 与现有深度文档的关系
+## Technology Stack
 
-本文档是总览，详细专题请继续阅读：
+| Layer | Technology |
+| --- | --- |
+| Frontend | React 19, Vite, Tailwind CSS 4, shadcn/ui, Jotai |
+| Backend | Hono, Node.js, Drizzle ORM |
+| Database | CloudBase DB (primary), SQLite (local fallback) |
+| AI | CodeBuddy SDK (`@tencent-ai/agent-sdk`), MCP |
+| Sandbox | CloudBase SCF, TCR container images |
+| Auth | JWE session, bcrypt, Arctic (OAuth) |
+| Persistence | CloudBase DB, local .jsonl, Git archive |
 
-- [Setup 指南](./setup.md)
-- [SCF Session 共享方案](./scf-session-sharing.md)
-- [定时任务云函数方案](./crontask-cloudfunction-plan.md)
+---
 
-如果你希望继续参考更偏“架构图组织方式”的文档，也可以直接阅读：
-- [Cloudflare VibeSDK Architecture Diagrams](https://github.com/cloudflare/vibesdk/blob/main/docs/architecture-diagrams.md)
+## Related Documents
 
-## 阅读建议
-
-如果你是第一次接触本项目，建议按以下顺序阅读：
-
-1. 先看根目录 `README.md`
-2. 再看 [Setup 指南](./setup.md)
-3. 然后阅读本文了解整体架构
-4. 最后按需查看 `scf-session-sharing.md` 等专题文档
+- [Setup Guide](./setup.md) — 初始化流程、环境变量、验证与排障
+- [SCF Session Sharing](./scf-session-sharing.md) — 沙箱会话共享方案
+- [Cron Task Plan](./crontask-cloudfunction-plan.md) — 定时任务云函数演进规划
+- [Cloudflare VibeSDK Architecture](https://github.com/cloudflare/vibesdk/blob/main/docs/architecture-diagrams.md) — 图示风格参考
