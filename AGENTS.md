@@ -192,7 +192,7 @@ Never expose these in logs or to the client:
 
 Only these variables should be exposed to the client (via `NEXT_PUBLIC_` prefix):
 - `NEXT_PUBLIC_AUTH_PROVIDERS` - Available auth providers
-- `NEXT_PUBLIC_GITHUB_CLIENT_ID` - GitHub OAuth client ID (public)
+- `GITHUB_CLIENT_ID` - GitHub OAuth client ID (public)
 
 ## Architecture Guidelines
 

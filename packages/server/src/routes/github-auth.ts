@@ -18,7 +18,7 @@ const githubAuth = new Hono<AppEnv>()
 
 // GET /api/auth/github/login - Redirect to GitHub OAuth for sign-in (no session required)
 githubAuth.get('/login', async (c) => {
-  const clientId = process.env.NEXT_PUBLIC_GITHUB_CLIENT_ID
+  const clientId = process.env.GITHUB_CLIENT_ID
   const origin = new URL(c.req.url).origin
   const redirectUri = `${origin}/api/auth/github/callback`
 
@@ -75,7 +75,7 @@ githubAuth.get('/signin', async (c) => {
     return c.redirect('/')
   }
 
-  const clientId = process.env.NEXT_PUBLIC_GITHUB_CLIENT_ID
+  const clientId = process.env.GITHUB_CLIENT_ID
   const origin = new URL(c.req.url).origin
   const redirectUri = `${origin}/api/auth/github/callback`
 
@@ -145,7 +145,7 @@ githubAuth.get('/callback', async (c) => {
     }
   }
 
-  const clientId = process.env.NEXT_PUBLIC_GITHUB_CLIENT_ID
+  const clientId = process.env.GITHUB_CLIENT_ID
   const clientSecret = process.env.GITHUB_CLIENT_SECRET
 
   if (!clientId || !clientSecret) {

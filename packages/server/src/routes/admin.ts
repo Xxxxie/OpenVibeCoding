@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { getDb } from '../db/index.js'
 import { requireAdmin, type AppEnv } from '../middleware/admin'
 import { issueTempCredentials } from '../middleware/auth.js'
-import { provisionUserResources } from '../cloudbase/provision.js'
+import { provisionUserResources, destroyProvisionedResources } from '../cloudbase/provision.js'
 import { persistenceService } from '../agent/persistence.service.js'
 import { nanoid } from 'nanoid'
 import bcrypt from 'bcryptjs'
@@ -259,6 +259,16 @@ admin.delete('/users/:userId', async (c) => {
     ipAddress: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
     userAgent: c.req.header('user-agent'),
   })
+
+  // Clean up cloud resources (CAM user, policy, CloudBase env) before deleting DB records
+  const resource = await db.userResources.findByUserId(userId)
+  if (resource) {
+    await destroyProvisionedResources({
+      camUsername: resource.camUsername,
+      policyId: resource.policyId,
+      envId: resource.envId,
+    })
+  }
 
   await db.users.deleteById(userId)
 

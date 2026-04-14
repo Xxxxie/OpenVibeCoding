@@ -190,9 +190,12 @@ export async function provisionUserResources(userId: string, username: string): 
   const { camClient, tcbClient } = getClients()
 
   // 步骤1：创建 CAM 子账号
-  const camUsername = `oc_${userId.substring(0, 20)}`
+  const camUsername = `vibe_${userId.substring(0, 20)}`
   let subAccountUin: number
   let password: string | undefined
+  // 步骤2：创建或获取 API 密钥
+  let camSecretId: string = ''
+  let camSecretKey: string = ''
 
   try {
     console.log('[provision] Checking existing CAM user')
@@ -205,9 +208,10 @@ export async function provisionUserResources(userId: string, username: string): 
 
       await (camClient as any).UpdateUser({
         Name: camUsername,
-        ConsoleLogin: 1,
+        ConsoleLogin: 0,
         Password: password,
         NeedResetPassword: 0,
+        UseApi: 1,
       })
     } catch {
       password = undefined
@@ -219,31 +223,24 @@ export async function provisionUserResources(userId: string, username: string): 
     try {
       const addUserResp = await (camClient as any).AddUser({
         Name: camUsername,
-        Remark: 'coder user',
-        ConsoleLogin: 1,
+        Remark: `coder user ${userId} ${username}`,
+        ConsoleLogin: 0,
         Password: password,
         NeedResetPassword: 0,
-        UseApi: 0,
+        UseApi: 1,
       })
       subAccountUin = addUserResp.Uin
+      if (addUserResp.SecretId) {
+        camSecretId = addUserResp.SecretId
+        camSecretKey = addUserResp.SecretKey
+      }
     } catch (e) {
       console.error('[provision] CAM user creation failed:', e)
       throw e
     }
   }
 
-  // 步骤2：创建或获取 API 密钥
-  let camSecretId: string
-  let camSecretKey: string | undefined
-
-  console.log('[provision] Listing access keys')
-  const listKeysResp = await (camClient as any).ListAccessKeys({ TargetUin: subAccountUin })
-  const existingKeys: any[] = listKeysResp.AccessKeys || []
-  const activeKey = existingKeys.find((k: any) => k.Status === 'Active')
-
-  if (activeKey) {
-    camSecretId = activeKey.AccessKeyId
-  } else {
+  if (!camSecretId) {
     console.log('[provision] Creating access key')
     const createKeyResp = await (camClient as any).CreateAccessKey({ TargetUin: subAccountUin })
     camSecretId = createKeyResp.AccessKey.AccessKeyId
@@ -305,13 +302,12 @@ export async function provisionUserResources(userId: string, username: string): 
 }
 
 /**
- * 回滚 provisionUserResources 创建的腾讯云资源
- * 尽力清理，单项失败不阻塞其他清理操作
+ * 回滚 provisionUserResources 创建的腾讯云资源（注册失败时使用）
+ * 不销毁环境，仅清理 CAM 资源
  */
 export async function rollbackProvisionedResources(result: Partial<ProvisionResult>): Promise<void> {
   const { camClient } = getClients()
 
-  // 删除 CAM 策略
   if (result.policyId) {
     try {
       await (camClient as any).DeletePolicy({ PolicyId: [result.policyId] })
@@ -320,7 +316,6 @@ export async function rollbackProvisionedResources(result: Partial<ProvisionResu
     }
   }
 
-  // 删除 CAM 子账号（会级联删除其 API 密钥）
   if (result.camUsername) {
     try {
       await (camClient as any).DeleteUser({ Name: result.camUsername, Force: 1 })
@@ -328,13 +323,48 @@ export async function rollbackProvisionedResources(result: Partial<ProvisionResu
       // best-effort
     }
   }
+}
 
-  // 注意：CloudBase 环境不在这里删除，因为环境创建后可能有费用产生，
-  // 需要管理员手动处理。如需自动删除可取消下方注释。
-  // if (result.envId) {
-  //   try {
-  //     const { tcbClient } = getClients()
-  //     await (tcbClient as any).DestroyEnv({ EnvId: result.envId })
-  //   } catch { /* best-effort */ }
-  // }
+/**
+ * 删除用户时完整清理腾讯云资源（CAM 子用户 + 策略 + 云开发环境）
+ * 尽力清理，单项失败不阻塞其他操作
+ */
+export async function destroyProvisionedResources(resource: {
+  camUsername?: string | null
+  policyId?: number | null
+  envId?: string | null
+}): Promise<void> {
+  const { camClient, tcbClient } = getClients()
+
+  // 删除 CAM 策略
+  if (resource.policyId) {
+    try {
+      await (camClient as any).DeletePolicy({ PolicyId: [resource.policyId] })
+      console.log('[provision] CAM policy deleted')
+    } catch {
+      // best-effort
+    }
+  }
+
+  // 删除 CAM 子账号（级联删除 API 密钥）
+  if (resource.camUsername) {
+    try {
+      await (camClient as any).DeleteUser({ Name: resource.camUsername, Force: 1 })
+      console.log('[provision] CAM user deleted')
+    } catch {
+      // best-effort
+    }
+  }
+
+  // 销毁 CloudBase 环境
+  if (resource.envId && resource.envId !== process.env.TCB_ENV_ID) {
+    // 不删除支撑环境（shared 模式下 envId === TCB_ENV_ID）
+    try {
+      await (tcbClient as any).DestroyEnv({ EnvId: resource.envId })
+      console.log('[provision] CloudBase env destroyed')
+    } catch (e) {
+      console.log('[provision] CloudBase env destroy error:', e)
+      // best-effort
+    }
+  }
 }
