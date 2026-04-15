@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, appendFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { query, ExecutionError } from '@tencent-ai/agent-sdk'
@@ -335,7 +335,7 @@ export class CloudbaseAgentService {
   /**
    * 将内部 AgentCallbackMessage 转换为 ACP ExtendedSessionUpdate 格式
    */
-  private convertToSessionUpdate(msg: AgentCallbackMessage, sessionId: string): ExtendedSessionUpdate | null {
+  public static convertToSessionUpdate(msg: AgentCallbackMessage, sessionId: string): ExtendedSessionUpdate | null {
     if (msg.type === 'text' && msg.content) {
       return {
         sessionUpdate: 'agent_message_chunk',
@@ -357,6 +357,14 @@ export class CloudbaseAgentService {
         status: 'in_progress',
         input: msg.input,
         assistantMessageId: msg.assistantMessageId,
+      } as ExtendedSessionUpdate
+    }
+    if (msg.type === 'tool_input_update') {
+      return {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: msg.id || '',
+        status: 'in_progress',
+        input: msg.input,
       } as ExtendedSessionUpdate
     }
     if (msg.type === 'tool_result') {
@@ -471,7 +479,7 @@ export class CloudbaseAgentService {
       envId,
       userId,
       userCredentials,
-      maxTurns = 50,
+      maxTurns = 100,
       cwd,
       askAnswers,
       toolConfirmation,
@@ -632,9 +640,10 @@ export class CloudbaseAgentService {
           : { ...msg, id: msg.id || assistantMessageId, assistantMessageId }
 
       // 1. Always persist ACP event to DB via EventBuffer
-      const acpEvent = this.convertToSessionUpdate(enrichedMsg, conversationId)
+      const acpEvent = CloudbaseAgentService.convertToSessionUpdate(enrichedMsg, conversationId)
+      let eventSeq: number | undefined
       if (acpEvent) {
-        eventBuffer.push(acpEvent)
+        eventSeq = eventBuffer.pushAndGetSeq(acpEvent)
       }
 
       // 2. Persist deployment records (side-effect, fire-and-forget)
@@ -647,7 +656,7 @@ export class CloudbaseAgentService {
       // 3. Forward to live SSE callback if present (ignore errors on disconnect)
       if (liveCallback) {
         try {
-          liveCallback(enrichedMsg)
+          liveCallback(enrichedMsg, eventSeq)
         } catch {
           // SSE disconnected, ignore
         }
@@ -970,7 +979,7 @@ export class CloudbaseAgentService {
           stderr: (data: string) => {
             console.error('[Agent CLI stderr]', data.trim())
           },
-          // disallowedTools: ['AskUserQuestion'],
+          disallowedTools: ['AskUserQuestion', 'EnterPlanMode'],
         },
       }
 
@@ -990,8 +999,21 @@ export class CloudbaseAgentService {
 
       try {
         console.log('[Agent] starting for-await loop...')
+
+        // DEBUG: log all messages from messageLoop to a file
+        const debugMsgLogDir = path.resolve(actualCwd, 'debug-jsonl')
+        mkdirSync(debugMsgLogDir, { recursive: true })
+        const debugMsgLogPath = path.join(debugMsgLogDir, `${conversationId}_messageloop_${Date.now()}.jsonl`)
+
         messageLoop: for await (const message of q) {
           console.log('[Agent] message type:', message.type, JSON.stringify(message).slice(0, 300))
+
+          // DEBUG: write full message to log file
+          try {
+            appendFileSync(debugMsgLogPath, JSON.stringify({ ts: Date.now(), ...message }) + '\n')
+          } catch {
+            // ignore debug log errors
+          }
 
           // Tool result (user message) means tool execution completed — resume timeout
           if (message.type === 'user') {
@@ -1335,7 +1357,8 @@ export class CloudbaseAgentService {
       try {
         const parsedInput = JSON.parse(toolInfo.inputJson)
         toolInfo.input = parsedInput
-        callback({ type: 'tool_use', name: toolInfo.name, input: parsedInput, id: toolId })
+        // Send input update (not a new tool_call) so frontend can merge
+        callback({ type: 'tool_input_update', name: toolInfo.name, input: parsedInput, id: toolId })
       } catch {
         // ignore
       }

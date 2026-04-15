@@ -77,3 +77,6 @@ packages/dashboard/vite.config.d.ts
 packages/dashboard/vite.config.js
 dist
 cloudbaserc.json
+
+# debug JSONL snapshots
+debug-jsonl/

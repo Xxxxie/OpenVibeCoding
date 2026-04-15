@@ -176,6 +176,23 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
         }
 
         case 'tool_call_update': {
+          // Input update (from content_block_stop): merge input into existing tool_call part
+          if (u.input !== undefined && u.result === undefined) {
+            setMessages((prev) =>
+              prev.map((m) => {
+                if (m.id !== assistantMsgId) return m
+                const prevParts = m.parts || []
+                return {
+                  ...m,
+                  parts: prevParts.map((p) =>
+                    p.type === 'tool_call' && p.toolCallId === u.toolCallId ? { ...p, input: u.input } : p,
+                  ),
+                }
+              }),
+            )
+            break
+          }
+          // Result update: add tool_result part
           setMessages((prev) =>
             prev.map((m) => {
               if (m.id !== assistantMsgId) return m
