@@ -1,4 +1,4 @@
-import { mkdirSync, appendFileSync } from 'node:fs'
+import { mkdirSync, appendFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { query, ExecutionError } from '@tencent-ai/agent-sdk'
@@ -277,8 +277,11 @@ function createToolCallTracker(): ToolCallTracker {
  */
 function getToolOverridePath(): string {
   const __dirname = path.dirname(fileURLToPath(import.meta.url))
-  // Use pre-compiled CJS file since CLI subprocess can't load .ts directly
-  return path.resolve(__dirname, '../../dist/sandbox/tool-override.cjs')
+  // In dev: __dirname = src/agent/ → ../../dist/sandbox/tool-override.cjs
+  // In prod (bundled): __dirname = dist/ → ./sandbox/tool-override.cjs
+  const devPath = path.resolve(__dirname, '../../dist/sandbox/tool-override.cjs')
+  const prodPath = path.resolve(__dirname, 'sandbox/tool-override.cjs')
+  return existsSync(prodPath) ? prodPath : devPath
 }
 
 // ─── System Prompt Builder ─────────────────────────────────────────────────
