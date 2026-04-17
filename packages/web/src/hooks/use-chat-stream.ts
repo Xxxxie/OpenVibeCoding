@@ -30,6 +30,10 @@ interface UseChatStreamOptions {
   wasAtBottomRef?: React.RefObject<boolean>
 }
 
+// ─── Return type (exported for parent components) ─────────────────────
+
+export type ChatStreamReturn = ReturnType<typeof useChatStream>
+
 // ─── Hook ─────────────────────────────────────────────────────────────
 
 export function useChatStream(taskId: string, options: UseChatStreamOptions = {}) {
@@ -226,6 +230,10 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
             toolName: u.toolName,
             input: u.input || {},
           })
+          break
+
+        case 'ask_user':
+          phaseRef.current = 'waiting_for_interaction'
           break
 
         case 'artifact':
@@ -626,6 +634,7 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
   /** Reconnect to an ongoing agent stream after page refresh. */
   const reconnectToStream = useCallback(
     async (assistantMsgId: string) => {
+      if (phaseRef.current !== 'idle') return
       // Add a placeholder agent message if not already present
       setMessages((prev) => {
         if (prev.some((m) => m.id === assistantMsgId)) return prev
@@ -679,6 +688,9 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
     // Phase (for fetchMessages guard)
     canFetchMessages,
     phaseRef,
+
+    // Options ref (allows child components to inject scrollToBottom etc.)
+    optionsRef,
 
     // Operations
     sendInitialPrompt,

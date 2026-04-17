@@ -46,8 +46,7 @@ export function TaskChat({
   taskId,
   task,
   onStreamComplete,
-  initialPrompt,
-  onInitialPromptConsumed,
+  chatStream: externalChatStream,
   readOnly = false,
   messagesApiBase = '',
 }: TaskChatProps) {
@@ -102,13 +101,27 @@ export function TaskChat({
   }, [])
 
   // ─── Chat stream hook ──────────────────────────────────────────────
+  // Use externally-provided chatStream (hoisted to TaskDetails) if available,
+  // otherwise create our own (backwards-compatible for readOnly / admin views).
 
-  const chat = useChatStream(taskId, {
+  const internalChatStream = useChatStream(taskId, {
     onStreamComplete,
     onDeploymentDetected: () => fetchDeployments(false),
     scrollToBottom,
     wasAtBottomRef,
   })
+  const chat = externalChatStream || internalChatStream
+
+  // When using external chatStream, inject scroll/deployment callbacks
+  // so the hoisted hook can trigger them (optionsRef is updated every render).
+  if (externalChatStream) {
+    externalChatStream.optionsRef.current = {
+      ...externalChatStream.optionsRef.current,
+      scrollToBottom,
+      wasAtBottomRef,
+      onDeploymentDetected: () => fetchDeployments(false),
+    }
+  }
 
   const {
     messages,
@@ -141,7 +154,10 @@ export function TaskChat({
   const fetchMessages = useCallback(
     async (showLoading = true) => {
       // Don't overwrite optimistic messages during streaming or interaction wait
-      if (!canFetchMessages()) return
+      if (!canFetchMessages()) {
+        if (showLoading) setIsLoading(false)
+        return
+      }
       if (showLoading) setIsLoading(true)
       setError(null)
 
@@ -157,7 +173,11 @@ export function TaskChat({
           setMessages(data.messages)
           // Auto-reconnect if the latest agent message is still pending (agent running in background)
           const latestAgent = [...data.messages].reverse().find((m: any) => m.role === 'agent')
-          if (latestAgent && (latestAgent.status === 'pending' || latestAgent.status === 'streaming')) {
+          if (
+            latestAgent &&
+            (latestAgent.status === 'pending' || latestAgent.status === 'streaming') &&
+            canFetchMessages()
+          ) {
             reconnectToStream(latestAgent.id)
           }
         } else {
@@ -316,16 +336,6 @@ export function TaskChat({
     const interval = setInterval(() => setCurrentTime(Date.now()), 1000)
     return () => clearInterval(interval)
   }, [task.status])
-
-  // ─── Initial prompt ────────────────────────────────────────────────
-
-  const initialTriggered = useRef(false)
-  useEffect(() => {
-    if (readOnly || !initialPrompt || initialTriggered.current) return
-    initialTriggered.current = true
-    onInitialPromptConsumed?.()
-    sendInitialPrompt(initialPrompt)
-  }, [initialPrompt, onInitialPromptConsumed, sendInitialPrompt, readOnly])
 
   // ─── Handlers ──────────────────────────────────────────────────────
 
@@ -894,7 +904,11 @@ export function TaskChat({
                   <div key={agentMessage.id} className="mt-4">
                     <div className="space-y-1">
                       <div className="text-xs text-muted-foreground px-2">
-                        {!agentMessage.content.trim() && (task.status === 'processing' || task.status === 'pending') ? (
+                        {!agentMessage.content.trim() &&
+                        !agentMessage.parts?.some(
+                          (p) => p.type === 'tool_call' || p.type === 'thinking' || (p.type === 'text' && p.text),
+                        ) &&
+                        (task.status === 'processing' || task.status === 'pending') ? (
                           <div className="opacity-50">
                             <div className="italic">Generating response...</div>
                             <div className="text-right font-mono opacity-70 mt-1">

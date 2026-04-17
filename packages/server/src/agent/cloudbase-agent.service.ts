@@ -284,6 +284,30 @@ function getToolOverridePath(): string {
   return existsSync(prodPath) ? prodPath : devPath
 }
 
+/**
+ * Get the path to the skill-loader-override module for injection
+ */
+function getSkillLoaderOverridePath(): string {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url))
+  // In dev: __dirname = src/agent/ → ../../dist/util/skill-loader-override.cjs
+  // In prod (bundled): __dirname = dist/ → ./util/skill-loader-override.cjs
+  const devPath = path.resolve(__dirname, '../../dist/util/skill-loader-override.cjs')
+  const prodPath = path.resolve(__dirname, 'util/skill-loader-override.cjs')
+  return existsSync(prodPath) ? prodPath : devPath
+}
+
+/**
+ * Get the path to the bundled skills directory
+ */
+function getBundledSkillsDir(): string {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url))
+  // In dev: __dirname = src/agent/ → ../../skills/
+  // In prod (bundled): __dirname = dist/ → ../skills/
+  const devPath = path.resolve(__dirname, '../../skills')
+  const prodPath = path.resolve(__dirname, '../skills')
+  return existsSync(prodPath) ? prodPath : devPath
+}
+
 // ─── System Prompt Builder ─────────────────────────────────────────────────
 
 function buildAppendPrompt(sandboxCwd?: string, conversationId?: string, envId?: string): string {
@@ -635,6 +659,11 @@ export class CloudbaseAgentService {
       preSavedUserRecordId = preSaved.userRecordId
     }
 
+    // DEBUG: ACP SSE event log path (shared with message loop debug dir)
+    const debugAcpLogDir = path.resolve(actualCwd, 'debug-jsonl')
+    mkdirSync(debugAcpLogDir, { recursive: true })
+    const debugAcpLogPath = path.join(debugAcpLogDir, `${conversationId}_acp_${Date.now()}.jsonl`)
+
     const wrappedCallback: AgentCallback = (msg) => {
       // Enrich message with assistantMessageId
       const enrichedMsg =
@@ -647,6 +676,13 @@ export class CloudbaseAgentService {
       let eventSeq: number | undefined
       if (acpEvent) {
         eventSeq = eventBuffer.pushAndGetSeq(acpEvent)
+      }
+
+      // DEBUG: log raw AgentCallbackMessage and converted ACP event
+      try {
+        appendFileSync(debugAcpLogPath, JSON.stringify({ ts: Date.now(), raw: enrichedMsg, acp: acpEvent }) + '\n')
+      } catch {
+        // ignore
       }
 
       // 2. Persist deployment records (side-effect, fire-and-forget)
@@ -669,6 +705,7 @@ export class CloudbaseAgentService {
     // ── 获取 SCF 沙箱 ────────────────────────────────────────────────
     let sandboxInstance: SandboxInstance | null = null
     let toolOverrideConfig: { url: string; headers: Record<string, string> } | null = null
+    let detectedSandboxCwd: string | undefined
 
     const sandboxEnabled = process.env.TCB_ENV_ID && process.env.SCF_SANDBOX_IMAGE_URI
 
@@ -698,6 +735,7 @@ export class CloudbaseAgentService {
             conversationId,
           )
           if (sandboxCwd) {
+            detectedSandboxCwd = sandboxCwd
             wrappedCallback({ type: 'session', sandboxCwd } as any)
             console.log(`[Agent] Sandbox workspace initialized, cwd: ${sandboxCwd}`)
           }
@@ -807,10 +845,17 @@ export class CloudbaseAgentService {
         : { persistSession: true, sessionId: conversationId }
 
       // Build env vars for tool override
-
       if (toolOverrideConfig) {
         envVars.CODEBUDDY_TOOL_OVERRIDE = getToolOverridePath()
         envVars.CODEBUDDY_TOOL_OVERRIDE_CONFIG = JSON.stringify(toolOverrideConfig)
+      }
+
+      // Skill loader override: load bundled skills + project/user skills
+      envVars.CODEBUDDY_SKILL_LOADER_OVERRIDE = getSkillLoaderOverridePath()
+      envVars.CODEBUDDY_BUNDLED_SKILLS_DIR = getBundledSkillsDir()
+      if (sandboxInstance && detectedSandboxCwd) {
+        // Pass sandbox cwd so skill-loader can scan remote skills dirs
+        envVars.CODEBUDDY_SANDBOX_CWD = detectedSandboxCwd
       }
 
       // Build MCP servers config - pass the SDK-wrapped McpServer to query()
@@ -1062,6 +1107,7 @@ export class CloudbaseAgentService {
             }
             case 'assistant':
               this.handleToolNotFoundErrors(message, tracker, wrappedCallback)
+              this.handleAssistantToolUseInputs(message, tracker, wrappedCallback)
               break
             case 'result':
               wrappedCallback({
@@ -1575,6 +1621,31 @@ export class CloudbaseAgentService {
           tracker.pendingToolCalls.delete(toolUseId)
           break
         }
+      }
+    }
+  }
+
+  /**
+   * 处理 assistant message 中 tool_use 块的完整 input。
+   *
+   * GLM 等非 Anthropic 模型不通过 content_block_delta / input_json_delta 流式传输工具参数，
+   * 而是在 content_block_start 时 input 为空（{}），然后在 assistant message 里包含完整 input。
+   * 此方法将完整 input 通过 tool_input_update 事件发送给前端，使前端能正确展示工具参数。
+   */
+  private handleAssistantToolUseInputs(msg: any, tracker: ToolCallTracker, callback: AgentCallback): void {
+    const content = msg.message?.content
+    if (!Array.isArray(content)) return
+    for (const block of content) {
+      if (block.type !== 'tool_use') continue
+      const toolId = block.id
+      if (!toolId) continue
+      // Only send input update if we have actual input (non-empty object) and the
+      // pending tool call still has an empty input (i.e. no input_json_delta was received)
+      const pendingTool = tracker.pendingToolCalls.get(toolId)
+      const hasInput = block.input && typeof block.input === 'object' && Object.keys(block.input).length > 0
+      if (hasInput && pendingTool && Object.keys(pendingTool.input).length === 0) {
+        pendingTool.input = block.input
+        callback({ type: 'tool_input_update', name: block.name || pendingTool.name, input: block.input, id: toolId })
       }
     }
   }
