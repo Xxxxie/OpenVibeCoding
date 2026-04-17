@@ -143,6 +143,7 @@ export function TaskChat({
     answerQuestion: chatAnswerQuestion,
     confirmTool: chatConfirmTool,
     reconnectToStream,
+    cancelSession,
   } = chat
 
   // useEffect(()=>{
@@ -389,16 +390,8 @@ export function TaskChat({
   const handleStopTask = async () => {
     setIsStopping(true)
     try {
-      const response = await fetch(`/api/tasks/${taskId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop' }),
-      })
-      if (response.ok) toast.success('Task stopped successfully!')
-      else {
-        const err = await response.json()
-        toast.error(err.error || 'Failed to stop task')
-      }
+      await cancelSession()
+      toast.success('Task stopped successfully!')
     } catch {
       toast.error('Failed to stop task')
     } finally {

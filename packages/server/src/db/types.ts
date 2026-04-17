@@ -47,6 +47,9 @@ export interface Task {
   error: string | null
   branchName: string | null
   sandboxId: string | null
+  sandboxSessionId: string | null
+  sandboxCwd: string | null
+  sandboxMode: string | null
   agentSessionId: string | null
   sandboxUrl: string | null
   previewUrl: string | null

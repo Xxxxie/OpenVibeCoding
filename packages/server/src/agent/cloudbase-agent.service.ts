@@ -518,7 +518,46 @@ export class CloudbaseAgentService {
 
     const userContext = { envId: envId || '', userId: userId || 'anonymous' }
 
-    const actualCwd = cwd || `/tmp/workspace/${userContext.envId}/${conversationId}`
+    // Read sandbox config from task record (written at creation time)
+    // Historical tasks missing these fields are backfilled as 'shared' mode
+    let taskSandboxMode: string | null = null
+    let taskSandboxSessionId: string | null = null
+    let taskSandboxCwd: string | null = null
+    try {
+      const taskRecord = await getDb().tasks.findById(conversationId)
+      taskSandboxMode = taskRecord?.sandboxMode || null
+      taskSandboxSessionId = taskRecord?.sandboxSessionId || null
+      taskSandboxCwd = taskRecord?.sandboxCwd || null
+
+      // Backfill missing sandbox config for historical tasks (default to 'shared')
+      if (!taskSandboxMode || !taskSandboxSessionId || !taskSandboxCwd) {
+        taskSandboxMode = taskSandboxMode || 'shared'
+        taskSandboxSessionId =
+          taskSandboxSessionId || (taskSandboxMode === 'shared' ? userContext.envId : conversationId)
+        taskSandboxCwd =
+          taskSandboxCwd ||
+          (taskSandboxMode === 'shared'
+            ? `/tmp/workspace/${userContext.envId}/${conversationId}`
+            : `/tmp/workspace/${conversationId}`)
+        await getDb().tasks.update(conversationId, {
+          sandboxMode: taskSandboxMode as 'shared' | 'isolated',
+          sandboxSessionId: taskSandboxSessionId,
+          sandboxCwd: taskSandboxCwd,
+          updatedAt: Date.now(),
+        })
+      }
+    } catch {
+      // Non-critical
+    }
+
+    const sandboxMode = taskSandboxMode || (process.env.WORKSPACE_ISOLATION === 'isolated' ? 'isolated' : 'shared')
+    const sandboxSessionId = taskSandboxSessionId || (sandboxMode === 'shared' ? userContext.envId : conversationId)
+    const defaultCwd =
+      sandboxMode === 'shared'
+        ? `/tmp/workspace/${userContext.envId}/${conversationId}`
+        : `/tmp/workspace/${conversationId}`
+
+    const actualCwd = cwd || taskSandboxCwd || defaultCwd
     mkdirSync(actualCwd, { recursive: true })
 
     // ── 创建 EventBuffer 用于持久化 ACP 事件 ─────────────────────────
@@ -713,6 +752,8 @@ export class CloudbaseAgentService {
       try {
         sandboxInstance = await scfSandboxManager.getOrCreate(conversationId, userContext.envId, {
           mode: 'shared',
+          workspaceIsolation: sandboxMode as 'shared' | 'isolated',
+          sandboxSessionId,
         })
 
         toolOverrideConfig = await sandboxInstance.getToolOverrideConfig()

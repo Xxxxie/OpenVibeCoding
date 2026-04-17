@@ -662,6 +662,28 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
     [enterStreaming, exitStreaming, readSSEStream, setMessages, taskId],
   )
 
+  /** Cancel the current session/agent run via ACP. */
+  const cancelSession = useCallback(async () => {
+    try {
+      await fetch('/api/agent/acp', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'session/cancel',
+          id: Date.now(),
+          params: { sessionId: taskId },
+        }),
+      })
+      phaseRef.current = 'idle'
+      setIsSending(false)
+      setIsStreamingResponse(false)
+    } catch (err) {
+      console.error('Failed to cancel session:', err)
+    }
+  }, [taskId])
+
   // ════════════════════════════════════════════════════════════════════
   // Public API
   // ════════════════════════════════════════════════════════════════════
@@ -698,5 +720,6 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
     answerQuestion,
     confirmTool,
     reconnectToStream,
+    cancelSession,
   }
 }

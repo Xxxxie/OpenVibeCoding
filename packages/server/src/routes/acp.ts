@@ -640,11 +640,19 @@ async function handleSessionCancel(
 
   const { envId, userId, credentials: userCredentials } = c.get('userEnv')!
 
-  if (sessionId && envId) {
-    // 获取最新消息并更新状态为 cancel
-    const latestStatus = await persistenceService.getLatestRecordStatus(sessionId, userId, envId)
-    if (latestStatus && (latestStatus.status === 'pending' || latestStatus.status === 'streaming')) {
-      await persistenceService.updateRecordStatus(latestStatus.recordId, 'cancel')
+  if (sessionId) {
+    // Abort the running agent process
+    const run = getAgentRun(sessionId)
+    if (run && run.status === 'running') {
+      run.abortController.abort()
+    }
+
+    if (envId) {
+      // Update DB record status to cancel
+      const latestStatus = await persistenceService.getLatestRecordStatus(sessionId, userId, envId)
+      if (latestStatus && (latestStatus.status === 'pending' || latestStatus.status === 'streaming')) {
+        await persistenceService.updateRecordStatus(latestStatus.recordId, 'cancel')
+      }
     }
   }
 
