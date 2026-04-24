@@ -17,7 +17,10 @@ import type { ExtendedSessionUpdate, PermissionAction, AgentPermissionMode } fro
 import type { TaskMessage, AskUserQuestionData, ToolConfirmData, DeploymentInfo, ArtifactInfo } from '@/types/task-chat'
 import { planModeAtomFamily } from '@/lib/atoms/plan-mode'
 import { AcpClient } from '@/lib/acp'
-import { applySessionUpdate } from './apply-session-update'
+import { applySessionUpdate, type AgentPhaseInfo } from './apply-session-update'
+
+/** Agent 执行阶段的空闲态;Hook 初始化与 turn 结束时复位用 */
+const IDLE_PHASE: AgentPhaseInfo = { phase: null, timestamp: 0 }
 
 // ─── Stream Phase ─────────────────────────────────────────────────────
 
@@ -74,6 +77,13 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
   //   · planContent + toolCallId 用于回显审批卡片
   const [planMode, setPlanMode] = useAtom(planModeAtomFamily(taskId))
 
+  // ── Agent phase state (P4) ──
+  //   · 服务端在关键边界推送 `sessionUpdate: 'agent_phase'` 事件
+  //   · applySessionUpdate 内调用 setAgentPhase 更新
+  //   · phase === null 表示 idle,UI 不展示指示器
+  //   · 本 state 完全独立于 phaseRef (phaseRef 控制 idle/streaming/waiting 三态交互流)
+  const [agentPhase, setAgentPhase] = useState<AgentPhaseInfo>(IDLE_PHASE)
+
   // ── Side-effect data from stream ──
   const [deploymentNotifications, setDeploymentNotifications] = useState<DeploymentInfo[]>([])
   const [artifacts, setArtifacts] = useState<ArtifactInfo[]>([])
@@ -115,6 +125,9 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
     }
     setIsSending(false)
     setIsStreamingResponse(false)
+    // P4: turn 结束(无论正常完成 / 等待交互)都把 agentPhase 复位,
+    // 避免上一轮的 "执行 Bash" 之类的指示器残留到下一轮启动前。
+    setAgentPhase(IDLE_PHASE)
     if (!wasWaiting) {
       optionsRef.current.onStreamComplete?.()
     }
@@ -138,6 +151,7 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
         setArtifacts,
         setDeploymentNotifications,
         setPlanMode,
+        setAgentPhase,
         clearQuestionState,
       })
     },
@@ -427,6 +441,10 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
     // Plan mode (P2)
     planMode,
     setPlanMode,
+
+    // Agent phase (P4)
+    agentPhase,
+    setAgentPhase,
 
     // Phase (for fetchMessages guard)
     canFetchMessages,
