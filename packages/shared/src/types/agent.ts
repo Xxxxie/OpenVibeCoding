@@ -165,6 +165,16 @@ export type AcpContentBlock = AcpTextBlock | AcpImageBlock
 export type PermissionAction = 'allow' | 'allow_always' | 'deny' | 'reject_and_exit_plan'
 
 /**
+ * Plan 模式开关
+ *
+ * - `plan`: 进入计划模式 —— 模型仅规划、不执行写工具；通过 ExitPlanMode 工具呈交计划
+ * - `default`: 普通模式 —— 与当前行为一致
+ *
+ * 与 Claude Agent SDK `PermissionMode` 子集保持对齐，避免引入更多（如 acceptEdits/bypass）造成安全风险。
+ */
+export type AgentPermissionMode = 'default' | 'plan'
+
+/**
  * session/prompt 方法参数
  */
 export interface SessionPromptParams {
@@ -177,6 +187,15 @@ export interface SessionPromptParams {
     interruptId: string
     payload: { action: PermissionAction }
   }
+  /**
+   * Plan 模式开关（P2 新增）
+   *
+   * 用于在 resume 场景下切换会话级 Plan 模式:
+   * - 当 `toolConfirmation.payload.action === 'reject_and_exit_plan'` 时前端应传 `permissionMode: 'default'`
+   *   以通知服务端退出计划模式
+   * - 用户主动开启 Plan 模式时传 `permissionMode: 'plan'`
+   */
+  permissionMode?: AgentPermissionMode
 }
 
 /**
@@ -478,4 +497,11 @@ export interface AgentOptions {
   /** 指定模型 */
   model?: string
   mode?: string
+  /**
+   * Plan 模式开关
+   *
+   * - `plan`: 进入计划模式，agent 仅规划、不执行写操作（通过 `ExitPlanMode` 呈交计划给用户）
+   * - `default` | undefined: 普通模式（沿用原行为）
+   */
+  permissionMode?: AgentPermissionMode
 }

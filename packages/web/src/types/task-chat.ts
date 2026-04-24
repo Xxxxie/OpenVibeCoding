@@ -53,6 +53,11 @@ export interface ToolConfirmData {
   assistantMessageId: string
   toolName: string
   input: Record<string, unknown>
+  /**
+   * ExitPlanMode 工具专用：模型呈交的计划内容（Markdown）。
+   * 普通写工具该字段为空。用于驱动 PlanModeCard 分支渲染。
+   */
+  planContent?: string
 }
 
 // ─── Component Props ──────────────────────────────────────────────────

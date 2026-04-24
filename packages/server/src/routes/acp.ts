@@ -395,6 +395,9 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
       model: selectedModel,
       askAnswers: params.askAnswers,
       toolConfirmation: params.toolConfirmation,
+      // P2: 透传 Plan 模式开关。当前端在开启 Plan 模式下发起 prompt 时传 'plan'，
+      // 或 ExitPlanMode 用户选择 reject_and_exit_plan 后下一轮传 'default' 恢复普通模式。
+      permissionMode: params.permissionMode,
     })
   })
 }

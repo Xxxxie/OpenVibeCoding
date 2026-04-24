@@ -52,6 +52,11 @@ export interface ToolConfirmUpdate {
   assistantMessageId: string
   toolName: string
   input: Record<string, unknown>
+  /**
+   * ExitPlanMode 工具专用：模型呈交的计划内容（Markdown 文本）。
+   * 其它工具此字段为空。前端用于在 PlanModeCard 中高亮渲染。
+   */
+  planContent?: string
 }
 
 export interface ArtifactUpdate {
@@ -86,7 +91,7 @@ export type {
 }
 
 // Re-export permission action type for frontend single-point import
-export type { PermissionAction } from './agent'
+export type { PermissionAction, AgentPermissionMode } from './agent'
 
 // ─── Stream Event Persistence Types ──────────────────────────────────
 

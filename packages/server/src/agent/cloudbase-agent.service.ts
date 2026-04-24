@@ -409,12 +409,25 @@ export class CloudbaseAgentService {
       } as ExtendedSessionUpdate
     }
     if (msg.type === 'tool_confirm') {
+      const input = (msg.input as Record<string, unknown>) || {}
+      const toolName = msg.name || ''
+      // P2: ExitPlanMode 工具额外提取计划内容为 planContent，供前端 PlanModeCard 渲染
+      // Claude Agent SDK 的 ExitPlanMode input schema 是开放的，不同版本/模型下字段名不一，
+      // 这里仅做"能提取到字符串就注入"的最小处理；完整的多字段兜底在前端 plan-content.ts。
+      let planContent: string | undefined
+      if (toolName === 'ExitPlanMode') {
+        if (typeof input.plan === 'string' && input.plan.trim()) {
+          planContent = input.plan as string
+        }
+        // 其它字段形态由前端 extractPlanContent 统一处理，服务端不重复实现
+      }
       return {
         sessionUpdate: 'tool_confirm',
         toolCallId: msg.id || '',
         assistantMessageId: msg.assistantMessageId || '',
-        toolName: msg.name || '',
-        input: (msg.input as Record<string, unknown>) || {},
+        toolName,
+        input,
+        ...(planContent !== undefined ? { planContent } : {}),
       } as ExtendedSessionUpdate
     }
     if (msg.type === 'result') {
@@ -496,6 +509,7 @@ export class CloudbaseAgentService {
       toolConfirmation,
       model,
       mode,
+      permissionMode: requestedPermissionMode,
     } = options
     const modelId = model || DEFAULT_MODEL
     const isCodingMode = mode === 'coding'
@@ -583,30 +597,40 @@ export class CloudbaseAgentService {
       // Resume + toolConfirmation 场景：处理用户确认结果
       if (toolConfirmation) {
         const action = toolConfirmation.payload.action
-        // allow_always 等同 allow：放行本次 + 写入会话级白名单
-        const isAllowed = action === 'allow' || action === 'allow_always'
 
-        // 预查 toolCallInfo 以获取工具名（用于白名单写入和后续执行）
+        // 预查 toolCallInfo，用于：
+        //   1. allow_always 写入白名单
+        //   2. 识别工具类型（ExitPlanMode 对 reject_and_exit_plan 有特殊语义）
+        let resumedToolName: string | undefined
+        try {
+          const info = await persistenceService.getToolCallInfo(
+            conversationId,
+            assistantMessageId,
+            toolConfirmation.interruptId,
+          )
+          resumedToolName = info?.toolName
+        } catch {
+          // 读取失败不影响主流程
+        }
+        const isExitPlanMode = resumedToolName === 'ExitPlanMode'
+
+        // allow / allow_always / (ExitPlanMode + reject_and_exit_plan) 都视为允许本次
+        // ExitPlanMode 的 reject_and_exit_plan 语义：允许本次退出 Plan 模式（由前端在下一轮传 permissionMode='default' 生效），
+        // 而非拒绝该工具调用——否则 Agent 会被卡住无法进入执行阶段。
+        const isAllowed =
+          action === 'allow' || action === 'allow_always' || (isExitPlanMode && action === 'reject_and_exit_plan')
+
+        // 写入会话级白名单（仅 allow_always）
         // 注意：此处写入白名单必须独立于 sandboxMcpClient 状态，否则 sandbox 未就绪时
         // allow_always 将永远无法生效。
-        if (action === 'allow_always') {
-          try {
-            const info = await persistenceService.getToolCallInfo(
-              conversationId,
-              assistantMessageId,
-              toolConfirmation.interruptId,
-            )
-            if (info) {
-              const normalized = normalizeToolName(info.toolName)
-              sessionPermissions.allowAlways(conversationId, normalized)
-            }
-          } catch {
-            // 白名单写入失败不影响主流程（canUseTool / PreToolUse Hook 处仍会写入）
-          }
+        if (action === 'allow_always' && resumedToolName) {
+          const normalized = normalizeToolName(resumedToolName)
+          sessionPermissions.allowAlways(conversationId, normalized)
         }
 
-        if (isAllowed && sandboxMcpClient) {
+        if (isAllowed && sandboxMcpClient && !isExitPlanMode) {
           // allow / allow_always: 通过 MCP client 调用工具获取真实结果
+          // 注：ExitPlanMode 不是真实 MCP 工具，不能走 MCP 调用路径；走下方的占位分支即可。
           const mcpClient = sandboxMcpClient.client
           const toolCallInfo = await persistenceService.getToolCallInfo(
             conversationId,
@@ -652,30 +676,36 @@ export class CloudbaseAgentService {
               )
             }
           }
-        } else if (isAllowed && !sandboxMcpClient) {
-          // allow / allow_always 但 sandbox 未就绪：写占位结果让 Agent 继续。
-          // 避免误写"用户拒绝了此操作"导致 Agent 停步；此处白名单已写入（若为 allow_always）。
+        } else if (isAllowed) {
+          // 两种情况走此分支：
+          //   a) ExitPlanMode 被允许（allow / reject_and_exit_plan）—— 不需要真实执行工具，
+          //      只需告诉 Agent 计划已被接受，让后续 turn 切出 Plan 模式进入执行阶段。
+          //   b) 普通写工具 allow / allow_always 但 sandbox 未就绪 —— 写占位结果让 Agent 继续。
+          let text: string
+          if (isExitPlanMode) {
+            text =
+              action === 'reject_and_exit_plan'
+                ? '用户选择退出 Plan 模式，请直接进入执行阶段（后续对话已切回 default 模式）。'
+                : '用户已批准计划，请开始执行。'
+          } else {
+            text = action === 'allow_always' ? '已允许此类操作（本会话），请继续。' : '已允许，请继续。'
+          }
           await persistenceService.updateToolResult(
             conversationId,
             assistantMessageId,
             toolConfirmation.interruptId,
-            {
-              type: 'text',
-              text: action === 'allow_always' ? '已允许此类操作（本会话），请继续。' : '已允许，请继续。',
-            },
+            { type: 'text', text },
             'completed',
           )
         } else {
-          // deny / reject_and_exit_plan（P1 范围下 reject_and_exit_plan 按 deny 处理）:
-          //   更新为拒绝消息
+          // deny（包括 ExitPlanMode 的 deny = "继续规划" 与 普通工具的 deny）
+          // 以及其它一切未匹配到"允许"语义的组合：统一写拒绝消息
+          const text = isExitPlanMode ? '用户希望继续规划，请完善计划后再调用 ExitPlanMode。' : '用户拒绝了此操作'
           await persistenceService.updateToolResult(
             conversationId,
             assistantMessageId,
             toolConfirmation.interruptId,
-            {
-              type: 'text',
-              text: '用户拒绝了此操作',
-            },
+            { type: 'text', text },
             'completed',
           )
         }
@@ -930,14 +960,20 @@ export class CloudbaseAgentService {
         value: { callId: string; toolName: string; input: unknown } | null
       } = { value: null }
 
+      // Plan 模式映射：
+      // - 前端传 `permissionMode: 'plan'` → SDK 切到 'plan',此时 agent 只规划不写
+      //   （Plan 模式下 SDK 会把除 Read/Glob/Grep/ExitPlanMode 等"只读"工具外的写操作挡住）
+      // - 其它情况沿用 'bypassPermissions'(与原有 canUseTool/hook 拦截协同)
+      const sdkPermissionMode = requestedPermissionMode === 'plan' ? 'plan' : 'bypassPermissions'
+
       // 构建 query 参数 - 和 tcb-headless-service buildQueryOptions 一致
       // 注意: cwd 必须是本地路径, 即使沙箱启用. 沙箱只提供 MCP 工具, agent 进程在本地运行.
       const queryArgs = {
         prompt,
         options: {
           model: modelId,
-          permissionMode: 'bypassPermissions',
-          allowDangerouslySkipPermissions: true,
+          permissionMode: sdkPermissionMode,
+          allowDangerouslySkipPermissions: sdkPermissionMode === 'bypassPermissions',
           maxTurns,
           cwd: actualCwd,
           ...sessionOpts,
@@ -964,6 +1000,50 @@ export class CloudbaseAgentService {
               return {
                 behavior: 'deny' as const,
                 message: '等待用户回答问题',
+                interrupt: true,
+              }
+            }
+
+            // ExitPlanMode 处理（P2）：模型在 Plan 模式规划完毕后调用此工具呈交计划。
+            // - 首次调用：发 tool_confirm 中断，input.plan 传给前端作为 planContent
+            // - Resume 场景：按用户决策：
+            //   · allow → 允许本次（SDK 会自动切出 plan 模式）
+            //   · allow_always → 同 allow（ExitPlanMode 不适合加白名单，每次 plan 应单独审批）
+            //   · deny → 继续停留在 Plan 模式
+            //   · reject_and_exit_plan → 允许本次（让 SDK 自动退出 plan 模式），后续 turn 前端应传 permissionMode=default
+            if (toolName === 'ExitPlanMode') {
+              if (toolConfirmation && toolConfirmation.interruptId === toolUseId) {
+                const action = toolConfirmation.payload.action
+                if (action === 'allow' || action === 'allow_always' || action === 'reject_and_exit_plan') {
+                  return {
+                    behavior: 'allow' as const,
+                    updatedInput: input as Record<string, unknown>,
+                  }
+                }
+                // deny：继续规划
+                return {
+                  behavior: 'deny' as const,
+                  message: '用户希望继续规划，请完善计划后再调用 ExitPlanMode',
+                }
+              }
+
+              // 首次：发 tool_confirm 给前端展示 PlanModeCard
+              if (toolUseId && pendingToolInterrupt) {
+                pendingToolInterrupt.value = {
+                  callId: toolUseId,
+                  toolName,
+                  input: input as Record<string, unknown>,
+                }
+              }
+              wrappedCallback({
+                type: 'tool_confirm',
+                id: toolUseId,
+                name: toolName,
+                input: input as Record<string, unknown>,
+              })
+              return {
+                behavior: 'deny' as const,
+                message: '等待用户审批 Plan',
                 interrupt: true,
               }
             }
@@ -1132,7 +1212,8 @@ export class CloudbaseAgentService {
           stderr: (data: string) => {
             console.error('[Agent CLI stderr]', data.trim())
           },
-          disallowedTools: ['AskUserQuestion', 'EnterPlanMode'],
+          // P2: 移除 EnterPlanMode 的禁用——Plan 模式现改由显式 permissionMode='plan' + ExitPlanMode 工具驱动
+          disallowedTools: ['AskUserQuestion'],
         },
       }
 

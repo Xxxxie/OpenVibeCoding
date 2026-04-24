@@ -11,9 +11,12 @@
  */
 
 import { useState, useCallback, useRef } from 'react'
+import { useAtom } from 'jotai'
 import { toast } from 'sonner'
-import type { ExtendedSessionUpdate, PermissionAction } from '@coder/shared'
+import type { ExtendedSessionUpdate, PermissionAction, AgentPermissionMode } from '@coder/shared'
 import type { TaskMessage, AskUserQuestionData, ToolConfirmData, DeploymentInfo, ArtifactInfo } from '@/types/task-chat'
+import { planModeAtomFamily } from '@/lib/atoms/plan-mode'
+import { extractPlanContent } from '@/components/chat/plan-content'
 
 // ─── Stream Phase ─────────────────────────────────────────────────────
 
@@ -56,6 +59,12 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
   const [toolConfirm, setToolConfirm] = useState<ToolConfirmData | null>(null)
   const [questionAnswersByTool, setQuestionAnswersByTool] = useState<Record<string, Record<string, string>>>({})
   const [manualInputsByTool, setManualInputsByTool] = useState<Record<string, Record<string, string>>>({})
+
+  // ── Plan mode state (P2) ──
+  //   · 绑定到全局 atomFamily，以便多组件（输入框、Card、路由）共享
+  //   · `planMode.active` 决定下一轮 prompt 的 permissionMode
+  //   · planContent + toolCallId 用于回显审批卡片
+  const [planMode, setPlanMode] = useAtom(planModeAtomFamily(taskId))
 
   // ── Side-effect data from stream ──
   const [deploymentNotifications, setDeploymentNotifications] = useState<DeploymentInfo[]>([])
@@ -229,7 +238,22 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
             assistantMessageId: u.assistantMessageId,
             toolName: u.toolName,
             input: u.input || {},
+            // P2: ExitPlanMode 额外携带 planContent（服务端在 convert 时注入）
+            ...(u.planContent !== undefined ? { planContent: u.planContent as string } : {}),
           })
+          // P2: 当收到 ExitPlanMode 的 tool_confirm 时，同步更新 plan-mode atom，
+          //     PlanModeCard 和输入框可据此判断当前会话是否处于 Plan 审批流。
+          if (u.toolName === 'ExitPlanMode') {
+            // planContent 优先级：
+            //   1. 服务端显式注入（u.planContent）—— 目前仅覆盖 input.plan 为字符串的情况
+            //   2. 从 u.input 中宽松提取（allowedPrompts / description+steps / 兜底 JSON）
+            const planText = (u.planContent as string | undefined) || extractPlanContent(u.input)
+            setPlanMode({
+              active: true,
+              planContent: planText || null,
+              toolCallId: u.toolCallId,
+            })
+          }
           break
 
         case 'ask_user':
@@ -432,7 +456,12 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
             jsonrpc: '2.0',
             method: 'session/prompt',
             id: Date.now(),
-            params: { sessionId: taskId, prompt: [{ type: 'text', text }] },
+            params: {
+              sessionId: taskId,
+              prompt: [{ type: 'text', text }],
+              // P2: Plan 模式激活时传给服务端，让 Agent 以 permissionMode='plan' 启动
+              ...(planMode.active ? { permissionMode: 'plan' as const } : {}),
+            },
           }),
         })
         if (!res.ok || !res.body) {
@@ -449,7 +478,7 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
         await exitStreaming()
       }
     },
-    [enterStreaming, exitStreaming, readSSEStream, taskId],
+    [enterStreaming, exitStreaming, planMode.active, readSSEStream, taskId],
   )
 
   /** Send a follow-up message in an existing conversation. */
@@ -498,7 +527,12 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
             jsonrpc: '2.0',
             method: 'session/prompt',
             id: Date.now(),
-            params: { sessionId: taskId, prompt: [{ type: 'text', text }] },
+            params: {
+              sessionId: taskId,
+              prompt: [{ type: 'text', text }],
+              // P2: Plan 模式激活时传给服务端，让 Agent 以 permissionMode='plan' 启动
+              ...(planMode.active ? { permissionMode: 'plan' as const } : {}),
+            },
           }),
         })
 
@@ -519,7 +553,7 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
         await exitStreaming()
       }
     },
-    [ensureACPSession, enterStreaming, exitStreaming, readSSEStream, taskId],
+    [ensureACPSession, enterStreaming, exitStreaming, planMode.active, readSSEStream, taskId],
   )
 
   /** Submit answers to an AskUserQuestion and resume the stream. */
@@ -599,9 +633,30 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
       if (!toolConfirm) return
 
       const data = toolConfirm
+      const isExitPlanMode = data.toolName === 'ExitPlanMode'
       setToolConfirm(null)
       phaseRef.current = 'streaming'
       enterStreaming()
+
+      // P2: 根据用户在 PlanModeCard 的决策更新本地 plan-mode atom
+      //   · allow              → 计划已被批准，退出 Plan 模式，进入执行阶段
+      //   · allow_always       → 同上（ExitPlanMode 不适合加白名单，一视同仁）
+      //   · deny               → 保留 Plan 模式，continue 规划（保留 planContent 回显）
+      //   · reject_and_exit_plan → 用户放弃 Plan，退出模式（清空 planContent）
+      let nextPermissionMode: AgentPermissionMode | undefined
+      if (isExitPlanMode) {
+        if (action === 'allow' || action === 'allow_always') {
+          setPlanMode({ active: false, planContent: null, toolCallId: null })
+          nextPermissionMode = 'default'
+        } else if (action === 'reject_and_exit_plan') {
+          setPlanMode({ active: false, planContent: null, toolCallId: null })
+          nextPermissionMode = 'default'
+        } else {
+          // deny：保持 Plan 模式，清除 toolCallId 但保留 planContent 供历史查看
+          setPlanMode((prev) => ({ ...prev, toolCallId: null, active: true }))
+          nextPermissionMode = 'plan'
+        }
+      }
 
       try {
         const res = await fetch('/api/agent/acp', {
@@ -616,6 +671,7 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
               sessionId: taskId,
               prompt: [{ type: 'text', text: '' }],
               toolConfirmation: { interruptId: data.toolCallId, payload: { action } },
+              ...(nextPermissionMode ? { permissionMode: nextPermissionMode } : {}),
             },
           }),
         })
@@ -628,7 +684,7 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
         await exitStreaming()
       }
     },
-    [enterStreaming, exitStreaming, readSSEStream, taskId, toolConfirm],
+    [enterStreaming, exitStreaming, readSSEStream, setPlanMode, taskId, toolConfirm],
   )
 
   /** Reconnect to an ongoing agent stream after page refresh. */
@@ -706,6 +762,10 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
     deploymentNotifications,
     setDeploymentNotifications,
     artifacts,
+
+    // Plan mode (P2)
+    planMode,
+    setPlanMode,
 
     // Phase (for fetchMessages guard)
     canFetchMessages,

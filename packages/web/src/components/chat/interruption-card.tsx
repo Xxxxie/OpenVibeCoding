@@ -4,14 +4,17 @@ import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import type { ToolConfirmData } from '@/types/task-chat'
+import { PlanModeCard } from './plan-mode-card'
+import { extractPlanContent } from './plan-content'
 
 /**
  * InterruptionCard — 工具权限中断卡片
  *
  * 官方反编译对应组件：05-tool-call-components.tsx 的 Hv 组件。
  *
- * P1: 标准权限三按钮 —— 允许 / 总是允许（本会话）/ 拒绝
- * ExitPlanMode 分支留待 P2 接入。
+ * 两种渲染分支：
+ * 1. 标准权限（P1）：允许 / 总是允许（本会话）/ 拒绝
+ * 2. ExitPlanMode（P2）：委托给 PlanModeCard 组件
  */
 interface InterruptionCardProps {
   data: ToolConfirmData
@@ -20,6 +23,15 @@ interface InterruptionCardProps {
 }
 
 export function InterruptionCard({ data, isSending, onDecision }: InterruptionCardProps) {
+  const isExitPlanMode = data.toolName === 'ExitPlanMode'
+
+  // P2: ExitPlanMode 单独委托给 PlanModeCard 渲染，避免这里堆叠太多分支逻辑
+  if (isExitPlanMode) {
+    // 优先使用服务端注入的 planContent；否则从 input 各种常见字段中兜底提取
+    const planContent = data.planContent ?? extractPlanContent(data.input)
+    return <PlanModeCard planContent={planContent} isSending={isSending} onDecision={onDecision} />
+  }
+
   return (
     <Card className="p-3 border-orange-500/50 bg-orange-500/5">
       <div className="flex items-center gap-2 mb-2">
