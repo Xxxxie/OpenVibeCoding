@@ -85,3 +85,8 @@ debug-jsonl/
 .agents/
 packages/server/skills/cloudbase
 skills-lock.json
+
+CodeBuddy Code_decompiled
+CodeBuddy Code_files
+decompiled
+decompiled-ui

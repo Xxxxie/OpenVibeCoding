@@ -38,6 +38,10 @@
   "exclude": [
     "node_modules",
     "opensrc",
-    "packages"
+    "packages",
+    "decompiled",
+    "decompiled-ui",
+    "CodeBuddy Code_decompiled",
+    "CodeBuddy Code_files"
   ]
 }
