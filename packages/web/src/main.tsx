@@ -9,6 +9,7 @@ import { TasksListPage } from './pages/TasksListPage'
 import { LoginPage } from './pages/LoginPage'
 import { MiniProgramPage } from './pages/miniprogram-page'
 import { CronTaskPage } from './pages/crontask-page'
+import { ToolRenderersPreviewPage } from './pages/tool-renderers-preview'
 import { RequireAdmin } from './components/require-admin'
 import { AdminLayout } from './components/admin/admin-layout'
 import { AdminUsersPage } from './pages/admin/users-page'
@@ -270,6 +271,8 @@ function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<LoginRoute />} />
+          {/* DEV preview (无需鉴权/环境),仅供开发期验证 P6 工具渲染器 */}
+          <Route path="/__preview/tool-renderers" element={<ToolRenderersPreviewPage />} />
 
           {/* Admin routes */}
           <Route
