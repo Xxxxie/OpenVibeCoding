@@ -695,8 +695,6 @@ export function TaskChat({
 
   const isCodingMode = task.mode === 'coding'
 
-  const isCodingMode = task.mode === 'coding'
-
   // ─── Tab content ───────────────────────────────────────────────────
 
   const renderTabContent = () => {
