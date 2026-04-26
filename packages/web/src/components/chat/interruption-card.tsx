@@ -22,6 +22,27 @@ interface InterruptionCardProps {
   onDecision: (action: PermissionAction) => void
 }
 
+/**
+ * 容错渲染 input：
+ *   - 对象 → 格式化 JSON
+ *   - JSON 字符串(刷新恢复路径) → 解析后再格式化,避免双重转义
+ *   - 普通字符串 → 原样输出
+ */
+function formatInput(input: unknown): string {
+  if (typeof input === 'string') {
+    const trimmed = input.trim()
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        return JSON.stringify(JSON.parse(trimmed), null, 2)
+      } catch {
+        // fallthrough → 原样输出
+      }
+    }
+    return input
+  }
+  return JSON.stringify(input, null, 2)
+}
+
 export function InterruptionCard({ data, isSending, onDecision }: InterruptionCardProps) {
   const isExitPlanMode = data.toolName === 'ExitPlanMode'
 
@@ -46,7 +67,7 @@ export function InterruptionCard({ data, isSending, onDecision }: InterruptionCa
           </Badge>
         </div>
         <div className="bg-muted/50 rounded p-2 max-h-48 overflow-auto">
-          <pre className="text-xs whitespace-pre-wrap break-all">{JSON.stringify(data.input, null, 2)}</pre>
+          <pre className="text-xs whitespace-pre-wrap break-all">{formatInput(data.input)}</pre>
         </div>
       </div>
 

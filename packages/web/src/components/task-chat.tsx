@@ -17,6 +17,7 @@ import { SubagentCard } from '@/components/chat/subagent-card'
 import { AskUserForm } from '@/components/chat/ask-user-form'
 import { InterruptionCard } from '@/components/chat/interruption-card'
 import { AgentStatusIndicator } from '@/components/chat/agent-status-indicator'
+import { extractPlanContent } from '@/components/chat/plan-content'
 import { mdComponents } from '@/components/chat/markdown-block'
 import { BrowserControls } from '@/components/chat/browser-controls'
 import { PreviewPlaceholder } from '@/components/chat/preview-placeholder'
@@ -150,6 +151,7 @@ export function TaskChat({
     setIsSending,
     isStreamingResponse,
     toolConfirm,
+    setToolConfirm,
     questionAnswersByTool,
     setQuestionAnswersByTool,
     manualInputsByTool,
@@ -193,8 +195,60 @@ export function TaskChat({
         if (!canFetchMessages()) return
         if (response.ok && data.messages) {
           setMessages(data.messages)
-          // Auto-reconnect if the latest agent message is still pending (agent running in background)
+          // ── 刷新恢复 InterruptionCard ──────────────────────────────
+          // 服务端 finally 会把 message status 标为 done(即使是 ExecutionError 中断),
+          // 同时 cleanupStreamEvents 也清掉 SSE 事件 → 客户端没法靠 reconnect 重放
+          // tool_confirm 事件。但 DB 持久化的 parts 中,被中断的工具 call 会留下一条
+          // tool_result 且 status === 'incomplete' (CLI 写入)。这里据此识别中断态,
+          // 直接根据 tool_call 的 input 重建 toolConfirm,让 InterruptionCard 在
+          // 对应消息末尾再次显示。
           const latestAgent = [...data.messages].reverse().find((m: any) => m.role === 'agent')
+          if (latestAgent && latestAgent.parts && latestAgent.parts.length > 0) {
+            const parts = latestAgent.parts
+            // 找最后一个 tool_result(从尾部往前扫,跳过 text/thinking)
+            let lastResult: { type: string; toolCallId?: string; status?: string } | null = null
+            for (let i = parts.length - 1; i >= 0; i--) {
+              const p = parts[i]
+              if (p.type === 'tool_result') {
+                lastResult = p
+                break
+              }
+              if (p.type === 'tool_call') break // tool_call 没有匹配的 tool_result -> 也算未完成
+            }
+            if (lastResult && lastResult.status === 'incomplete' && lastResult.toolCallId) {
+              const toolCall = parts.find(
+                (p: { type: string; toolCallId?: string }) =>
+                  p.type === 'tool_call' && p.toolCallId === lastResult!.toolCallId,
+              )
+              if (toolCall) {
+                const rawInput = (toolCall as { input?: unknown }).input
+                // DB 持久化的 tool_call.input 是 JSON 字符串(由 persistence layer
+                // arguments=part.content 写入);实时 SSE 路径下则是对象。两种格式
+                // 都要规范成对象,否则下游 InterruptionCard.JSON.stringify 会双重转义。
+                let toolInput: Record<string, unknown> = {}
+                if (rawInput && typeof rawInput === 'object') {
+                  toolInput = rawInput as Record<string, unknown>
+                } else if (typeof rawInput === 'string') {
+                  try {
+                    const parsed = JSON.parse(rawInput)
+                    if (parsed && typeof parsed === 'object') toolInput = parsed
+                  } catch {
+                    // 解析失败时保留为 raw 字段,InterruptionCard 仍能展示
+                    toolInput = { raw: rawInput }
+                  }
+                }
+                const toolName = (toolCall as { toolName?: string }).toolName || 'tool'
+                setToolConfirm({
+                  toolCallId: lastResult.toolCallId,
+                  assistantMessageId: latestAgent.id,
+                  toolName,
+                  input: toolInput,
+                  ...(toolName === 'ExitPlanMode' ? { planContent: extractPlanContent(toolInput) || undefined } : {}),
+                })
+              }
+            }
+          }
+          // Auto-reconnect if the latest agent message is still pending (agent running in background)
           if (
             latestAgent &&
             (latestAgent.status === 'pending' || latestAgent.status === 'streaming') &&
@@ -211,7 +265,7 @@ export function TaskChat({
         if (showLoading) setIsLoading(false)
       }
     },
-    [canFetchMessages, setMessages, taskId, messagesApiBase, reconnectToStream],
+    [canFetchMessages, setMessages, setToolConfirm, taskId, messagesApiBase, reconnectToStream],
   )
 
   const fetchPRComments = useCallback(async () => {

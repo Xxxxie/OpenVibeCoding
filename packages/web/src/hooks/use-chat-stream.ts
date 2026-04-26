@@ -465,6 +465,7 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
     setIsSending,
     isStreamingResponse,
     toolConfirm,
+    setToolConfirm,
     questionAnswersByTool,
     setQuestionAnswersByTool,
     manualInputsByTool,
