@@ -611,9 +611,12 @@ export function TaskChat({
           <div className="flex-1 overflow-hidden -mx-3 -mt-3 relative">
             <PreviewPlaceholder />
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="flex items-center gap-2 text-sm text-muted-foreground bg-background/80 backdrop-blur rounded-md px-3 py-1.5 shadow">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                正在启动预览...
+              <div className="flex flex-col items-center gap-2 text-sm text-muted-foreground bg-background/80 backdrop-blur rounded-md px-4 py-3 shadow text-center">
+                <div className="flex items-center gap-2">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  正在启动预览...
+                </div>
+                <p className="text-xs text-muted-foreground/70 max-w-[200px]">首次启动需初始化环境,通常约 30-60 秒</p>
               </div>
             </div>
           </div>
@@ -1134,6 +1137,34 @@ export function TaskChat({
                               }
                               return null
                             })}
+                            {/*
+                              P4 / P1 就地渲染：
+                              - AgentStatusIndicator：仅在最新 agentMessage 且流式进行中展示（随消息尾部滚动）
+                              - InterruptionCard：如果当前 toolConfirm 对应的 tool_call 就在本 agentMessage.parts 内，
+                                就在此消息末尾渲染；否则其它 agentMessage 不展示，避免"固定在输入框上方"。
+                            */}
+                            {!readOnly &&
+                              isLatestMessage &&
+                              isStreamingResponse &&
+                              agentPhase?.phase &&
+                              agentPhase.phase !== 'idle' && (
+                                <div className="pt-1">
+                                  <AgentStatusIndicator phase={agentPhase.phase} toolName={agentPhase.toolName} />
+                                </div>
+                              )}
+                            {!readOnly &&
+                              toolConfirm &&
+                              agentMessage.parts?.some(
+                                (p) => p.type === 'tool_call' && p.toolCallId === toolConfirm.toolCallId,
+                              ) && (
+                                <div className="pt-1">
+                                  <InterruptionCard
+                                    data={toolConfirm}
+                                    isSending={isSending}
+                                    onDecision={handleConfirmTool}
+                                  />
+                                </div>
+                              )}
                           </div>
                         )}
                       </div>
@@ -1316,22 +1347,10 @@ export function TaskChat({
       <div className="flex-1 min-h-0 px-3 pt-3 flex flex-col overflow-hidden">{renderTabContent()}</div>
 
       {/* InterruptionCard — 工具权限确认卡片（四值决策） */}
-      {!readOnly && activeTab === 'chat' && toolConfirm && (
-        <div className="flex-shrink-0 px-3 pb-2">
-          <InterruptionCard data={toolConfirm} isSending={isSending} onDecision={handleConfirmTool} />
-        </div>
-      )}
-
       {/*
-        AgentStatusIndicator — 代理阶段指示器(P4)
-        只在 chat tab、正在流式输出、有 toolConfirm 时紧贴输入框上方显示。
-        phase === null 时组件自动返回 null,不占位。
+        InterruptionCard / AgentStatusIndicator 已就地渲染到对应 agentMessage 末尾。
+        这里保留备注便于将来查找；**不要**在此处再次渲染，否则会出现"固定在输入框上方"的 UI bug。
       */}
-      {!readOnly && activeTab === 'chat' && isStreamingResponse && agentPhase?.phase && (
-        <div className="flex-shrink-0 px-3 pb-1">
-          <AgentStatusIndicator phase={agentPhase.phase} toolName={agentPhase.toolName} />
-        </div>
-      )}
 
       {/* Input Area */}
       {!readOnly && activeTab === 'chat' && (

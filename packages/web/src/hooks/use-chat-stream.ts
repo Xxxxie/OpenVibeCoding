@@ -10,7 +10,7 @@
  * WAITING:         流已结束，但 fetchMessages 仍被阻止（服务端 status='pending'，查不到当前消息）
  */
 
-import { useState, useCallback, useRef, useMemo } from 'react'
+import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
 import { useAtom } from 'jotai'
 import { toast } from 'sonner'
 import type { ExtendedSessionUpdate, PermissionAction, AgentPermissionMode } from '@coder/shared'
@@ -87,6 +87,23 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
   // ── Side-effect data from stream ──
   const [deploymentNotifications, setDeploymentNotifications] = useState<DeploymentInfo[]>([])
   const [artifacts, setArtifacts] = useState<ArtifactInfo[]>([])
+
+  // ── Task 切换时重置交互态 ──
+  //   hook 实例虽然随 taskId 变化重建 AcpClient（useMemo deps），
+  //   但 useState 初值只在首次 mount 生效；taskId 变而组件未卸载时，
+  //   toolConfirm / agentPhase / 交互态会"串"到新 task 上。
+  //   这里显式重置，确保从 A 切到 B 时不会残留 A 的确认卡片 / 阶段指示器。
+  useEffect(() => {
+    setToolConfirm(null)
+    setAgentPhase(IDLE_PHASE)
+    setQuestionAnswersByTool({})
+    setManualInputsByTool({})
+    setDeploymentNotifications([])
+    setArtifacts([])
+    phaseRef.current = 'idle'
+    setIsSending(false)
+    setIsStreamingResponse(false)
+  }, [taskId])
 
   // ════════════════════════════════════════════════════════════════════
   // AskUser / ToolConfirm cleanup helpers
