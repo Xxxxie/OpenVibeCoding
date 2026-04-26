@@ -540,7 +540,50 @@ export function TaskChat({
     chatAnswerQuestion(askData).then(() => fetchMessages(false))
   }
 
-  const handleConfirmTool = (action: PermissionAction) => chatConfirmTool(action)
+  const handleConfirmTool = (action: PermissionAction) => {
+    // Optimistic local update: 在 chatConfirmTool(网络 resume) 之前先本地 mutate 一下
+    // 对应 tool_call 的结果态,UI 立刻反馈,不必等服务端 SSE 推回 tool_result。
+    // 对齐 handleAnswerQuestion 的做法(line 509)。
+    //
+    // deny  → 插入一条终态 tool_result(isError=true,"用户拒绝了此操作")。
+    //         服务端也会写同样语义的占位,到时 apply-session-update 发现
+    //         "已存在 tool_result" 会跳过,不会重复。
+    // allow → 插入一条过渡态 tool_result(status='executing'),ToolCallCard
+    //         读到 status!=='incomplete' 就会把 Loader2 换成 CheckCircle,
+    //         给用户立即的"已允许"反馈。真实结果回来时 apply-session-update
+    //         会因为已存在 tool_result 而跳过 —— 这对 *可视化* 是 OK 的,
+    //         最终 DB 回流(fetchMessages)仍会用真实内容刷新。
+    if (toolConfirm) {
+      const { toolCallId } = toolConfirm
+      const isDeny = action === 'deny'
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (!m.parts?.some((p) => p.type === 'tool_call' && p.toolCallId === toolCallId)) return m
+          if (m.parts.some((p) => p.type === 'tool_result' && p.toolCallId === toolCallId)) return m
+          const toolCallPart = m.parts.find((p) => p.type === 'tool_call' && p.toolCallId === toolCallId)
+          return {
+            ...m,
+            parts: [
+              ...m.parts,
+              {
+                type: 'tool_result' as const,
+                toolCallId,
+                toolName: toolCallPart?.type === 'tool_call' ? toolCallPart.toolName : undefined,
+                content: isDeny ? '用户拒绝了此操作' : '',
+                isError: isDeny,
+                ...(isDeny ? {} : { status: 'executing' }),
+                ...(toolCallPart?.type === 'tool_call' && toolCallPart.parentToolCallId
+                  ? { parentToolCallId: toolCallPart.parentToolCallId }
+                  : {}),
+              },
+            ],
+          }
+        }),
+      )
+    }
+
+    return chatConfirmTool(action)
+  }
 
   const handleAnswerSelect = (toolCallId: string, question: string, label: string) => {
     setQuestionAnswersByTool((prev) => ({
@@ -1119,7 +1162,10 @@ export function TaskChat({
                                   (p) => p.type === 'tool_result' && p.toolCallId === part.toolCallId,
                                 )
                                 const resultStatus = resultPart?.type === 'tool_result' ? resultPart.status : undefined
-                                const isPending = !resultPart || resultStatus === 'incomplete'
+                                // 'executing' 是前端 optimistic 插入的过渡态:用户已允许,
+                                // 但真实执行结果还没到,保持 Loader2 继续转,直到真实 result 回来。
+                                const isPending =
+                                  !resultPart || resultStatus === 'incomplete' || resultStatus === 'executing'
                                 const isAskUserQuestion = part.toolName === 'AskUserQuestion'
                                 let askQuestions = []
 

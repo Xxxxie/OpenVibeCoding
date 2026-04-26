@@ -181,25 +181,34 @@ export function applySessionUpdate(ctx: ApplySessionUpdateCtx): void {
         prev.map((m) => {
           if (m.id !== assistantMsgId) return m
           const prevParts = m.parts || []
-          if (prevParts.some((p) => p.type === 'tool_result' && p.toolCallId === u.toolCallId)) return m
+          const existingResultIdx = prevParts.findIndex(
+            (p) => p.type === 'tool_result' && p.toolCallId === u.toolCallId,
+          )
           const toolCallPart = prevParts.find((p) => p.type === 'tool_call' && p.toolCallId === u.toolCallId)
+          const newResult = {
+            type: 'tool_result' as const,
+            toolCallId: u.toolCallId || '',
+            toolName: toolCallPart?.type === 'tool_call' ? toolCallPart.toolName : undefined,
+            content: String(u.result || ''),
+            isError: u.status === 'failed',
+            // P7: 从同 toolCallId 的 tool_call part 继承 parentToolCallId
+            //     服务端也在 tool_call_update 注入该字段(冗余安全兜底)
+            ...(toolCallPart?.type === 'tool_call' && toolCallPart.parentToolCallId
+              ? { parentToolCallId: toolCallPart.parentToolCallId }
+              : {}),
+          }
+          if (existingResultIdx >= 0) {
+            // Optimistic 占位 (status='executing') 替换为真实结果;
+            // 其它终态(已完成/已失败) 保持幂等,不覆盖。
+            const existing = prevParts[existingResultIdx]
+            if (existing.type !== 'tool_result' || existing.status !== 'executing') return m
+            const nextParts = [...prevParts]
+            nextParts[existingResultIdx] = newResult
+            return { ...m, parts: nextParts }
+          }
           return {
             ...m,
-            parts: [
-              ...prevParts,
-              {
-                type: 'tool_result' as const,
-                toolCallId: u.toolCallId || '',
-                toolName: toolCallPart?.type === 'tool_call' ? toolCallPart.toolName : undefined,
-                content: String(u.result || ''),
-                isError: u.status === 'failed',
-                // P7: 从同 toolCallId 的 tool_call part 继承 parentToolCallId
-                //     服务端也在 tool_call_update 注入该字段（冗余安全兜底）
-                ...(toolCallPart?.type === 'tool_call' && toolCallPart.parentToolCallId
-                  ? { parentToolCallId: toolCallPart.parentToolCallId }
-                  : {}),
-              },
-            ],
+            parts: [...prevParts, newResult],
           }
         }),
       )
