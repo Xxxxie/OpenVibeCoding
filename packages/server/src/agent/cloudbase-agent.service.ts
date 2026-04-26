@@ -586,22 +586,79 @@ export class CloudbaseAgentService {
     if (conversationId && userContext.envId) {
       // Resume + askAnswers 场景：先直接更新 DB，再 restore 即可拿到最新数据
       // 新结构：askAnswers[messageId] = { toolCallId, answers }，用 toolCallId 作为 callId
+      //
+      // 与 toolConfirmation 分支对齐:除了覆盖 output/status,还要补齐
+      // providerData.{messageId, model, agent, toolResult{content, renderer}}
+      // + 顶层 sessionId,让 restore 后的 JSONL 结构与 baseline 一致。
+      // 否则 SDK resume 看到残缺的 function_call_result 会重发 AskUserQuestion。
       if (askAnswers && Object.keys(askAnswers).length > 0) {
         for (const [recordId, { toolCallId, answers }] of Object.entries(askAnswers)) {
-          const output = {
-            type: 'text',
-            text: Object.entries(answers)
-              .map(([key, value]) => ` · ${key} → ${value}`)
-              .join('\n'),
+          const text = Object.entries(answers)
+            .map(([key, value]) => ` · ${key} → ${value}`)
+            .join('\n')
+          const output = { type: 'text', text }
+
+          // 从原 function_call.metadata.providerData 继承 messageId/model/agent
+          const toolCallInfo = await persistenceService.getToolCallInfo(conversationId, recordId, toolCallId)
+          const tcProviderData = (toolCallInfo?.metadata?.providerData ?? {}) as Record<string, unknown>
+          const inheritedProviderData: Record<string, unknown> = {}
+          if (tcProviderData.messageId) inheritedProviderData.messageId = tcProviderData.messageId
+          if (tcProviderData.model) inheritedProviderData.model = tcProviderData.model
+          if (tcProviderData.agent) inheritedProviderData.agent = tcProviderData.agent
+
+          // baseline 里 toolResult.content 是 MCP 返回的 [{type:text,text:...}] 的 stringify
+          // AskUserQuestion 没经过真实 MCP 调用,手动构造等价结构。
+          const askPayload = [{ type: 'text', text }]
+          const contentStr = JSON.stringify(askPayload)
+
+          const extraMetadata = {
+            sessionId: conversationId,
+            providerData: {
+              ...inheritedProviderData,
+              toolResult: {
+                content: contentStr,
+                renderer: { type: 'media' },
+              },
+            },
           }
-          await persistenceService.updateToolResult(conversationId, recordId, toolCallId, output, 'completed')
+
+          await persistenceService.updateToolResult(
+            conversationId,
+            recordId,
+            toolCallId,
+            output,
+            'completed',
+            extraMetadata,
+          )
           if (recordId !== assistantMessageId) {
+            // 次要 recordId 的 tool_call 可能在另一条 DB record,同样需要继承它自己的 providerData
+            const secondaryInfo = await persistenceService.getToolCallInfo(
+              conversationId,
+              assistantMessageId,
+              toolCallId,
+            )
+            const secondaryPd = (secondaryInfo?.metadata?.providerData ?? {}) as Record<string, unknown>
+            const secondaryInherited: Record<string, unknown> = {}
+            if (secondaryPd.messageId) secondaryInherited.messageId = secondaryPd.messageId
+            if (secondaryPd.model) secondaryInherited.model = secondaryPd.model
+            if (secondaryPd.agent) secondaryInherited.agent = secondaryPd.agent
+
             await persistenceService.updateToolResult(
               conversationId,
               assistantMessageId,
               toolCallId,
               output,
               'completed',
+              {
+                sessionId: conversationId,
+                providerData: {
+                  ...secondaryInherited,
+                  toolResult: {
+                    content: contentStr,
+                    renderer: { type: 'media' },
+                  },
+                },
+              },
             )
           }
         }
