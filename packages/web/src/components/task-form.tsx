@@ -47,7 +47,6 @@ interface TaskFormProps {
     maxDuration: number
     keepAlive: boolean
     enableBrowser: boolean
-    mode: 'default' | 'coding'
   }) => void
   isSubmitting: boolean
   selectedOwner: string
@@ -143,7 +142,6 @@ export function TaskForm({
   const [maxDuration, setMaxDurationState] = useState(initialMaxDuration)
   const [keepAlive, setKeepAliveState] = useState(initialKeepAlive)
   const [enableBrowser, setEnableBrowserState] = useState(initialEnableBrowser)
-  const [mode, setMode] = useState<'default' | 'coding'>('coding')
   const [showMcpServersDialog, setShowMcpServersDialog] = useState(false)
 
   // Connectors state
@@ -306,12 +304,11 @@ export function TaskForm({
         repoUrl: '',
         selectedAgent,
         selectedModel,
-        mode,
+        mode: taskMode,
         installDependencies,
         maxDuration,
         keepAlive,
         enableBrowser,
-        mode: taskMode,
       })
       return
     }
@@ -355,12 +352,11 @@ export function TaskForm({
       repoUrl: selectedRepoData?.clone_url || '',
       selectedAgent,
       selectedModel,
-      mode,
+      mode: taskMode,
       installDependencies,
       maxDuration,
       keepAlive,
       enableBrowser,
-      mode: taskMode,
     })
   }
 
@@ -413,7 +409,7 @@ export function TaskForm({
                       : 'text-muted-foreground border-border hover:border-primary/30'
                   }`}
                 >
-                  <Code className="h-3 w-3" />
+                  <Code2 className="h-3 w-3" />
                   {taskMode === 'coding' ? 'Coding' : 'Default'}
                 </button>
                 <span className="text-muted-foreground/50">·</span>
@@ -517,26 +513,6 @@ export function TaskForm({
                 {/* Buttons */}
                 <div className="flex items-center gap-2">
                   <TooltipProvider delayDuration={1500} skipDelayDuration={1500}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="rounded-full h-8 w-8 p-0 relative"
-                          onClick={() => setMode((m) => (m === 'coding' ? 'default' : 'coding'))}
-                        >
-                          <Code2 className="h-4 w-4" />
-                          {mode === 'coding' && (
-                            <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-green-500" />
-                          )}
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <p>Coding Mode {mode === 'coding' ? '(on)' : '(off)'}</p>
-                      </TooltipContent>
-                    </Tooltip>
-
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <Button
