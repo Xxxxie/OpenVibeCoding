@@ -44,42 +44,154 @@ export default defineConfig({
 });
 `
 
+// ─── Supervisor state file ─────────────────────────────────────────────────
+// /tmp/devserver.state 的值:
+//   starting        supervisor 刚启动
+//   installing      正在 npm install
+//   install_failed  npm install 失败
+//   workspace_error 找不到 workspace / package.json
+//   running         dev server 正在运行
+//   restarting      dev server 崩溃，supervisor 准备重启
+const SUPERVISOR_STATE_FILE = '/tmp/devserver.state'
+const SUPERVISOR_LOG_FILE = '/tmp/devserver.log'
+const SUPERVISOR_SCRIPT_PATH = '/tmp/dev-supervisor.sh'
+
+/**
+ * 生成 supervisor 脚本内容。
+ *
+ * 模仿 VmDevServer (Freestyle) 的 systemd 模式：
+ *   1. dev-server-install (oneshot): 如果 node_modules 不存在则 npm install
+ *   2. dev-server (persistent):     npm run dev，退出后自动重启 (Restart=always)
+ *
+ * 状态写入 /tmp/devserver.state，方便后端轮询而无需解析日志。
+ */
+function buildSupervisorScript(workspace: string): string {
+  return `#!/bin/bash
+set -o pipefail
+
+LOG="${SUPERVISOR_LOG_FILE}"
+STATE="${SUPERVISOR_STATE_FILE}"
+WORKSPACE="${workspace}"
+TAR_FILE="$WORKSPACE/node_modules.tar.gz"
+HASH_FILE="$WORKSPACE/node_modules.tar.gz.hash"
+
+echo "starting" > "$STATE"
+echo "[supervisor] started at $(date)" > "$LOG"
+echo "[supervisor] workspace=$WORKSPACE" >> "$LOG"
+
+# ── Step 1: verify workspace ─────────────────────────────────────────────────
+if [ ! -f "$WORKSPACE/package.json" ]; then
+  echo "workspace_error" > "$STATE"
+  echo "[supervisor] ERROR: package.json not found at $WORKSPACE" >> "$LOG"
+  ls "$(dirname "$WORKSPACE")" >> "$LOG" 2>&1 || true
+  exit 1
+fi
+echo "[supervisor] workspace OK" >> "$LOG"
+
+# ── Step 2: restore node_modules from tar cache if available ─────────────────
+# tar 包存在 git archive 里，是单个二进制 blob，避免 git 追踪几万个小文件
+if [ -f "$TAR_FILE" ] && [ ! -d "$WORKSPACE/node_modules" ]; then
+  echo "installing" > "$STATE"
+  echo "[supervisor] extracting node_modules from cache..." >> "$LOG"
+  tar -xzf "$TAR_FILE" -C "$WORKSPACE" >> "$LOG" 2>&1 && \
+    echo "[supervisor] cache extracted OK" >> "$LOG" || \
+    echo "[supervisor] cache extract failed, will run npm install" >> "$LOG"
+fi
+
+# ── Step 3: npm install (always — 有缓存时秒退，有新包时只装增量) ────────────
+echo "installing" > "$STATE"
+echo "[supervisor] running npm install..." >> "$LOG"
+cd "$WORKSPACE" && npm install >> "$LOG" 2>&1
+if [ $? -ne 0 ]; then
+  echo "install_failed" > "$STATE"
+  echo "[supervisor] npm install failed" >> "$LOG"
+  exit 1
+fi
+echo "[supervisor] npm install done" >> "$LOG"
+
+# ── Step 4: 如果 package-lock.json 有变化则重新打包 tar ─────────────────────
+# lockfile hash 不变说明依赖没变，跳过打包节省时间
+LOCK_HASH=$(md5sum "$WORKSPACE/package-lock.json" 2>/dev/null | cut -d' ' -f1 || echo "none")
+OLD_HASH=$(cat "$HASH_FILE" 2>/dev/null || echo "")
+if [ "$LOCK_HASH" != "$OLD_HASH" ]; then
+  echo "[supervisor] package-lock.json changed, repacking node_modules cache..." >> "$LOG"
+  tar -czf "$TAR_FILE" -C "$WORKSPACE" node_modules >> "$LOG" 2>&1 && \
+    echo "$LOCK_HASH" > "$HASH_FILE" && \
+    echo "[supervisor] cache repacked OK ($(du -sh $TAR_FILE | cut -f1))" >> "$LOG" || \
+    echo "[supervisor] cache repack failed (non-fatal)" >> "$LOG"
+else
+  echo "[supervisor] package-lock.json unchanged, skipping repack" >> "$LOG"
+fi
+
+# ── Step 5: supervisor loop (Restart=always) ─────────────────────────────────
+echo "running" > "$STATE"
+while true; do
+  echo "[supervisor] starting vite dev server..." >> "$LOG"
+  cd "$WORKSPACE" && npm run dev -- --base=${VITE_BASE} --host ${VITE_HOST} >> "$LOG" 2>&1
+  EXIT_CODE=$?
+  echo "[supervisor] vite exited with code $EXIT_CODE at $(date)" >> "$LOG"
+  echo "restarting" > "$STATE"
+  sleep 2
+  echo "running" > "$STATE"
+done
+`
+}
+
+// ─── Sandbox helpers ──────────────────────────────────────────────────────
+
+async function bashExec(sandbox: SandboxInstance, command: string, timeout = 10000): Promise<string> {
+  try {
+    const res = await sandbox.request('/api/tools/bash', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command, timeout }),
+      signal: AbortSignal.timeout(timeout + 5000),
+    })
+    const data = (await res.json()) as { result?: { output?: string } }
+    return data.result?.output?.trim() ?? ''
+  } catch {
+    return ''
+  }
+}
+
+async function writeFile(sandbox: SandboxInstance, path: string, content: string): Promise<boolean> {
+  try {
+    const res = await sandbox.request('/api/tools/write', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, content }),
+      signal: AbortSignal.timeout(10_000),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+// ─── vite.config.ts patch ─────────────────────────────────────────────────
+
 /**
  * Patch vite.config.ts in the workspace to use the correct sandbox preview settings.
  * Safe to call multiple times (idempotent).
  */
 async function patchViteConfig(sandbox: SandboxInstance, workspace: string): Promise<void> {
-  try {
-    const writeRes = await sandbox.request('/api/tools/write', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: `${workspace}/vite.config.ts`, content: SANDBOX_VITE_CONFIG }),
-      signal: AbortSignal.timeout(10_000),
-    })
-    if (!writeRes.ok) {
-      console.warn('[CodingMode] write tool returned', writeRes.status, '— vite.config.ts not patched')
-    } else {
-      console.log('[CodingMode] vite.config.ts patched for sandbox preview')
-    }
-  } catch (err) {
-    console.warn('[CodingMode] Failed to patch vite.config.ts:', (err as Error).message)
+  const ok = await writeFile(sandbox, `${workspace}/vite.config.ts`, SANDBOX_VITE_CONFIG)
+  if (!ok) {
+    console.warn('[CodingMode] Failed to patch vite.config.ts (write returned error)')
+  } else {
+    console.log('[CodingMode] vite.config.ts patched for sandbox preview')
   }
 }
 
-export async function initCodingProject(sandbox: SandboxInstance, workspace: string): Promise<void> {
-  // Check if project already initialized (package.json + node_modules both exist)
-  const checkRes = await sandbox.request('/api/tools/bash', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      command: `test -f "${workspace}/package.json" && test -d "${workspace}/node_modules" && echo "ready" || (test -f "${workspace}/package.json" && echo "needs_install" || echo "not_found")`,
-      timeout: 5000,
-    }),
-    signal: AbortSignal.timeout(10_000),
-  })
+// ─── Project init (clone + install) ───────────────────────────────────────
 
-  const checkData = (await checkRes.json()) as { result?: { output?: string } }
-  const checkStatus = checkData.result?.output?.trim()
+export async function initCodingProject(sandbox: SandboxInstance, workspace: string): Promise<void> {
+  // Check project state: ready | needs_install | not_found
+  const checkStatus = await bashExec(
+    sandbox,
+    `if [ -f "${workspace}/package.json" ]; then if [ -x "${workspace}/node_modules/.bin/vite" ]; then echo "ready"; else echo "needs_install"; fi; else echo "not_found"; fi`,
+    5000,
+  )
 
   if (checkStatus === 'ready') {
     console.log('[CodingMode] Project already initialized')
@@ -87,22 +199,10 @@ export async function initCodingProject(sandbox: SandboxInstance, workspace: str
   }
 
   if (checkStatus === 'needs_install') {
-    // package.json exists but node_modules doesn't — install deps + patch config
     console.log('[CodingMode] Installing missing dependencies')
     await patchViteConfig(sandbox, workspace)
-    const installRes = await sandbox.request('/api/tools/bash', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        command: `cd "${workspace}" && npm install 2>&1`,
-        timeout: 120000,
-      }),
-      signal: AbortSignal.timeout(180_000),
-    })
-    if (!installRes.ok) {
-      throw new Error('Failed to install dependencies')
-    }
-    console.log('[CodingMode] Dependencies installed')
+    const out = await bashExec(sandbox, `cd "${workspace}" && npm install 2>&1`, 120000)
+    console.log('[CodingMode] npm install output:', out.slice(-200))
     return
   }
 
@@ -110,6 +210,7 @@ export async function initCodingProject(sandbox: SandboxInstance, workspace: str
   console.log('[CodingMode] Initializing project from template')
   const initScript = [
     `cd /tmp`,
+    `rm -rf _template_repo`,
     `git clone --depth 1 --filter=blob:none --sparse ${TEMPLATE_REPO} _template_repo 2>&1 || true`,
     `cd _template_repo`,
     `git sparse-checkout set ${TEMPLATE_SUBDIR} 2>&1`,
@@ -117,111 +218,217 @@ export async function initCodingProject(sandbox: SandboxInstance, workspace: str
     `cd /tmp && rm -rf _template_repo`,
   ].join(' && ')
 
-  const cloneRes = await sandbox.request('/api/tools/bash', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ command: initScript, timeout: 60000 }),
-    signal: AbortSignal.timeout(120_000),
-  })
-
-  if (!cloneRes.ok) {
-    throw new Error('Failed to clone template')
-  }
+  const cloneOut = await bashExec(sandbox, initScript, 60000)
+  console.log('[CodingMode] clone output:', cloneOut.slice(-200))
 
   // Patch vite.config.ts for CloudBase sandbox preview compatibility
   await patchViteConfig(sandbox, workspace)
 
   // Install dependencies
   console.log('[CodingMode] Installing dependencies')
-  const installRes = await sandbox.request('/api/tools/bash', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      command: `cd "${workspace}" && npm install 2>&1`,
-      timeout: 120000,
-    }),
-    signal: AbortSignal.timeout(180_000),
-  })
-
-  if (!installRes.ok) {
-    throw new Error('Failed to install dependencies')
-  }
+  const installOut = await bashExec(sandbox, `cd "${workspace}" && npm install 2>&1`, 120000)
+  console.log('[CodingMode] npm install output:', installOut.slice(-200))
 
   console.log('[CodingMode] Project initialized')
 }
 
-/**
- * Start the Vite dev server in the background inside the sandbox.
- * Returns once the server is confirmed running.
- */
-export async function startDevServer(sandbox: SandboxInstance, workspace: string): Promise<void> {
-  // Check if dev server is already running
-  const checkRes = await sandbox.request('/api/tools/bash', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      command: `curl -s -o /dev/null -w "%{http_code}" http://localhost:${DEV_SERVER_PORT}/ 2>/dev/null || echo "0"`,
-      timeout: 5000,
-    }),
-    signal: AbortSignal.timeout(10_000),
-  })
+// ─── Supervisor management ────────────────────────────────────────────────
 
-  const checkData = (await checkRes.json()) as { result?: { output?: string } }
-  const statusCode = checkData.result?.output?.trim()
-  if (statusCode === '200' || statusCode === '304') {
-    console.log('[CodingMode] Dev server already running')
-    return
+type SupervisorState =
+  | 'starting'
+  | 'installing'
+  | 'install_failed'
+  | 'workspace_error'
+  | 'running'
+  | 'restarting'
+  | 'unknown'
+
+async function readSupervisorState(sandbox: SandboxInstance): Promise<SupervisorState> {
+  const out = await bashExec(sandbox, `cat ${SUPERVISOR_STATE_FILE} 2>/dev/null || echo "unknown"`, 3000)
+  const valid: SupervisorState[] = [
+    'starting',
+    'installing',
+    'install_failed',
+    'workspace_error',
+    'running',
+    'restarting',
+  ]
+  return valid.includes(out as SupervisorState) ? (out as SupervisorState) : 'unknown'
+}
+
+async function readSupervisorLog(sandbox: SandboxInstance, lines = 30): Promise<string> {
+  return bashExec(sandbox, `tail -${lines} ${SUPERVISOR_LOG_FILE} 2>/dev/null || echo "(no log)"`, 5000)
+}
+
+/**
+ * Check if dev server is actually responding on the expected port.
+ */
+async function pingDevServer(sandbox: SandboxInstance): Promise<boolean> {
+  const code = await bashExec(
+    sandbox,
+    `curl -s -o /dev/null -w "%{http_code}" http://localhost:${DEV_SERVER_PORT}/ 2>/dev/null || echo "0"`,
+    5000,
+  )
+  return code === '200' || code === '302' || code === '304'
+}
+
+/**
+ * Check if the supervisor is already running (state file exists and is recent).
+ */
+/**
+ * Write supervisor script to sandbox and start it via PTY.
+ * Returns the PID of the supervisor process if started successfully.
+ */
+async function startSupervisor(sandbox: SandboxInstance, workspace: string): Promise<boolean> {
+  const script = buildSupervisorScript(workspace)
+
+  // Write script via /api/tools/write
+  const written = await writeFile(sandbox, SUPERVISOR_SCRIPT_PATH, script)
+  if (!written) {
+    // Fallback: write via bash heredoc
+    console.warn('[CodingMode] write tool failed, trying heredoc fallback')
+    await bashExec(sandbox, `cat > ${SUPERVISOR_SCRIPT_PATH} << 'SUPERVISOR_EOF'\n${script}\nSUPERVISOR_EOF`, 10000)
   }
 
-  // Start dev server via PTY (persistent process in sandbox's network namespace)
-  console.log('[CodingMode] Starting dev server')
-  const devCmd = `cd "${workspace}" && npm run dev -- --base=${VITE_BASE} --host ${VITE_HOST} > /tmp/devserver.log 2>&1`
+  await bashExec(sandbox, `chmod +x ${SUPERVISOR_SCRIPT_PATH}`, 3000)
+
+  // Clear old state + log
+  await bashExec(
+    sandbox,
+    `echo "starting" > ${SUPERVISOR_STATE_FILE}; truncate -s 0 ${SUPERVISOR_LOG_FILE} 2>/dev/null; true`,
+    3000,
+  )
+
+  // Start via PTY (persistent process in sandbox's network namespace)
   try {
     const ptyRes = await sandbox.request('/api/tools/pty_create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: '/bin/bash', args: ['-c', devCmd], height: 50, width: 220 }),
+      body: JSON.stringify({
+        command: '/bin/bash',
+        args: [SUPERVISOR_SCRIPT_PATH],
+        height: 50,
+        width: 220,
+      }),
       signal: AbortSignal.timeout(15_000),
     })
-    if (!ptyRes.ok) {
-      // fallback
-      await sandbox.request('/api/tools/bash', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: `nohup /bin/bash -c ${JSON.stringify(devCmd)} &`, timeout: 10000 }),
-        signal: AbortSignal.timeout(15_000),
-      })
-    }
-  } catch {
-    // ignore start error, poll will catch it
-  }
-
-  // Wait for dev server to be ready (poll up to 30s)
-  for (let i = 0; i < 15; i++) {
-    await new Promise((r) => setTimeout(r, 2000))
-    try {
-      const pollRes = await sandbox.request('/api/tools/bash', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          command: `curl -s -o /dev/null -w "%{http_code}" http://localhost:${DEV_SERVER_PORT}/ 2>/dev/null || echo "0"`,
-          timeout: 5000,
-        }),
-        signal: AbortSignal.timeout(10_000),
-      })
-      const pollData = (await pollRes.json()) as { result?: { output?: string } }
-      const code = pollData.result?.output?.trim()
-      if (code === '200' || code === '304' || code === '302') {
-        console.log('[CodingMode] Dev server ready')
-        return
+    if (ptyRes.ok) {
+      const ptyData = (await ptyRes.json()) as { success?: boolean; result?: { pid?: number } }
+      if (ptyData.success && ptyData.result?.pid) {
+        console.log(`[CodingMode] Supervisor started via PTY with PID ${ptyData.result.pid}`)
+        return true
       }
-    } catch {
-      // continue polling
+    }
+    console.warn('[CodingMode] PTY create returned non-success, falling back to nohup')
+  } catch (err) {
+    console.warn('[CodingMode] PTY start failed:', (err as Error).message)
+  }
+
+  // Fallback: nohup
+  await bashExec(sandbox, `nohup ${SUPERVISOR_SCRIPT_PATH} > /dev/null 2>&1 &`, 5000)
+  console.log('[CodingMode] Supervisor started via nohup fallback')
+  return true
+}
+
+// ─── Public API ────────────────────────────────────────────────────────────
+
+/**
+ * Ensure the dev server is running via a supervisor process.
+ *
+ * Mirrors the VmDevServer (Freestyle / systemd) pattern:
+ *   - supervisor handles npm install (oneshot) + npm run dev (persistent, auto-restart)
+ *   - state is communicated via /tmp/devserver.state
+ *   - logs in /tmp/devserver.log
+ *
+ * @param options.maxWaitSeconds  Max total seconds to wait. Default 45.
+ *   When npm install is needed, this should be ≥ 90s.
+ *   When node_modules already exists, 15s is enough for Vite to start.
+ */
+export async function detectAndEnsureDevServer(
+  sandbox: SandboxInstance,
+  workspace: string,
+  options?: { maxPollSeconds?: number },
+): Promise<number> {
+  const maxWaitSeconds = options?.maxPollSeconds ?? 45
+
+  // ── Step 1: check if already running and healthy ─────────────────────────
+  const state = await readSupervisorState(sandbox)
+  const running = state === 'running' || state === 'restarting'
+
+  if (running) {
+    const alive = await pingDevServer(sandbox)
+    if (alive) {
+      console.log(`[CodingMode] Dev server already running on port ${DEV_SERVER_PORT}`)
+      return DEV_SERVER_PORT
+    }
+    // state=running 但 HTTP 不通：supervisor 可能已死（PTY 被杀）
+    // 给 supervisor 自动重启一次机会（最多等 6s）
+    console.log('[CodingMode] State=running but HTTP not responding, waiting for auto-restart...')
+    for (let i = 0; i < 3; i++) {
+      await new Promise((r) => setTimeout(r, 2000))
+      if (await pingDevServer(sandbox)) {
+        console.log('[CodingMode] Dev server recovered')
+        return DEV_SERVER_PORT
+      }
+    }
+    // 6s 后仍不通 → supervisor 已死，强制重启
+    console.log('[CodingMode] Supervisor appears dead, force-restarting...')
+  }
+
+  // ── Step 2: start supervisor (or restart if terminal/dead) ───────────────
+  const terminalStates: SupervisorState[] = ['install_failed', 'workspace_error', 'unknown']
+  const needsStart = !running || terminalStates.includes(state)
+  if (needsStart || !running) {
+    console.log(`[CodingMode] Starting supervisor for workspace: ${workspace}`)
+    await startSupervisor(sandbox, workspace)
+  }
+
+  // ── Step 3: poll state file + HTTP until ready ───────────────────────────
+  const pollInterval = 2000
+  const maxPolls = Math.ceil((maxWaitSeconds * 1000) / pollInterval)
+  const logDumpPoll = Math.max(2, Math.floor(maxPolls * 0.4)) // dump log at ~40% timeout
+
+  for (let i = 0; i < maxPolls; i++) {
+    await new Promise((r) => setTimeout(r, pollInterval))
+
+    const currentState = await readSupervisorState(sandbox)
+
+    // Terminal error states — fail fast
+    if (currentState === 'install_failed') {
+      const log = await readSupervisorLog(sandbox)
+      console.error('[CodingMode] npm install failed:\n', log)
+      throw new Error('npm install failed — check devserver log')
+    }
+    if (currentState === 'workspace_error') {
+      const log = await readSupervisorLog(sandbox)
+      console.error('[CodingMode] Workspace error:\n', log)
+      throw new Error(`Workspace error at ${workspace} — package.json not found`)
+    }
+
+    // HTTP ping when state says running
+    if (currentState === 'running' || currentState === 'restarting') {
+      const alive = await pingDevServer(sandbox)
+      if (alive) {
+        console.log(`[CodingMode] Dev server ready on port ${DEV_SERVER_PORT} (state=${currentState})`)
+        return DEV_SERVER_PORT
+      }
+    }
+
+    // Periodic log dump for diagnostics
+    if (i === logDumpPoll) {
+      const log = await readSupervisorLog(sandbox)
+      console.log(`[CodingMode] supervisor state=${currentState}, log:\n${log}`)
     }
   }
 
-  console.log('[CodingMode] Dev server may not be ready, continuing anyway')
+  // Final log dump before giving up
+  const finalLog = await readSupervisorLog(sandbox)
+  const finalState = await readSupervisorState(sandbox)
+  console.error(`[CodingMode] Timeout. state=${finalState}\n${finalLog}`)
+  throw new Error(`Dev server failed to start within ${maxWaitSeconds}s (state=${finalState})`)
 }
+
+// ─── Exports ───────────────────────────────────────────────────────────────
 
 /**
  * Returns the system prompt that constrains the agent to the coding tech stack.
@@ -266,219 +473,9 @@ ${SANDBOX_VITE_CONFIG.trim()}
 
 export const CODING_DEV_SERVER_PORT = DEV_SERVER_PORT
 
-interface PreviewPortInfo {
-  port: number
-  service?: string
-  kind?: string
-}
-
 /**
- * Detect a running dev server inside the sandbox.
- * First tries the /preview/ports API endpoint (remote-workspace service).
- * Falls back to a bash-based port scan if that endpoint isn't available.
- * Returns the port number of the running dev server, or 0 if none found.
+ * @deprecated Use detectAndEnsureDevServer instead.
  */
-async function detectDevServerPort(sandbox: SandboxInstance): Promise<number> {
-  // Attempt 1: 从 devserver.log 提取端口 + HTTP ping 验证进程存活
-  try {
-    const res = await sandbox.request('/api/tools/bash', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        command:
-          // Step 1: extract port from log (Vite prints "http://127.0.0.1:PORT/ or 0.0.0.0:PORT")
-          'PORT=$(grep -oE "[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+:[0-9]+" /tmp/devserver.log 2>/dev/null | grep -oE "[0-9]+$" | tail -1); ' +
-          // Step 2: verify the port responds via HTTP
-          '[ -n "$PORT" ] && STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/" 2>/dev/null || echo 0); ' +
-          'case "$STATUS" in 200|302|304) echo "$PORT";; *) echo "";; esac',
-        timeout: 8000,
-      }),
-      signal: AbortSignal.timeout(12_000),
-    })
-    const data = (await res.json()) as { result?: { output?: string } }
-    const portStr = data.result?.output?.trim()
-    if (portStr && /^\d+$/.test(portStr)) {
-      const port = parseInt(portStr, 10)
-      if (port > 0) return port
-    }
-  } catch {
-    // fall through
-  }
-
-  // Attempt 2: HTTP ping on known default Vite port (fallback if log is stale/empty)
-  try {
-    const res = await sandbox.request('/api/tools/bash', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        command: `curl -s -o /dev/null -w "%{http_code}" http://localhost:${DEV_SERVER_PORT}/ 2>/dev/null || echo "0"`,
-        timeout: 5000,
-      }),
-      signal: AbortSignal.timeout(10_000),
-    })
-    const data = (await res.json()) as { result?: { output?: string } }
-    const code = data.result?.output?.trim()
-    // Vite with --base=/preview/ redirects root / to /preview/ (302)
-    if (code === '200' || code === '304' || code === '302') return DEV_SERVER_PORT
-  } catch {
-    // fall through
-  }
-
-  // Attempt 3: /preview/ports API (remote-workspace endpoint) — filter by vite service
-  try {
-    const res = await sandbox.request('/preview/ports', {
-      signal: AbortSignal.timeout(8_000),
-    })
-    if (res.ok) {
-      const data = (await res.json()) as { ports?: PreviewPortInfo[] }
-      // Look for vite specifically to avoid picking up ttyd/other services
-      const vitePort = data.ports?.find((p) => p.service?.toLowerCase().includes('vite') || p.kind === 'vite-dev')
-      if (vitePort?.port) return vitePort.port
-    }
-  } catch {
-    // fall through
-  }
-
-  return 0
-}
-
-/**
- * Detect the running dev server port, starting one if not found.
- * - First checks for an existing process via pgrep + ss / /proc/net/tcp6
- * - If none found, starts `npm run dev` in the workspace background
- * - Polls until ready or maxPollSeconds is exceeded
- * Returns the port number, or throws if the server fails to start.
- *
- * @param options.maxPollSeconds  Max seconds to wait for the server to come up.
- *   Default 30s. Pass a shorter value (e.g. 15) when node_modules already
- *   exists and only a server restart is needed — Vite typically starts in 3-5s.
- */
-export async function detectAndEnsureDevServer(
-  sandbox: SandboxInstance,
-  workspace: string,
-  options?: { maxPollSeconds?: number },
-): Promise<number> {
-  const maxPollSeconds = options?.maxPollSeconds ?? 30
-  // Step 1: check for already-running dev server
-  const existingPort = await detectDevServerPort(sandbox)
-  if (existingPort > 0) {
-    // 检查是否以正确的 base 启动——看 devserver.log 是否包含正确标记。
-    // 若不含(旧版启动方式),kill 掉重新拉起。
-    let needRestart = false
-    try {
-      const logCheck = await sandbox.request('/api/tools/bash', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          command: `grep -q -- '--base=/preview/' /tmp/devserver.log 2>/dev/null && grep -q -- '--host' /tmp/devserver.log 2>/dev/null && echo "ok" || echo "restart"`,
-          timeout: 5000,
-        }),
-        signal: AbortSignal.timeout(10_000),
-      })
-      const logData = (await logCheck.json()) as { result?: { output?: string } }
-      needRestart = logData.result?.output?.trim() === 'restart'
-    } catch {
-      // 若检查失败，保守起见不重启
-    }
-
-    if (!needRestart) {
-      console.log(`[CodingMode] Dev server already running on port ${existingPort} (with correct flags)`)
-      return existingPort
-    }
-
-    // 旧版 dev server 未带正确标记，kill 后重启
-    console.log('[CodingMode] Dev server needs restart with correct --base=/preview/ --host flags')
-    try {
-      await sandbox.request('/api/tools/bash', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          command: `pkill -f "vite" 2>/dev/null || true; sleep 1`,
-          timeout: 5000,
-        }),
-        signal: AbortSignal.timeout(10_000),
-      })
-    } catch {
-      // ignore kill failure
-    }
-  }
-
-  // Step 2: start dev server using PTY API (persistent process in sandbox's network namespace)
-  // - `nohup ... &` gets killed when the bash subprocess exits
-  // - tmux runs in a different network namespace, ports not visible to bash tool
-  // - PTY creates a persistent process in the same namespace, ports are visible to bash tool
-  console.log('[CodingMode] Starting dev server via PTY')
-  const devCmd = `cd "${workspace}" && npm run dev -- --base=${VITE_BASE} --host ${VITE_HOST} > /tmp/devserver.log 2>&1`
-
-  let ptyStarted = false
-  try {
-    const ptyRes = await sandbox.request('/api/tools/pty_create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        command: '/bin/bash',
-        args: ['-c', devCmd],
-        height: 50,
-        width: 220,
-      }),
-      signal: AbortSignal.timeout(15_000),
-    })
-    if (ptyRes.ok) {
-      const ptyData = (await ptyRes.json()) as { success?: boolean; result?: { pid?: number } }
-      if (ptyData.success && ptyData.result?.pid) {
-        console.log(`[CodingMode] PTY started with PID ${ptyData.result.pid}`)
-        ptyStarted = true
-      }
-    }
-  } catch (ptyErr) {
-    console.warn('[CodingMode] PTY start failed, falling back to nohup:', (ptyErr as Error).message)
-  }
-
-  // Fallback: nohup (may not work in some sandbox configurations)
-  if (!ptyStarted) {
-    await sandbox.request('/api/tools/bash', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        command: `nohup /bin/bash -c ${JSON.stringify(devCmd)} > /dev/null 2>&1 &`,
-        timeout: 10000,
-      }),
-      signal: AbortSignal.timeout(15_000),
-    })
-  }
-
-  // Step 3: poll until port is detected (up to maxPollSeconds)
-  const pollInterval = 2000 // ms
-  const maxPolls = Math.ceil((maxPollSeconds * 1000) / pollInterval)
-  // Log the devserver output once around the halfway point to aid diagnostics
-  const logDumpPoll = Math.max(1, Math.floor(maxPolls / 2))
-
-  for (let i = 0; i < maxPolls; i++) {
-    await new Promise((r) => setTimeout(r, pollInterval))
-    const port = await detectDevServerPort(sandbox)
-    if (port > 0) {
-      console.log(`[CodingMode] Dev server ready on port ${port}`)
-      return port
-    }
-    if (i === logDumpPoll) {
-      // Dump the devserver log to help diagnose issues
-      try {
-        const logRes = await sandbox.request('/api/tools/bash', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            command: `tail -30 /tmp/devserver.log 2>/dev/null || echo "(no log)"`,
-            timeout: 5000,
-          }),
-          signal: AbortSignal.timeout(10_000),
-        })
-        const logData = (await logRes.json()) as { result?: { output?: string } }
-        console.log('[CodingMode] devserver.log:', logData.result?.output)
-      } catch {
-        // ignore
-      }
-    }
-  }
-
-  throw new Error(`Dev server failed to start within ${maxPollSeconds}s`)
+export async function startDevServer(sandbox: SandboxInstance, workspace: string): Promise<void> {
+  await detectAndEnsureDevServer(sandbox, workspace)
 }

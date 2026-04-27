@@ -41,6 +41,7 @@ import {
   MessageSquare,
   Trash2,
   ExternalLink,
+  AlertTriangle,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Streamdown } from 'streamdown'
@@ -90,6 +91,7 @@ export function TaskChat({
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [previewKey, setPreviewKey] = useState(0)
+  const [checkingPreviewErrors, setCheckingPreviewErrors] = useState(false)
   /**
    * P6+: 预览 iframe 真正加载完成(onLoad 触发)的标志。
    * 用于:
@@ -759,6 +761,36 @@ export function TaskChat({
                 title="Open in new window"
               >
                 <ExternalLink className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={async () => {
+                  if (checkingPreviewErrors) return
+                  setCheckingPreviewErrors(true)
+                  try {
+                    const res = await fetch(`/api/tasks/${taskId}/preview-errors`)
+                    const data = await res.json()
+                    if (data.hasErrors && data.errors) {
+                      await chatSendMessage(`预览页面有错误，请修复：\n\n${data.errors}`, () => {})
+                    } else {
+                      toast.success('No errors found')
+                    }
+                  } catch {
+                    toast.error('Failed to check errors')
+                  } finally {
+                    setCheckingPreviewErrors(false)
+                  }
+                }}
+                className="h-6 w-6 p-0 flex-shrink-0"
+                title="Fix preview errors"
+                disabled={checkingPreviewErrors}
+              >
+                {checkingPreviewErrors ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <AlertTriangle className="h-3.5 w-3.5" />
+                )}
               </Button>
             </div>
             {/* iframe 区 */}

@@ -9,7 +9,7 @@ import { Octokit } from '@octokit/rest'
 import { SandboxInstance } from '../sandbox/index.js'
 import { persistenceService } from '../agent/persistence.service'
 import { deleteConversationViaSandbox, scfSandboxManager, archiveToGit } from '../sandbox/index.js'
-import { detectAndEnsureDevServer, initCodingProject } from '../agent/coding-mode.js'
+import { detectAndEnsureDevServer, initCodingProject, CODING_DEV_SERVER_PORT } from '../agent/coding-mode.js'
 import type { Octokit as OctokitType } from '@octokit/rest'
 
 // ---------------------------------------------------------------------------
@@ -2136,6 +2136,36 @@ tasksRouter.get('/:taskId/sandbox-health', requireUserEnv, async (c) => {
 })
 
 // ---------------------------------------------------------------------------
+// GET /:taskId/preview-health — 检查 dev server 是否实际响应（沙箱内 curl）
+// ---------------------------------------------------------------------------
+tasksRouter.get('/:taskId/preview-health', requireUserEnv, async (c) => {
+  try {
+    const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
+    const { taskId } = c.req.param()
+    const task = await findActiveTask(taskId, session.user.id)
+    if (!task) return c.json({ status: 'not_found' })
+    if (!task.sandboxId) return c.json({ status: 'no_sandbox' })
+    const sandbox = await getScfSandbox(task, envId)
+    if (!sandbox) return c.json({ status: 'no_sandbox' })
+    // 在沙箱内部 curl dev server，避免跨域问题
+    const result = await runCommandInScfSandbox(
+      sandbox,
+      `curl -s -o /dev/null -w "%{http_code}" http://localhost:${CODING_DEV_SERVER_PORT}/ 2>/dev/null || echo "0"`,
+      8000,
+    )
+    const code = result.output?.trim()
+    const alive = code === '200' || code === '302' || code === '304'
+    // 同时读取 supervisor state
+    const stateResult = await runCommandInScfSandbox(sandbox, `cat /tmp/devserver.state 2>/dev/null || echo "unknown"`, 3000)
+    const supervisorState = stateResult.output?.trim() || 'unknown'
+    return c.json({ status: alive ? 'running' : 'stopped', httpCode: code, supervisorState })
+  } catch (error) {
+    return c.json({ status: 'error', message: (error as Error).message })
+  }
+})
+
+// ---------------------------------------------------------------------------
 // POST /:taskId/start-sandbox
 // ---------------------------------------------------------------------------
 tasksRouter.post('/:taskId/start-sandbox', requireUserEnv, async (c) => {
@@ -2363,136 +2393,190 @@ tasksRouter.get('/:taskId/preview-url', requireUserEnv, async (c) => {
     }
 
     try {
-    // ── 获取沙箱 ───────────────────────────────────────────────────────
-    let sandbox: SandboxInstance | null = null
-    let resolvedSessionId: string = task.sandboxSessionId || envId
-    let resolvedCwd: string = task.sandboxCwd || `/tmp/workspace/${envId}/${taskId}`
+      // ── 获取沙箱 ───────────────────────────────────────────────────────
+      let sandbox: SandboxInstance | null = null
+      let resolvedSessionId: string = task.sandboxSessionId || envId
+      let resolvedCwd: string = task.sandboxCwd || `/tmp/workspace/${envId}/${taskId}`
 
-    if (task.sandboxId) {
-      sandbox = await getScfSandbox(task, envId)
-    }
-
-    if (!sandbox) {
-      await emit('progress', '正在启动沙箱...')
-      try {
-        const workspaceIsolation = (task.sandboxMode || 'shared') as 'shared' | 'isolated'
-        const sandboxSessionId = workspaceIsolation === 'shared' ? envId : taskId
-        const sandboxCwd = `/tmp/workspace/${envId}/${taskId}`
-
-        sandbox = await scfSandboxManager.getOrCreate(taskId, envId, {
-          mode: 'shared',
-          workspaceIsolation,
-          sandboxSessionId,
-        })
-
-        resolvedSessionId = sandboxSessionId
-        resolvedCwd = sandboxCwd
-
-        await getDb().tasks.update(taskId, {
-          sandboxId: sandbox.functionName,
-          sandboxSessionId: resolvedSessionId,
-          sandboxCwd: resolvedCwd,
-          updatedAt: Date.now(),
-        })
-      } catch (err) {
-        await emit('error', `沙箱启动失败: ${(err as Error).message}`)
-        return
+      if (task.sandboxId) {
+        sandbox = await getScfSandbox(task, envId)
       }
-    }
 
-    // ── coding mode: 初始化项目 + 启动 dev server ────────────────────
-    const taskMode = (task as any).mode as string | null | undefined
-    let needsInstall = false  // 是否需要安装依赖（影响 dev server 超时时长）
-    if (taskMode === 'coding' || !taskMode) {
-      // 修正 cwd（某些任务 sandboxCwd 与沙箱实际 HOME 不符）
-      try {
-        const pkgCheck = await sandbox!.request(
-          `/e2b-compatible/files?path=${encodeURIComponent(`${resolvedCwd}/package.json`)}`,
-          { signal: AbortSignal.timeout(8_000) },
-        )
-        if (!pkgCheck.ok) {
-          const pkgAtRoot = await sandbox!.request(`/e2b-compatible/files?path=${encodeURIComponent('package.json')}`, {
-            signal: AbortSignal.timeout(8_000),
+      if (!sandbox) {
+        await emit('progress', '正在启动沙箱...')
+        try {
+          const workspaceIsolation = (task.sandboxMode || 'shared') as 'shared' | 'isolated'
+          const sandboxSessionId = workspaceIsolation === 'shared' ? envId : taskId
+          const sandboxCwd = `/tmp/workspace/${envId}/${taskId}`
+
+          sandbox = await scfSandboxManager.getOrCreate(taskId, envId, {
+            mode: 'shared',
+            workspaceIsolation,
+            sandboxSessionId,
           })
-          if (pkgAtRoot.ok) {
-            const cwdRes = await sandbox!.request('/api/tools/bash', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ command: 'pwd', timeout: 3000 }),
-              signal: AbortSignal.timeout(8_000),
-            })
-            const cwdData = (await cwdRes.json()) as { result?: { output?: string } }
-            const detectedCwd = cwdData.result?.output?.trim()
-            if (detectedCwd) {
-              console.log(`[preview-url] Correcting workspace cwd: ${resolvedCwd} → ${detectedCwd}`)
-              resolvedCwd = detectedCwd
+
+          resolvedSessionId = sandboxSessionId
+          resolvedCwd = sandboxCwd
+
+          await getDb().tasks.update(taskId, {
+            sandboxId: sandbox.functionName,
+            sandboxSessionId: resolvedSessionId,
+            sandboxCwd: resolvedCwd,
+            updatedAt: Date.now(),
+          })
+        } catch (err) {
+          await emit('error', `沙箱启动失败: ${(err as Error).message}`)
+          return
+        }
+      }
+
+      // ── coding mode: 初始化项目 + 启动 dev server ────────────────────
+      const taskMode = (task as any).mode as string | null | undefined
+      // 只有明确 mode==='coding' 才走初始化流程，null/undefined/'default' 均不处理
+      const isCodingMode = taskMode === 'coding'
+      let needsInstall = false // 是否需要安装依赖（影响 dev server 超时时长）
+      if (isCodingMode) {
+        // 修正 cwd（某些任务 sandboxCwd 与沙箱实际 HOME 不符）
+        try {
+          const pkgCheck = await sandbox!.request(
+            `/e2b-compatible/files?path=${encodeURIComponent(`${resolvedCwd}/package.json`)}`,
+            { signal: AbortSignal.timeout(8_000) },
+          )
+          if (!pkgCheck.ok) {
+            const pkgAtRoot = await sandbox!.request(
+              `/e2b-compatible/files?path=${encodeURIComponent('package.json')}`,
+              { signal: AbortSignal.timeout(8_000) },
+            )
+            if (pkgAtRoot.ok) {
+              const cwdRes = await sandbox!.request('/api/tools/bash', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ command: 'pwd', timeout: 3000 }),
+                signal: AbortSignal.timeout(8_000),
+              })
+              const cwdData = (await cwdRes.json()) as { result?: { output?: string } }
+              const detectedCwd = cwdData.result?.output?.trim()
+              if (detectedCwd) {
+                console.log(`[preview-url] Correcting workspace cwd: ${resolvedCwd} → ${detectedCwd}`)
+                resolvedCwd = detectedCwd
+              }
             }
           }
+        } catch {
+          // 检测失败不影响主流程
         }
-      } catch {
-        // 检测失败不影响主流程
+
+        // 判断项目状态：supervisor 负责 install + dev server，
+        // 这里只负责在 not_found 时 clone 模板（supervisor 无法做 git clone）
+        let projectStatus = 'unknown'
+        try {
+          const checkRes = await sandbox!.request('/api/tools/bash', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              command: `if [ -f "${resolvedCwd}/package.json" ]; then if [ -x "${resolvedCwd}/node_modules/.bin/vite" ]; then echo "ready"; else echo "needs_install"; fi; else echo "not_found"; fi`,
+              timeout: 5000,
+            }),
+            signal: AbortSignal.timeout(10_000),
+          })
+          const checkData = (await checkRes.json()) as { result?: { output?: string } }
+          projectStatus = checkData.result?.output?.trim() ?? 'unknown'
+          needsInstall = projectStatus !== 'ready'
+        } catch {
+          needsInstall = true
+        }
+
+        if (projectStatus === 'not_found') {
+          // 需要先 clone 模板，supervisor 之后会自动 install + start
+          await emit('progress', '正在初始化项目（首次约 60 秒）...')
+          try {
+            await initCodingProject(sandbox!, resolvedCwd)
+          } catch (err) {
+            console.warn('[preview-url] initCodingProject warn:', (err as Error).message)
+          }
+        } else if (needsInstall) {
+          await emit('progress', '正在安装依赖（首次约 60 秒）...')
+        }
       }
 
-      // 检查是否需要安装依赖，据此给出不同的进度提示
+      // ── 启动 / 确认 dev server（由 supervisor 管理）────────────────────
+      // supervisor 负责 npm install + npm run dev + 自动重启（类似 systemd Restart=always）
+      // needsInstall=true → supervisor 还要跑 npm install，给足 120s
+      // needsInstall=false → 只是启动 vite，15s 足够
+      const devServerMaxPollSeconds = needsInstall ? 120 : 15
+      console.log(`[preview-url] Starting dev server in workspace: ${resolvedCwd}, needsInstall=${needsInstall}`)
+      await emit('progress', '正在启动开发服务器...')
+      let port: number
       try {
-        const checkRes = await sandbox!.request('/api/tools/bash', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            command: `test -f "${resolvedCwd}/package.json" && test -d "${resolvedCwd}/node_modules" && echo "ready" || (test -f "${resolvedCwd}/package.json" && echo "needs_install" || echo "not_found")`,
-            timeout: 5000,
-          }),
-          signal: AbortSignal.timeout(10_000),
-        })
-        const checkData = (await checkRes.json()) as { result?: { output?: string } }
-        const status = checkData.result?.output?.trim()
-        needsInstall = status === 'needs_install' || status === 'not_found'
-      } catch {
-        needsInstall = true
-      }
-
-      if (needsInstall) {
-        await emit('progress', '正在安装依赖（首次约 60 秒）...')
-      }
-
-      try {
-        await initCodingProject(sandbox!, resolvedCwd)
+        port = await detectAndEnsureDevServer(sandbox!, resolvedCwd, { maxPollSeconds: devServerMaxPollSeconds })
       } catch (err) {
-        console.warn('[preview-url] initCodingProject warn:', (err as Error).message)
+        await emit('error', `Dev server 启动失败: ${(err as Error).message}`)
+        return
       }
-    }
 
-    // ── 启动 / 确认 dev server ────────────────────────────────────────
-    // 已有 node_modules → Vite 通常 3-5s 就绪，给 15s 超时（失败快速报错）
-    // 刚安装完依赖 / 全量克隆 → 给 30s
-    const devServerMaxPollSeconds = needsInstall ? 30 : 15
-    await emit('progress', '正在启动开发服务器...')
-    let port: number
-    try {
-      port = await detectAndEnsureDevServer(sandbox!, resolvedCwd, { maxPollSeconds: devServerMaxPollSeconds })
-    } catch (err) {
-      await emit('error', `Dev server 启动失败: ${(err as Error).message}`)
-      return
-    }
+      // ── 获取网关 URL ──────────────────────────────────────────────────
+      let previewBase: string
+      try {
+        previewBase = await scfSandboxManager.ensurePreviewGateway()
+      } catch {
+        const sandboxEnvId = process.env.TCB_ENV_ID || ''
+        previewBase = `https://${sandboxEnvId}.service.tcloudbase.com/preview`
+      }
 
-    // ── 获取网关 URL ──────────────────────────────────────────────────
-    let previewBase: string
-    try {
-      previewBase = await scfSandboxManager.ensurePreviewGateway()
-    } catch {
-      const sandboxEnvId = process.env.TCB_ENV_ID || ''
-      previewBase = `https://${sandboxEnvId}.service.tcloudbase.com/preview`
-    }
-
-    const gatewayUrl = `${previewBase}/${port}/?cloudbase_session_id=${resolvedSessionId}`
-    await emit('ready', 'Dev server ready', { gatewayUrl, port })
-
+      const gatewayUrl = `${previewBase}/${port}/?cloudbase_session_id=${resolvedSessionId}`
+      await emit('ready', 'Dev server ready', { gatewayUrl, port })
     } catch (err) {
       // 顶层异常兜底：确保前端总能收到 error 事件而非静默关闭
       console.error('[preview-url] Unhandled error in SSE callback:', err)
       await emit('error', `预览启动失败: ${(err as Error).message || '未知错误'}`)
     }
   })
+})
+
+// ---------------------------------------------------------------------------
+// GET /:taskId/preview-errors — 检查 Vite dev server 日志中的错误
+// 返回 { hasErrors, errors } 供前端将错误发送到聊天
+// ---------------------------------------------------------------------------
+tasksRouter.get('/:taskId/preview-errors', requireUserEnv, async (c) => {
+  const session = c.get('session')!
+  const { taskId } = c.req.param()
+
+  const task = await findActiveTask(taskId, session.user.id)
+  if (!task) return c.json({ error: 'Task not found' }, 404)
+
+  if (!task.sandboxId) {
+    return c.json({ hasErrors: false, errors: '' })
+  }
+
+  try {
+    const { envId } = c.get('userEnv')!
+    const sandbox = await getScfSandbox(task, envId)
+    if (!sandbox) {
+      return c.json({ hasErrors: false, errors: '' })
+    }
+
+    const logRes = await sandbox.request('/api/tools/bash', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        command:
+          'tail -50 /tmp/devserver.log 2>/dev/null | grep -iE "(error|✘|\\[ERROR\\]|failed|Transform failed|Cannot find|Module not found|SyntaxError|TypeError)" || echo ""',
+        timeout: 5000,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    })
+
+    const logData = (await logRes.json()) as { result?: { output?: string } }
+    const errorLines = logData.result?.output?.trim() || ''
+
+    if (errorLines) {
+      return c.json({ hasErrors: true, errors: errorLines })
+    }
+    return c.json({ hasErrors: false, errors: '' })
+  } catch (err) {
+    console.error('[preview-errors] Failed to check dev server log:', err)
+    return c.json({ hasErrors: false, errors: '' })
+  }
 })
 
 export default tasksRouter

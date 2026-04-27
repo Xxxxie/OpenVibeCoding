@@ -36,6 +36,7 @@ import {
   Plus,
   Maximize,
   Minimize,
+  AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useState, useEffect, useRef, useCallback } from 'react'
@@ -242,9 +243,8 @@ export function TaskDetails({
   // Desktop pane toggles - initialize from cookies
   const [showFilesPane, setShowFilesPane] = useState(() => getShowFilesPane())
   const [showCodePane, setShowCodePane] = useState(() => getShowCodePane())
-  // isCodingMode: explicit 'coding' mode OR legacy tasks without a git repo
-  // (tasks without repoUrl are inherently sandbox-only / coding tasks)
-  const isCodingMode = task.mode === 'coding' || (!task.repoUrl && !task.sandboxUrl)
+  // isCodingMode: 只有明确 mode==='coding' 才显示 preview，其他（'default' 或 null/undefined）均不显示
+  const isCodingMode = task.mode === 'coding'
   // Preview pane:
   //   - non-coding mode: never show (no button, no pane regardless of cookie)
   //   - coding mode: open by default; user can close and it's remembered via cookie
@@ -265,6 +265,7 @@ export function TaskDetails({
   const [previewGatewayError, setPreviewGatewayError] = useState<string | null>(null)
   const [previewLoadingMessage, setPreviewLoadingMessage] = useState('正在启动预览...')
   const [iframeLoaded, setIframeLoaded] = useState(false)
+  const [checkingErrors, setCheckingErrors] = useState(false)
   const previewIframeRef = useRef<HTMLIFrameElement | null>(null)
   const previewAbortRef = useRef<AbortController | null>(null)
 
@@ -364,7 +365,14 @@ export function TaskDetails({
     if (isCodingMode && showPreviewPane && !previewGatewayUrl && !previewGatewayLoading && !previewGatewayError) {
       loadPreviewGatewayUrl()
     }
-  }, [isCodingMode, showPreviewPane, previewGatewayUrl, previewGatewayLoading, previewGatewayError, loadPreviewGatewayUrl])
+  }, [
+    isCodingMode,
+    showPreviewPane,
+    previewGatewayUrl,
+    previewGatewayLoading,
+    previewGatewayError,
+    loadPreviewGatewayUrl,
+  ])
 
   // previewKey / URL 变化时重置 iframe 加载状态
   // previewKey 增加（手动刷新）时，重新调后端拉起 dev server
@@ -377,6 +385,39 @@ export function TaskDetails({
       void loadPreviewGatewayUrl()
     }
   }, [previewKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 后台健康检查：iframe 显示后每 15s 通过后端检查 dev server 是否实际响应。
+  // 后端在沙箱内部 curl localhost:5173，避免跨域问题。
+  // status==='stopped' 说明 vite 没在跑，自动重新拉起。
+  useEffect(() => {
+    if (!isCodingMode || !previewGatewayUrl || previewGatewayLoading) return
+
+    let cancelled = false
+    const interval = setInterval(async () => {
+      if (cancelled) return
+      try {
+        const res = await fetch(`/api/tasks/${task.id}/preview-health`, {
+          credentials: 'include',
+          signal: AbortSignal.timeout(12000),
+        })
+        if (!res.ok) return
+        const data = (await res.json()) as { status: string; supervisorState?: string }
+        if (data.status === 'stopped' && !cancelled) {
+          console.log(`[preview] Dev server stopped (supervisorState=${data.supervisorState}), restarting...`)
+          clearInterval(interval)
+          setPreviewLoadingMessage('Dev server 已停止，正在重启...')
+          void loadPreviewGatewayUrl()
+        }
+      } catch {
+        // 网络错误忽略
+      }
+    }, 15000)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [isCodingMode, previewGatewayUrl, previewGatewayLoading, loadPreviewGatewayUrl, task.id])
 
   // Pane widths for resizing
   const [filesPaneWidth, setFilesPaneWidth] = useState(() => getFilesPaneWidth())
@@ -2124,6 +2165,36 @@ export function TaskDetails({
                         disabled={!previewGatewayUrl}
                       >
                         <ExternalLink className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={async () => {
+                          if (checkingErrors) return
+                          setCheckingErrors(true)
+                          try {
+                            const res = await fetch(`/api/tasks/${task.id}/preview-errors`)
+                            const data = await res.json()
+                            if (data.hasErrors && data.errors) {
+                              await chatStream.sendMessage(`预览页面有错误，请修复：\n\n${data.errors}`, () => {})
+                            } else {
+                              toast.success('No errors found')
+                            }
+                          } catch {
+                            toast.error('Failed to check errors')
+                          } finally {
+                            setCheckingErrors(false)
+                          }
+                        }}
+                        className="h-6 w-6 p-0 flex-shrink-0"
+                        title="Fix preview errors"
+                        disabled={!previewGatewayUrl || checkingErrors}
+                      >
+                        {checkingErrors ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <AlertTriangle className="h-3.5 w-3.5" />
+                        )}
                       </Button>
                       <Button
                         variant="ghost"
