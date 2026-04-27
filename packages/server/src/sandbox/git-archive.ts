@@ -178,8 +178,9 @@ export async function deleteConversationViaSandbox(
   sandbox: SandboxInstance,
   envId: string,
   conversationId: string,
+  sandboxCwd?: string,
 ): Promise<void> {
-  const workspace = `/tmp/workspace/${envId}/${conversationId}`
+  const workspace = sandboxCwd || `/tmp/workspace/${envId}/${conversationId}`
 
   try {
     const res = await sandbox.request('/api/tools/bash', {

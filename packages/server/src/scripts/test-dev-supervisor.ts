@@ -19,6 +19,7 @@
 import { getDb } from '../db/index.js'
 import { scfSandboxManager } from '../sandbox/index.js'
 import { detectAndEnsureDevServer } from '../agent/coding-mode.js'
+import { resolveSandboxConfig } from '../lib/sandbox-config.js'
 
 const taskId = process.argv[2]
 if (!taskId) {
@@ -40,25 +41,30 @@ async function main() {
     process.exit(1)
   }
 
-  const sandboxSessionId = (task as any).sandboxSessionId || envId
-  const workspace = (task as any).sandboxCwd || `/tmp/workspace/${envId}/${taskId}`
+  const sandboxConfig = resolveSandboxConfig({
+    sandboxMode: (task as any).sandboxMode,
+    sandboxSessionId: (task as any).sandboxSessionId,
+    sandboxCwd: (task as any).sandboxCwd,
+    envId,
+    taskId,
+  })
 
   console.log(`[test] task.sandboxId    = ${task.sandboxId}`)
-  console.log(`[test] sandboxSessionId  = ${sandboxSessionId}`)
-  console.log(`[test] workspace         = ${workspace}`)
+  console.log(`[test] sandboxSessionId  = ${sandboxConfig.sandboxSessionId}`)
+  console.log(`[test] workspace         = ${sandboxConfig.sandboxCwd}`)
 
   // 获取沙箱
   let sandbox
   if (task.sandboxId) {
     console.log('[test] Getting existing sandbox...')
-    sandbox = await scfSandboxManager.getExisting(task.sandboxId, sandboxSessionId)
+    sandbox = await scfSandboxManager.getExisting(task.sandboxId, sandboxConfig.sandboxSessionId)
   }
   if (!sandbox) {
     console.log('[test] Sandbox not found, creating...')
     sandbox = await scfSandboxManager.getOrCreate(taskId, envId, {
       mode: 'shared',
       workspaceIsolation: 'shared',
-      sandboxSessionId,
+      sandboxSessionId: sandboxConfig.sandboxSessionId,
     })
   }
   console.log(`[test] Sandbox ready: ${sandbox.functionName}`)
@@ -68,13 +74,13 @@ async function main() {
   console.log('\n[test] ── Calling detectAndEnsureDevServer ──────────────────')
 
   try {
-    const port = await detectAndEnsureDevServer(sandbox, workspace, { maxPollSeconds: 120 })
+    const port = await detectAndEnsureDevServer(sandbox, sandboxConfig.sandboxCwd, { maxPollSeconds: 120 })
     const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
     console.log(`\n[test] ✅ Dev server ready on port ${port} (${elapsed}s)`)
 
     // 打印 gateway URL
     const previewBase = `https://${envId}.service.tcloudbase.com/preview`
-    const gatewayUrl = `${previewBase}/${port}/?cloudbase_session_id=${sandboxSessionId}`
+    const gatewayUrl = `${previewBase}/${port}/?cloudbase_session_id=${sandboxConfig.sandboxSessionId}`
     console.log(`[test] Preview URL: ${gatewayUrl}`)
 
     // 打印 supervisor 日志最后几行
@@ -93,7 +99,7 @@ async function main() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        command: `ls -lh ${workspace}/node_modules.tar.gz 2>/dev/null || echo "(no tar cache)"`,
+        command: `ls -lh ${sandboxConfig.sandboxCwd}/node_modules.tar.gz 2>/dev/null || echo "(no tar cache)"`,
         timeout: 5000,
       }),
       signal: AbortSignal.timeout(8_000),

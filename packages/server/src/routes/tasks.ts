@@ -4,6 +4,7 @@ import { getDb } from '../db/index.js'
 import { nanoid } from 'nanoid'
 import { requireAuth, requireUserEnv, type AppEnv } from '../middleware/auth'
 import { createTaskLogger } from '../lib/task-logger'
+import { resolveSandboxConfig, backfillSandboxConfig } from '../lib/sandbox-config'
 import { decrypt } from '../lib/crypto'
 import { Octokit } from '@octokit/rest'
 import { SandboxInstance } from '../sandbox/index.js'
@@ -303,14 +304,11 @@ tasksRouter.post('/', async (c) => {
   const now = Date.now()
 
   // Compute sandbox config based on WORKSPACE_ISOLATION env var
-  const sandboxMode = process.env.WORKSPACE_ISOLATION === 'isolated' ? 'isolated' : 'shared'
-  let sandboxSessionId: string | null = null
-  let sandboxCwd: string | null = null
+  let sandboxConfig: ReturnType<typeof resolveSandboxConfig> | null = null
   try {
     const resource = await getDb().userResources.findByUserId(session.user.id)
     if (resource?.envId) {
-      sandboxSessionId = sandboxMode === 'shared' ? resource.envId : taskId
-      sandboxCwd = sandboxMode === 'shared' ? `/tmp/workspace/${resource.envId}/${taskId}` : `/tmp/workspace/${taskId}`
+      sandboxConfig = resolveSandboxConfig({ envId: resource.envId, taskId })
     }
   } catch {
     // Non-critical: sandbox config will be computed at agent launch time
@@ -335,9 +333,9 @@ tasksRouter.post('/', async (c) => {
     error: null,
     branchName: null,
     sandboxId: null,
-    sandboxSessionId,
-    sandboxCwd,
-    sandboxMode,
+    sandboxSessionId: sandboxConfig?.sandboxSessionId ?? null,
+    sandboxCwd: sandboxConfig?.sandboxCwd ?? null,
+    sandboxMode: sandboxConfig?.sandboxMode ?? null,
     agentSessionId: null,
     sandboxUrl: null,
     previewUrl: null,
@@ -408,7 +406,7 @@ tasksRouter.delete('/:taskId', requireUserEnv, async (c) => {
       const scfSessionId = existing.sandboxSessionId || envId
       const sandbox = await scfSandboxManager.getExisting(taskId, scfSessionId).catch(() => null)
       if (sandbox) {
-        await deleteConversationViaSandbox(sandbox, envId, taskId)
+        await deleteConversationViaSandbox(sandbox, envId, taskId, existing.sandboxCwd || undefined)
       }
     } catch (e) {
       console.log('clean conversation workspace error')
@@ -2157,7 +2155,11 @@ tasksRouter.get('/:taskId/preview-health', requireUserEnv, async (c) => {
     const code = result.output?.trim()
     const alive = code === '200' || code === '302' || code === '304'
     // 同时读取 supervisor state
-    const stateResult = await runCommandInScfSandbox(sandbox, `cat /tmp/devserver.state 2>/dev/null || echo "unknown"`, 3000)
+    const stateResult = await runCommandInScfSandbox(
+      sandbox,
+      `cat /tmp/devserver.state 2>/dev/null || echo "unknown"`,
+      3000,
+    )
     const supervisorState = stateResult.output?.trim() || 'unknown'
     return c.json({ status: alive ? 'running' : 'stopped', httpCode: code, supervisorState })
   } catch (error) {
@@ -2394,9 +2396,16 @@ tasksRouter.get('/:taskId/preview-url', requireUserEnv, async (c) => {
 
     try {
       // ── 获取沙箱 ───────────────────────────────────────────────────────
+      const sandboxConfig = resolveSandboxConfig({
+        sandboxMode: task.sandboxMode,
+        sandboxSessionId: task.sandboxSessionId,
+        sandboxCwd: task.sandboxCwd,
+        envId,
+        taskId,
+      })
       let sandbox: SandboxInstance | null = null
-      let resolvedSessionId: string = task.sandboxSessionId || envId
-      let resolvedCwd: string = task.sandboxCwd || `/tmp/workspace/${envId}/${taskId}`
+      let resolvedSessionId = sandboxConfig.sandboxSessionId
+      let resolvedCwd = sandboxConfig.sandboxCwd
 
       if (task.sandboxId) {
         sandbox = await getScfSandbox(task, envId)
@@ -2405,18 +2414,11 @@ tasksRouter.get('/:taskId/preview-url', requireUserEnv, async (c) => {
       if (!sandbox) {
         await emit('progress', '正在启动沙箱...')
         try {
-          const workspaceIsolation = (task.sandboxMode || 'shared') as 'shared' | 'isolated'
-          const sandboxSessionId = workspaceIsolation === 'shared' ? envId : taskId
-          const sandboxCwd = `/tmp/workspace/${envId}/${taskId}`
-
           sandbox = await scfSandboxManager.getOrCreate(taskId, envId, {
             mode: 'shared',
-            workspaceIsolation,
-            sandboxSessionId,
+            workspaceIsolation: sandboxConfig.sandboxMode,
+            sandboxSessionId: sandboxConfig.sandboxSessionId,
           })
-
-          resolvedSessionId = sandboxSessionId
-          resolvedCwd = sandboxCwd
 
           await getDb().tasks.update(taskId, {
             sandboxId: sandbox.functionName,

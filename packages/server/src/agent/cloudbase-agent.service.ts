@@ -12,6 +12,7 @@ import { createSandboxMcpClient } from '../sandbox/sandbox-mcp-proxy.js'
 import { archiveToGit } from '../sandbox/git-archive.js'
 import { initCodingProject, startDevServer, getCodingSystemPrompt } from './coding-mode.js'
 import { getDb } from '../db/index.js'
+import { resolveSandboxConfig, backfillSandboxConfig } from '../lib/sandbox-config.js'
 import { nanoid } from 'nanoid'
 import { decrypt } from '../lib/crypto.js'
 import type { AgentCallbackMessage, AgentOptions, CodeBuddyMessage, ExtendedSessionUpdate } from '@coder/shared'
@@ -24,7 +25,7 @@ import { sessionPermissions, normalizeToolName } from './session-permissions.js'
 const DEFAULT_MODEL = 'glm-5.0'
 const OAUTH_TOKEN_ENDPOINT = 'https://copilot.tencent.com/oauth2/token'
 const CONNECT_TIMEOUT_MS = 60_000
-const ITERATION_TIMEOUT_MS = 45 * 1000
+const ITERATION_TIMEOUT_MS = 2 * 60 * 1000
 const HEALTH_MAX_RETRIES = 20
 const HEALTH_INTERVAL_MS = 2000
 
@@ -116,6 +117,7 @@ async function initSandboxWorkspace(
   sandbox: SandboxInstance,
   secret: { envId: string; secretId: string; secretKey: string; token?: string },
   conversationId: string,
+  preferredCwd?: string,
 ): Promise<string | undefined> {
   try {
     const res = await sandbox.request('/api/session/init', {
@@ -133,7 +135,7 @@ async function initSandboxWorkspace(
     })
 
     if (res.ok) {
-      const workspace = `/tmp/workspace/${secret.envId}/${conversationId}`
+      const workspace = preferredCwd || `/tmp/workspace/${secret.envId}/${conversationId}`
       console.log('[Agent] initSandboxWorkspace success, workspace:', workspace)
 
       // 创建会话工作目录
@@ -327,8 +329,9 @@ ${
 Cron 表达式格式：分 时 日 月 周，例如 "0 20 * * *" 表示每天 20:00。`
 
   if (sandboxCwd) {
+    const homeDir = sandboxCwd.includes('/') ? sandboxCwd.substring(0, sandboxCwd.lastIndexOf('/')) : sandboxCwd
     return `${base}
-工具默认在 Home: /tmp/workspace/${envId} 下执行
+工具默认在 Home: ${homeDir} 下执行
 为项目开辟工作目录为: ${sandboxCwd}
 使用的云开发环境为: ${envId}
 请注意：
@@ -531,44 +534,37 @@ export class CloudbaseAgentService {
 
     // Read sandbox config from task record (written at creation time)
     // Historical tasks missing these fields are backfilled as 'shared' mode
-    let taskSandboxMode: string | null = null
-    let taskSandboxSessionId: string | null = null
-    let taskSandboxCwd: string | null = null
+    let sandboxConfig: ReturnType<typeof resolveSandboxConfig> | null = null
     try {
       const taskRecord = await getDb().tasks.findById(conversationId)
-      taskSandboxMode = taskRecord?.sandboxMode || null
-      taskSandboxSessionId = taskRecord?.sandboxSessionId || null
-      taskSandboxCwd = taskRecord?.sandboxCwd || null
-
-      // Backfill missing sandbox config for historical tasks (default to 'shared')
-      if (!taskSandboxMode || !taskSandboxSessionId || !taskSandboxCwd) {
-        taskSandboxMode = taskSandboxMode || 'shared'
-        taskSandboxSessionId =
-          taskSandboxSessionId || (taskSandboxMode === 'shared' ? userContext.envId : conversationId)
-        taskSandboxCwd =
-          taskSandboxCwd ||
-          (taskSandboxMode === 'shared'
-            ? `/tmp/workspace/${userContext.envId}/${conversationId}`
-            : `/tmp/workspace/${conversationId}`)
-        await getDb().tasks.update(conversationId, {
-          sandboxMode: taskSandboxMode as 'shared' | 'isolated',
-          sandboxSessionId: taskSandboxSessionId,
-          sandboxCwd: taskSandboxCwd,
-          updatedAt: Date.now(),
-        })
-      }
+      await backfillSandboxConfig(
+        conversationId,
+        {
+          sandboxMode: taskRecord?.sandboxMode,
+          sandboxSessionId: taskRecord?.sandboxSessionId,
+          sandboxCwd: taskRecord?.sandboxCwd,
+        },
+        userContext.envId,
+        getDb(),
+      )
+      sandboxConfig = resolveSandboxConfig({
+        sandboxMode: taskRecord?.sandboxMode,
+        sandboxSessionId: taskRecord?.sandboxSessionId,
+        sandboxCwd: taskRecord?.sandboxCwd,
+        envId: userContext.envId,
+        taskId: conversationId,
+      })
     } catch {
       // Non-critical
     }
 
-    const sandboxMode = taskSandboxMode || (process.env.WORKSPACE_ISOLATION === 'isolated' ? 'isolated' : 'shared')
-    const sandboxSessionId = taskSandboxSessionId || (sandboxMode === 'shared' ? userContext.envId : conversationId)
-    const defaultCwd =
-      sandboxMode === 'shared'
-        ? `/tmp/workspace/${userContext.envId}/${conversationId}`
-        : `/tmp/workspace/${conversationId}`
+    // Fallback when task record was unavailable
+    if (!sandboxConfig) {
+      sandboxConfig = resolveSandboxConfig({ envId: userContext.envId, taskId: conversationId })
+    }
 
-    const actualCwd = cwd || taskSandboxCwd || defaultCwd
+    const { sandboxMode, sandboxSessionId, sandboxCwd: resolvedCwd } = sandboxConfig
+    const actualCwd = cwd || resolvedCwd
     mkdirSync(actualCwd, { recursive: true })
 
     // ── 创建 EventBuffer 用于持久化 ACP 事件 ─────────────────────────
@@ -768,6 +764,7 @@ export class CloudbaseAgentService {
               token: userCredentials?.sessionToken,
             },
             conversationId,
+            taskSandboxCwd || undefined,
           )
           if (sandboxCwd) {
             detectedSandboxCwd = sandboxCwd
