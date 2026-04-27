@@ -66,7 +66,6 @@ async function patchViteConfig(sandbox: SandboxInstance, workspace: string): Pro
   }
 }
 
-
 export async function initCodingProject(sandbox: SandboxInstance, workspace: string): Promise<void> {
   // Check if project already initialized (package.json + node_modules both exist)
   const checkRes = await sandbox.request('/api/tools/bash', {
@@ -331,9 +330,7 @@ async function detectDevServerPort(sandbox: SandboxInstance): Promise<number> {
     if (res.ok) {
       const data = (await res.json()) as { ports?: PreviewPortInfo[] }
       // Look for vite specifically to avoid picking up ttyd/other services
-      const vitePort = data.ports?.find(
-        (p) => p.service?.toLowerCase().includes('vite') || p.kind === 'vite-dev',
-      )
+      const vitePort = data.ports?.find((p) => p.service?.toLowerCase().includes('vite') || p.kind === 'vite-dev')
       if (vitePort?.port) return vitePort.port
     }
   } catch {
@@ -453,7 +450,10 @@ export async function detectAndEnsureDevServer(sandbox: SandboxInstance, workspa
         const logRes = await sandbox.request('/api/tools/bash', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ command: `tail -30 /tmp/devserver.log 2>/dev/null || echo "(no log)"`, timeout: 5000 }),
+          body: JSON.stringify({
+            command: `tail -30 /tmp/devserver.log 2>/dev/null || echo "(no log)"`,
+            timeout: 5000,
+          }),
           signal: AbortSignal.timeout(10_000),
         })
         const logData = (await logRes.json()) as { result?: { output?: string } }

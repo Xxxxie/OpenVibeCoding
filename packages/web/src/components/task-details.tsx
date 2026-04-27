@@ -253,10 +253,8 @@ export function TaskDetails({
     // getShowPreviewPane() defaults to false when no cookie exists.
     // For coding mode we want "open" as the factory default, so only honour
     // the cookie when it has been explicitly set (i.e. !== undefined).
-    const raw = typeof document !== 'undefined'
-      ? document.cookie.match(/(^| )show-preview-pane=([^;]+)/)
-      : null
-    return raw ? raw[2] === 'true' : true   // default open for coding mode
+    const raw = typeof document !== 'undefined' ? document.cookie.match(/(^| )show-preview-pane=([^;]+)/) : null
+    return raw ? raw[2] === 'true' : true // default open for coding mode
   })
   const [showChatPane, setShowChatPane] = useState(() => getShowChatPane())
   const [previewKey, setPreviewKey] = useState(0)
