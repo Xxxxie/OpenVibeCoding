@@ -524,7 +524,7 @@ export class CloudbaseAgentService {
       envId,
       userId,
       userCredentials,
-      maxTurns = 100,
+      maxTurns = 500,
       cwd,
       askAnswers,
       toolConfirmation,
@@ -843,10 +843,12 @@ export class CloudbaseAgentService {
           console.log(`[Agent] Coding mode init: actualCwd=${actualCwd}, detectedSandboxCwd=${detectedSandboxCwd}`)
           wrappedCallback({ type: 'text', content: '正在初始化 Coding 项目...\n' })
           await initCodingProject(sandboxInstance, actualCwd)
-          wrappedCallback({ type: 'text', content: '正在启动开发服务器...\n' })
-          await startDevServer(sandboxInstance, actualCwd)
-          wrappedCallback({ type: 'text', content: '开发服务器已启动，可在 Preview 标签页预览。\n\n' })
-          // 项目初始化完成，写信号到 DB，前端据此触发 preview-url SSE
+          // 后台启动 supervisor（npm install + vite dev），不阻塞 LLM 编码
+          wrappedCallback({ type: 'text', content: '项目模板已就绪，正在后台安装依赖...\n\n' })
+          startDevServer(sandboxInstance, actualCwd).catch((err) => {
+            console.error('[Agent] Background startDevServer failed:', (err as Error).message)
+          })
+          // 写信号到 DB，前端据此触发 preview-url SSE（supervisor 会自动完成 install + start）
           await getDb()
             .tasks.update(conversationId, { previewUrl: 'ready' })
             .catch(() => {})

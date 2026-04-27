@@ -186,31 +186,24 @@ async function patchViteConfig(sandbox: SandboxInstance, workspace: string): Pro
   }
 }
 
-// ─── Project init (clone + install) ───────────────────────────────────────
+// ─── Project init (clone only, no install) ───────────────────────────────
+// npm install 由 supervisor 在后台异步完成，不阻塞 LLM 编码
 
 export async function initCodingProject(sandbox: SandboxInstance, workspace: string): Promise<void> {
   // Check project state: ready | needs_install | not_found
   const checkStatus = await bashExec(
     sandbox,
-    `if [ -f "${workspace}/package.json" ]; then if [ -x "${workspace}/node_modules/.bin/vite" ]; then echo "ready"; else echo "needs_install"; fi; else echo "not_found"; fi`,
+    `if [ -f "${workspace}/package.json" ]; then echo "exists"; else echo "not_found"; fi`,
     5000,
   )
 
-  if (checkStatus === 'ready') {
-    console.log('[CodingMode] Project already initialized')
-    return
-  }
-
-  if (checkStatus === 'needs_install') {
-    console.log('[CodingMode] Installing missing dependencies')
-    await patchViteConfig(sandbox, workspace)
-    const out = await bashExec(sandbox, `cd "${workspace}" && npm install 2>&1`, 120000)
-    console.log('[CodingMode] npm install output:', out.slice(-200))
+  if (checkStatus === 'exists') {
+    console.log('[CodingMode] Project already cloned, skipping')
     return
   }
 
   // Clone template repo (sparse checkout for the specific subdir)
-  console.log('[CodingMode] Initializing project from template')
+  console.log('[CodingMode] Cloning project template')
   const initScript = [
     `mkdir -p "${workspace}"`,
     `cd /tmp`,
@@ -236,12 +229,8 @@ export async function initCodingProject(sandbox: SandboxInstance, workspace: str
   // Patch vite.config.ts for CloudBase sandbox preview compatibility
   await patchViteConfig(sandbox, workspace)
 
-  // Install dependencies
-  console.log('[CodingMode] Installing dependencies')
-  const installOut = await bashExec(sandbox, `cd "${workspace}" && npm install 2>&1`, 120000)
-  console.log('[CodingMode] npm install output:', installOut.slice(-200))
-
-  console.log('[CodingMode] Project initialized')
+  // NOTE: npm install is NOT called here — supervisor handles it asynchronously
+  console.log('[CodingMode] Project cloned, supervisor will handle npm install')
 }
 
 // ─── Supervisor management ────────────────────────────────────────────────
