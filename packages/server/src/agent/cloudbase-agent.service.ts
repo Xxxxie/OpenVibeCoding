@@ -764,7 +764,7 @@ export class CloudbaseAgentService {
               token: userCredentials?.sessionToken,
             },
             conversationId,
-            taskSandboxCwd || undefined,
+            resolvedCwd || undefined,
           )
           if (sandboxCwd) {
             detectedSandboxCwd = sandboxCwd
@@ -827,6 +827,8 @@ export class CloudbaseAgentService {
         wrappedCallback({ type: 'text', content: '正在启动开发服务器...\n' })
         await startDevServer(sandboxInstance, actualCwd)
         wrappedCallback({ type: 'text', content: '开发服务器已启动，可在 Preview 标签页预览。\n\n' })
+        // 项目初始化完成，写信号到 DB，前端据此触发 preview-url SSE
+        await getDb().tasks.update(conversationId, { previewUrl: 'ready' }).catch(() => {})
       } catch (err) {
         console.error('[Agent] Coding mode init failed:', (err as Error).message)
         wrappedCallback({
