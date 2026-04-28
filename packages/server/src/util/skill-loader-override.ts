@@ -278,23 +278,17 @@ export async function loadSkills(originalFn: OriginalLoadSkills): Promise<SkillD
 
   // 0. 容器预装 skills（CODEBUDDY_BUNDLED_SKILLS_DIR 或 /app/skills）
   const bundledDir = process.env.CODEBUDDY_BUNDLED_SKILLS_DIR || '/app/skills'
-  console.error('[SkillLoaderOverride]', bundledDir)
   if (existsSync(bundledDir)) {
-    console.error('[SkillLoaderOverride] before', bundledDir)
     const bundledSkills = scanLocalSkillsDirectory(bundledDir, 'project')
-    console.error('[SkillLoaderOverride] after', bundledSkills)
     if (bundledSkills.length > 0) {
       skills.push(...bundledSkills)
-      console.error(`[SkillLoaderOverride] Loaded ${bundledSkills.length} bundled skill(s) from ${bundledDir}`)
     }
   }
 
   // 1. 项目根 skills/（领域 skill）
   const rootSkillsDir = getProjectRootSkillsDir()
-  console.error('[SKILL OVERRIDE LOAD]', rootSkillsDir)
   if (existsSync(rootSkillsDir)) {
     const rootSkills = scanLocalSkillsDirectory(rootSkillsDir, 'project')
-    console.error('[SKILL OVERRIDE LOAD] rootSkills', rootSkills)
     skills.push(...rootSkills)
   }
 
@@ -334,20 +328,20 @@ export async function loadSkills(originalFn: OriginalLoadSkills): Promise<SkillD
     }
 
     // 沙箱 .codebuddy/skills/
-    const remoteCbSkillsDir = `${sandboxCwd}/.codebuddy/skills`
-    if (await sandboxExists(sandbox, remoteCbSkillsDir)) {
-      try {
-        const remoteCbSkills = await scanSandboxSkillsDirectory(sandbox, remoteCbSkillsDir, 'project')
-        skills.push(...remoteCbSkills)
-        if (remoteCbSkills.length > 0) {
-          console.error(
-            `[SkillLoaderOverride] Loaded ${remoteCbSkills.length} skill(s) from sandbox ${remoteCbSkillsDir}`,
-          )
-        }
-      } catch {
-        // remote unavailable
-      }
-    }
+    // const remoteCbSkillsDir = `${sandboxCwd}/.codebuddy/skills`
+    // if (await sandboxExists(sandbox, remoteCbSkillsDir)) {
+    //   try {
+    //     const remoteCbSkills = await scanSandboxSkillsDirectory(sandbox, remoteCbSkillsDir, 'project')
+    //     skills.push(...remoteCbSkills)
+    //     if (remoteCbSkills.length > 0) {
+    //       console.error(
+    //         `[SkillLoaderOverride] Loaded ${remoteCbSkills.length} skill(s) from sandbox ${remoteCbSkillsDir}`,
+    //       )
+    //     }
+    //   } catch {
+    //     // remote unavailable
+    //   }
+    // }
   }
 
   console.error(`[SkillLoaderOverride] Total: ${skills.length} skill(s) loaded`)

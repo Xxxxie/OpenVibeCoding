@@ -7,7 +7,7 @@ import { createTaskLogger } from '../lib/task-logger'
 import { resolveSandboxConfig, backfillSandboxConfig } from '../lib/sandbox-config'
 import { decrypt } from '../lib/crypto'
 import { Octokit } from '@octokit/rest'
-import { SandboxInstance } from '../sandbox/index.js'
+import { deleteArchiveBranch, SandboxInstance } from '../sandbox/index.js'
 import { persistenceService } from '../agent/persistence.service'
 import { deleteConversationViaSandbox, scfSandboxManager, archiveToGit } from '../sandbox/index.js'
 import { CODING_DEV_SERVER_PORT } from '../agent/coding-mode.js'
@@ -403,10 +403,14 @@ tasksRouter.delete('/:taskId', requireUserEnv, async (c) => {
   // Try to clean up via sandbox (rm -rf workspace dir + git archive sync); fall back to direct API delete
   ;(async () => {
     try {
-      const scfSessionId = existing.sandboxSessionId || envId
-      const sandbox = await scfSandboxManager.getExisting(taskId, scfSessionId).catch(() => null)
-      if (sandbox) {
-        await deleteConversationViaSandbox(sandbox, envId, taskId, existing.sandboxCwd || undefined)
+      if (existing.mode === 'isolated') {
+        await deleteArchiveBranch(taskId)
+      } else {
+        const scfSessionId = existing.sandboxSessionId || envId
+        const sandbox = await scfSandboxManager.getExisting(taskId, scfSessionId).catch(() => null)
+        if (sandbox) {
+          await deleteConversationViaSandbox(sandbox, envId, taskId, existing.sandboxCwd || undefined)
+        }
       }
     } catch (e) {
       console.log('clean conversation workspace error')
