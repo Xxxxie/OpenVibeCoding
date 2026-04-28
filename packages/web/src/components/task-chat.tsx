@@ -173,6 +173,7 @@ export function TaskChat({
     confirmTool: chatConfirmTool,
     reconnectToStream,
     cancelSession,
+    cancelledRef,
   } = chat
 
   // useEffect(()=>{
@@ -255,10 +256,12 @@ export function TaskChat({
             }
           }
           // Auto-reconnect if the latest agent message is still pending (agent running in background)
+          // 但如果刚刚取消了，不要重连（后端状态可能还没完全更新）
           if (
             latestAgent &&
             (latestAgent.status === 'pending' || latestAgent.status === 'streaming') &&
-            canFetchMessages()
+            canFetchMessages() &&
+            !cancelledRef.current
           ) {
             reconnectToStream(latestAgent.id)
           }

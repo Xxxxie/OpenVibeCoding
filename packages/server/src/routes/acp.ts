@@ -679,6 +679,13 @@ async function handleSessionCancel(
       if (latestStatus && (latestStatus.status === 'pending' || latestStatus.status === 'streaming')) {
         await persistenceService.updateRecordStatus(latestStatus.recordId, 'cancel')
       }
+
+      // Update task status to stopped so frontend doesn't auto-reconnect
+      try {
+        await getDb().tasks.update(sessionId, { status: 'stopped', updatedAt: Date.now() })
+      } catch {
+        // Non-critical
+      }
     }
   }
 

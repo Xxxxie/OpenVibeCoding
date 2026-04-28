@@ -53,13 +53,10 @@ export function BrowserControls({ previewUrl, iframeRef, onHardRefresh, classNam
   }
 
   const handleReload = () => {
-    // 优先走软刷新(保留 iframe DOM + 当前滚动位置)
-    const iframe = iframeRef.current
-    if (iframe) {
-      iframe.src = iframe.src
-      return
-    }
-    // 若 iframe 还没挂,让父级硬刷新
+    // 软刷新在 iframe 跨域场景下会导致 SameSite=Lax cookie 丢失
+    // (Chrome 将 iframe.src = iframe.src 视为 cross-document navigation)。
+    // 直接走硬刷新：让父级通过 key 递增 remount iframe，
+    // 这样浏览器会重新发送所有 cookie。
     onHardRefresh?.()
   }
 
