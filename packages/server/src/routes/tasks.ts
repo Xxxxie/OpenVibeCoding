@@ -2438,6 +2438,35 @@ tasksRouter.get('/:taskId/preview-url', requireUserEnv, async (c) => {
       const isCodingMode = taskMode === 'coding'
       let needsInstall = false // 是否需要安装依赖（影响 dev server 超时时长）
       if (isCodingMode) {
+        // ── 确保 workspace 已恢复（沙箱冷启动后 /tmp 被清空）────────────
+        // 调 /api/session/init 触发沙箱内部的 git restore，恢复用户代码
+        try {
+          const { credentials: userCredentials } = c.get('userEnv')!
+          await emit('progress', '正在恢复工作空间...')
+          await sandbox!.request('/api/session/init', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              env: {
+                CLOUDBASE_ENV_ID: envId,
+                ...(userCredentials?.secretId ? { TENCENTCLOUD_SECRETID: userCredentials.secretId } : {}),
+                ...(userCredentials?.secretKey ? { TENCENTCLOUD_SECRETKEY: userCredentials.secretKey } : {}),
+                ...(userCredentials?.sessionToken ? { TENCENTCLOUD_SESSIONTOKEN: userCredentials.sessionToken } : {}),
+              },
+            }),
+            signal: AbortSignal.timeout(15_000),
+          })
+          // 确保 workspace 目录存在
+          await sandbox!.request('/api/tools/bash', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: `mkdir -p "${resolvedCwd}"`, timeout: 5000 }),
+            signal: AbortSignal.timeout(10_000),
+          })
+        } catch (err) {
+          console.warn('[preview-url] session/init failed:', (err as Error).message)
+        }
+
         // 修正 cwd（某些任务 sandboxCwd 与沙箱实际 HOME 不符）
         try {
           const pkgCheck = await sandbox!.request(
