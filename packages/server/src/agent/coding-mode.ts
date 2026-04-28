@@ -1,18 +1,8 @@
 import type { SandboxInstance } from '../sandbox/scf-sandbox-manager.js'
-import { readFileSync, existsSync } from 'node:fs'
-import { resolve, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-
-/** 预打包的模板 tar.gz（含 node_modules），约 30MB */
-// dev 模式: __dirname = src/agent/ → ../../assets/
-// prod 模式: __dirname = dist/ → ../assets/
-const TEMPLATE_TAR_CANDIDATES = [
-  resolve(__dirname, '../../assets/coding-template.tar.gz'), // dev: src/agent/ → assets/
-  resolve(__dirname, '../assets/coding-template.tar.gz'), // prod: dist/ → assets/
-]
-const TEMPLATE_TAR_PATH = TEMPLATE_TAR_CANDIDATES.find((p) => existsSync(p)) || TEMPLATE_TAR_CANDIDATES[0]
+/** 预打包模板 tar.gz 的 CloudBase 存储 URL（含 node_modules，~30MB） */
+const TEMPLATE_TAR_URL =
+  'https://6875-huming-test-1giud5ua4e72b386-1328860866.tcb.qcloud.la/assets/coding-template.tar.gz'
 
 const TEMPLATE_REPO = 'https://cnb.cool/tencent/cloud/cloudbase/awesome-cloudbase-examples.git'
 const TEMPLATE_SUBDIR = 'web/cloudbase-react-template'
@@ -223,55 +213,32 @@ export async function initCodingProject(sandbox: SandboxInstance, workspace: str
   // 确保目录存在
   await bashExec(sandbox, `mkdir -p "${workspace}"`, 5000)
 
-  // 优先用预打包的 tar.gz（含 node_modules，~30MB，上传+解压 ~5s）
-  let uploaded = false
+  // 优先从 CloudBase 存储下载预打包的 tar.gz（含 node_modules，~30MB，curl ~3s）
+  let downloaded = false
   try {
-    const tarExists = existsSync(TEMPLATE_TAR_PATH)
-    console.log(`[CodingMode] Template tar path: ${TEMPLATE_TAR_PATH}, exists: ${tarExists}`)
-    if (!tarExists) throw new Error('Template tar.gz not found at ' + TEMPLATE_TAR_PATH)
-
-    const tarBuffer = readFileSync(TEMPLATE_TAR_PATH)
-    console.log(`[CodingMode] Uploading template tar.gz (${(tarBuffer.length / 1024 / 1024).toFixed(1)}MB)`)
-
-    const tarRemotePath = '/tmp/coding-template.tar.gz'
-    const formData = new FormData()
-    const blob = new Blob([tarBuffer], { type: 'application/gzip' })
-    formData.append('file', blob, tarRemotePath)
-
-    const uploadRes = await sandbox.request(`/e2b-compatible/files?path=${encodeURIComponent(tarRemotePath)}`, {
-      method: 'POST',
-      body: formData,
-      signal: AbortSignal.timeout(30_000),
-    })
-
-    if (uploadRes.ok) {
-      // 解压到 workspace
-      const extractOut = await bashExec(
+    console.log('[CodingMode] Downloading template tar.gz from CloudBase storage')
+    const downloadOut = await bashExec(
+      sandbox,
+      `curl -fsSL "${TEMPLATE_TAR_URL}" -o /tmp/coding-template.tar.gz && tar -xzf /tmp/coding-template.tar.gz -C "${workspace}" && rm -f /tmp/coding-template.tar.gz && echo "ok"`,
+      60000,
+    )
+    downloaded = downloadOut.trim() === 'ok'
+    if (downloaded) {
+      const verifyNm = await bashExec(
         sandbox,
-        `tar -xzf "${tarRemotePath}" -C "${workspace}" && rm -f "${tarRemotePath}" && echo "ok"`,
-        30000,
+        `[ -x "${workspace}/node_modules/.bin/vite" ] && echo "has_vite" || echo "no_vite"`,
+        5000,
       )
-      uploaded = extractOut.trim() === 'ok'
-      if (uploaded) {
-        // 验证 node_modules 是否真的解压出来了
-        const verifyNm = await bashExec(
-          sandbox,
-          `[ -x "${workspace}/node_modules/.bin/vite" ] && echo "has_vite" || echo "no_vite"`,
-          5000,
-        )
-        console.log(`[CodingMode] Template uploaded and extracted, vite check: ${verifyNm.trim()}`)
-      } else {
-        console.warn('[CodingMode] tar extract failed:', extractOut.slice(-200))
-      }
+      console.log(`[CodingMode] Template downloaded and extracted, vite check: ${verifyNm.trim()}`)
     } else {
-      console.warn('[CodingMode] Upload failed, status:', uploadRes.status)
+      console.warn('[CodingMode] Download/extract failed:', downloadOut.slice(-200))
     }
   } catch (err) {
-    console.warn('[CodingMode] Template upload failed, falling back to git clone:', (err as Error).message)
+    console.warn('[CodingMode] Template download failed, falling back to git clone:', (err as Error).message)
   }
 
   // Fallback: git clone（网络慢但总能用）
-  if (!uploaded) {
+  if (!downloaded) {
     console.log('[CodingMode] Falling back to git clone')
     const initScript = [
       `cd /tmp`,
