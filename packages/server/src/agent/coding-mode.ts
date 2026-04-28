@@ -102,13 +102,13 @@ if [ -f "$TAR_FILE" ] && [ ! -d "$WORKSPACE/node_modules" ]; then
     echo "[supervisor] cache extract failed, will run npm install" >> "$LOG"
 fi
 
-# ── Step 3: npm install (仅在 node_modules 不完整时) ──────────────────────
-# vite binary 存在说明依赖已就绪（tar.gz 预装或之前已 install），直接跳过
-if [ -x "$WORKSPACE/node_modules/.bin/vite" ]; then
-  echo "[supervisor] node_modules already complete, skipping npm install" >> "$LOG"
+# ── Step 3: npm install (仅在 vite 无法运行时) ────────────────────────────
+# 用 vite --version 验证而非只检查文件是否存在，避免 symlink 损坏的情况
+if cd "$WORKSPACE" && node_modules/.bin/vite --version > /dev/null 2>&1; then
+  echo "[supervisor] vite works, skipping npm install" >> "$LOG"
 else
   echo "installing" > "$STATE"
-  echo "[supervisor] running npm install..." >> "$LOG"
+  echo "[supervisor] vite not working, running npm install..." >> "$LOG"
   cd "$WORKSPACE" && npm install >> "$LOG" 2>&1
   if [ $? -ne 0 ]; then
     echo "install_failed" > "$STATE"
@@ -223,16 +223,16 @@ export async function initCodingProject(sandbox: SandboxInstance, workspace: str
         60000,
       )
       downloaded = downloadOut.trim() === 'ok'
-    if (downloaded) {
-      const verifyNm = await bashExec(
-        sandbox,
-        `[ -x "${workspace}/node_modules/.bin/vite" ] && echo "has_vite" || echo "no_vite"`,
-        5000,
-      )
-      console.log(`[CodingMode] Template downloaded and extracted, vite check: ${verifyNm.trim()}`)
-    } else {
-      console.warn('[CodingMode] Download/extract failed:', downloadOut.slice(-200))
-    }
+      if (downloaded) {
+        const verifyNm = await bashExec(
+          sandbox,
+          `cd "${workspace}" && node_modules/.bin/vite --version > /dev/null 2>&1 && echo "has_vite" || echo "no_vite"`,
+          5000,
+        )
+        console.log(`[CodingMode] Template downloaded and extracted, vite check: ${verifyNm.trim()}`)
+      } else {
+        console.warn('[CodingMode] Download/extract failed:', downloadOut.slice(-200))
+      }
     } catch (err) {
       console.warn('[CodingMode] Template download failed, falling back to git clone:', (err as Error).message)
     }
@@ -319,14 +319,8 @@ async function pingDevServer(sandbox: SandboxInstance): Promise<boolean> {
 async function startSupervisor(sandbox: SandboxInstance, workspace: string): Promise<boolean> {
   const script = buildSupervisorScript(workspace)
 
-  // Write script via /api/tools/write
-  const written = await writeFile(sandbox, SUPERVISOR_SCRIPT_PATH, script)
-  if (!written) {
-    // Fallback: write via bash heredoc
-    console.warn('[CodingMode] write tool failed, trying heredoc fallback')
-    await bashExec(sandbox, `cat > ${SUPERVISOR_SCRIPT_PATH} << 'SUPERVISOR_EOF'\n${script}\nSUPERVISOR_EOF`, 10000)
-  }
-
+  // Write script via bash heredoc（/api/tools/write 对 /tmp 路径可能返回 403）
+  await bashExec(sandbox, `cat > ${SUPERVISOR_SCRIPT_PATH} << 'SUPERVISOR_EOF'\n${script}\nSUPERVISOR_EOF`, 10000)
   await bashExec(sandbox, `chmod +x ${SUPERVISOR_SCRIPT_PATH}`, 3000)
 
   // Clear old state + log

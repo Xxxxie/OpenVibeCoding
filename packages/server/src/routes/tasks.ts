@@ -2505,7 +2505,7 @@ tasksRouter.get('/:taskId/preview-url', requireUserEnv, async (c) => {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              command: `if [ -f "${resolvedCwd}/package.json" ]; then if [ -x "${resolvedCwd}/node_modules/.bin/vite" ]; then echo "ready"; else echo "needs_install"; fi; else echo "not_found"; fi`,
+              command: `if [ -f "${resolvedCwd}/package.json" ]; then if cd "${resolvedCwd}" && node_modules/.bin/vite --version > /dev/null 2>&1; then echo "ready"; else echo "needs_install"; fi; else echo "not_found"; fi`,
               timeout: 5000,
             }),
             signal: AbortSignal.timeout(10_000),
