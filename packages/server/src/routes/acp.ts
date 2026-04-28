@@ -609,7 +609,10 @@ async function observeStreamWithLiveCallback(
     // ── Poll loop (safety net for missed events + completion) ─
     const startTime = Date.now()
     while (Date.now() - startTime < MAX_POLL_DURATION) {
-      if (stream.closed || stream.aborted) break
+      if (stream.closed || stream.aborted) {
+        console.log(`[SSE] Stream closed/aborted for ${sessionId}`)
+        break
+      }
 
       const run = getAgentRun(sessionId)
       const isDone = !run || run.status !== 'running'
@@ -628,9 +631,15 @@ async function observeStreamWithLiveCallback(
           lastSeq = Math.max(lastSeq, evt.seq)
         }
 
-        if (isDone && newEvents.length === 0) break
-      } catch {
-        if (isDone) break
+        if (isDone && newEvents.length === 0) {
+          console.log(`[SSE] Agent done for ${sessionId}, status=${run?.status}, lastSeq=${lastSeq}, breaking poll loop`)
+          break
+        }
+      } catch (err) {
+        if (isDone) {
+          console.log(`[SSE] Agent done (with poll error) for ${sessionId}, status=${run?.status}`)
+          break
+        }
       }
 
       await new Promise((r) => setTimeout(r, POLL_INTERVAL))
@@ -640,6 +649,24 @@ async function observeStreamWithLiveCallback(
     if (rpcId !== null) {
       const run = getAgentRun(sessionId)
       const stopReason = run?.status === 'error' ? 'error' : 'end_turn'
+
+      // 如果 agent 出错，先推一条 error 事件让前端知道原因
+      if (run?.status === 'error' && run.error) {
+        await stream.writeSSE({
+          data: JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: {
+              sessionId,
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: `\n\n⚠️ ${run.error}\n` },
+              },
+            },
+          }),
+        })
+      }
+
       await stream.writeSSE({ data: JSON.stringify(rpcOk(rpcId, { stopReason })) })
     }
     await stream.writeSSE({ data: '[DONE]' })

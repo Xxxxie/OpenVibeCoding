@@ -275,7 +275,7 @@ export interface LocalCredentialRepository {
 export interface TaskRepository {
   findById(id: string): Promise<Task | null>
   findByIdAndUserId(id: string, userId: string): Promise<Task | null>
-  findByUserId(userId: string): Promise<Task[]>
+  findByUserId(userId: string, limit?: number): Promise<Task[]>
   findByRepoAndPr(userId: string, prNumber: number, repoUrl: string): Promise<Task[]>
   findAll(limit: number, offset: number, filters?: { userId?: string; status?: string }): Promise<Task[]>
   count(filters?: { userId?: string; status?: string }): Promise<number>
