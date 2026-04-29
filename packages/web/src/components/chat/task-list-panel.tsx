@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { CheckCircle2, Circle, Loader2, ListTodo, ChevronDown, ChevronRight } from 'lucide-react'
-import type { TaskMessage } from '@/types/task-chat'
+import type { TaskMessage, MessagePart } from '@/types/task-chat'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -45,10 +45,10 @@ export function deriveTasks(messages: TaskMessage[]): DerivedTask[] {
         const input = parseInput(part.input)
 
         // Find matching tool_result to extract task ID
-        const resultPart = msg.parts?.find((p) => p.type === 'tool_result' && p.toolCallId === part.toolCallId)
-        const resultText = typeof (resultPart as any)?.content === 'string' ? (resultPart as any).content : ''
+        const resultPart: MessagePart | undefined = msg.parts?.find((p) => p.type === 'tool_result' && p.toolCallId === part.toolCallId)
+        const resultText: string = typeof (resultPart as any)?.content === 'string' ? (resultPart as any).content : ''
 
-        const match = resultText.match(/Task #(\d+)/)
+        const match: RegExpMatchArray | null = resultText.match(/Task #(\d+)/)
         const taskId = match ? match[1] : `t-${Object.keys(tasks).length + 1}`
 
         tasks[taskId] = {

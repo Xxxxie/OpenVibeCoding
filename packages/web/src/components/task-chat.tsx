@@ -1181,11 +1181,12 @@ export function TaskChat({
                                 // Hide task management tool calls — shown in TaskListPanel instead
                                 if (part.type === 'tool_call' && HIDDEN_TOOLS.has(part.toolName)) return null
                                 if (part.type === 'tool_result') {
+                                  const matchingCall = agentMessage.parts?.find(
+                                    (p) => p.type === 'tool_call' && p.toolCallId === part.toolCallId,
+                                  )
                                   const toolName =
                                     part.toolName ||
-                                    agentMessage.parts?.find(
-                                      (p) => p.type === 'tool_call' && p.toolCallId === part.toolCallId,
-                                    )?.toolName
+                                    (matchingCall?.type === 'tool_call' ? matchingCall.toolName : undefined)
                                   if (toolName && HIDDEN_TOOLS.has(toolName)) return null
                                 }
 

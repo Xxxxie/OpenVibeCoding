@@ -433,7 +433,6 @@ export function HomePageContent({
     selectedAgent: string
     selectedModel: string
     selectedModels?: string[]
-    mode?: 'default' | 'coding'
     installDependencies: boolean
     maxDuration: number
     keepAlive: boolean
