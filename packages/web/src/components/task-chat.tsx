@@ -53,7 +53,6 @@ export function TaskChat({
   readOnly = false,
   messagesApiBase = '',
 }: TaskChatProps) {
-
   // ─── Local UI state ───────────────────────────────────────────────
 
   const [isLoading, setIsLoading] = useState(true)
