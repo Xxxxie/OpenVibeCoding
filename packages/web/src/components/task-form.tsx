@@ -97,7 +97,7 @@ function getModelProviderKey(modelId: string): ProviderKey {
 
 // Model options for each agent
 const AGENT_MODELS: Record<string, Array<{ value: string; label: string }>> = {
-  codebuddy: [{ value: 'glm-5.0', label: 'GLM 5.0' }],
+  codebuddy: [{ value: 'glm-5.1', label: 'GLM 5.1' }],
   // --- Other agents (commented out, kept for reference) ---
   // claude: [
   //   { value: 'claude-sonnet-4-5', label: 'Sonnet 4.5' },
@@ -108,7 +108,7 @@ const AGENT_MODELS: Record<string, Array<{ value: string; label: string }>> = {
 
 // Default models for each agent
 const DEFAULT_MODELS = {
-  codebuddy: 'glm-5.0',
+  codebuddy: 'glm-5.1',
   // --- Other agents (commented out) ---
   // claude: 'claude-sonnet-4-5',
   // codex: 'openai/gpt-5.1',
@@ -134,7 +134,7 @@ export function TaskForm({
   const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_MODELS.codebuddy)
   // Default to 'coding' mode — tasks without a git repo are always coding/sandbox tasks
   const [taskMode, setTaskMode] = useState<'default' | 'coding'>('coding')
-  const [codebuddyModels, setCodebuddyModels] = useState<ModelInfo[]>([{ id: 'glm-5.0', name: 'GLM 5.0' }])
+  const [codebuddyModels, setCodebuddyModels] = useState<ModelInfo[]>([{ id: 'glm-5.1', name: 'GLM 5.1' }])
   const [repos, setRepos] = useAtom(githubReposAtomFamily(selectedOwner))
   const [, setLoadingRepos] = useState(false)
 

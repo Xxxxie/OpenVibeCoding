@@ -632,7 +632,9 @@ async function observeStreamWithLiveCallback(
         }
 
         if (isDone && newEvents.length === 0) {
-          console.log(`[SSE] Agent done for ${sessionId}, status=${run?.status}, lastSeq=${lastSeq}, breaking poll loop`)
+          console.log(
+            `[SSE] Agent done for ${sessionId}, status=${run?.status}, lastSeq=${lastSeq}, breaking poll loop`,
+          )
           break
         }
       } catch (err) {
