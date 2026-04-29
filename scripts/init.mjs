@@ -1100,18 +1100,19 @@ async function main() {
     process.exit(1)
   }
 
-  // Step 6: Setup Server Environment
+  // Step 6: CodeBuddy auth configuration
+  // 必须在 setupServerEnv 之前执行，因为 setupServerEnv 会将 codebuddyConfig 写入 .env
+  await setupCodebuddy()
+
+  // Step 7: Setup Server Environment (writes packages/server/.env including CodeBuddy config)
   if (!(await setupServerEnv())) {
     process.exit(1)
   }
 
-  // Step 7: Install dependencies (setup-tcr.mjs needs tencentcloud-sdk-nodejs)
+  // Step 8: Install dependencies (setup-tcr.mjs needs tencentcloud-sdk-nodejs)
   if (!(await installDependencies())) {
     process.exit(1)
   }
-
-  // Step 8: CodeBuddy auth configuration
-  await setupCodebuddy()
 
   // Step 9: Setup TCR (requires node_modules)
   logSection('TCR 配置')
