@@ -1,5 +1,3 @@
-import { CloudDashboard } from '@coder/dashboard/CloudDashboard'
-import type { Theme } from '@coder/dashboard/CloudDashboard'
 import type { Task, PermissionAction } from '@coder/shared'
 import type {
   TaskMessage,
@@ -19,10 +17,7 @@ import { InterruptionCard } from '@/components/chat/interruption-card'
 import { AgentStatusIndicator } from '@/components/chat/agent-status-indicator'
 import { extractPlanContent } from '@/components/chat/plan-content'
 import { mdComponents } from '@/components/chat/markdown-block'
-import { BrowserControls } from '@/components/chat/browser-controls'
-import { PreviewPlaceholder } from '@/components/chat/preview-placeholder'
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useTheme } from 'next-themes'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -40,14 +35,11 @@ import {
   MoreVertical,
   MessageSquare,
   Trash2,
-  ExternalLink,
-  AlertTriangle,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Streamdown } from 'streamdown'
-import { useAtom, useAtomValue } from 'jotai'
+import { useAtom } from 'jotai'
 import { taskChatInputAtomFamily } from '@/lib/atoms/task'
-import { sessionAtom } from '@/lib/atoms/session'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { TaskListPanel } from '@/components/chat/task-list-panel'
 
@@ -61,9 +53,6 @@ export function TaskChat({
   readOnly = false,
   messagesApiBase = '',
 }: TaskChatProps) {
-  const { resolvedTheme } = useTheme()
-  const dashboardTheme: Theme = resolvedTheme === 'light' ? 'light' : 'dark'
-  const session = useAtomValue(sessionAtom)
 
   // ─── Local UI state ───────────────────────────────────────────────
 
@@ -86,22 +75,6 @@ export function TaskChat({
   const [loadingDeployment, setLoadingDeployment] = useState(false)
   const [deploymentError, setDeploymentError] = useState<string | null>(null)
 
-  // Preview tab state
-  const [previewGatewayUrl, setPreviewGatewayUrl] = useState<string | null>(null)
-  const [previewLoading, setPreviewLoading] = useState(false)
-  const [previewError, setPreviewError] = useState<string | null>(null)
-  const [previewKey, setPreviewKey] = useState(0)
-  const [checkingPreviewErrors, setCheckingPreviewErrors] = useState(false)
-  /**
-   * P6+: 预览 iframe 真正加载完成(onLoad 触发)的标志。
-   * 用于:
-   *   - BrowserControls 的软刷新(iframe.src = iframe.src)需拿到 DOM 引用
-   *   - iframe 淡入动画:未 load 时显示骨架屏 + Loader2 遮罩,load 完 fade-in
-   * 当 previewKey 变化(硬刷新)时重置为 false。
-   */
-  const [iframeLoaded, setIframeLoaded] = useState(false)
-  const previewIframeRef = useRef<HTMLIFrameElement | null>(null)
-
   // Scroll refs
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
@@ -116,8 +89,6 @@ export function TaskChat({
   // Tab loading cache
   const commentsLoadedRef = useRef(false)
   const actionsLoadedRef = useRef(false)
-
-  const sessionEnvId = session?.envId || ''
 
   // ─── Scroll helpers (defined before useChatStream — needed by hook options) ──
 
@@ -361,37 +332,6 @@ export function TaskChat({
     }, 30000)
     return () => clearInterval(interval)
   }, [activeTab, fetchPRComments, fetchCheckRuns, fetchDeployments])
-
-  // Load preview URL when switching to preview tab
-  useEffect(() => {
-    if (activeTab !== 'preview' || task.mode !== 'coding') return
-    if (previewGatewayUrl) return
-    loadPreviewUrl()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, task.mode])
-
-  // P6+: 每次硬刷新(previewKey 递增)或 URL 切换时,重置加载遮罩,等新 iframe onLoad 再淡入
-  useEffect(() => {
-    setIframeLoaded(false)
-  }, [previewKey, previewGatewayUrl])
-
-  const loadPreviewUrl = async () => {
-    setPreviewLoading(true)
-    setPreviewError(null)
-    try {
-      const res = await fetch(`/api/tasks/${taskId}/preview-url`)
-      const data = (await res.json()) as { gatewayUrl?: string; error?: string }
-      if (data.gatewayUrl) {
-        setPreviewGatewayUrl(data.gatewayUrl)
-      } else {
-        setPreviewError(data.error || 'Dev server not available')
-      }
-    } catch {
-      setPreviewError('Failed to load preview')
-    } finally {
-      setPreviewLoading(false)
-    }
-  }
 
   // Load tab data on switch
   useEffect(() => {
@@ -702,137 +642,9 @@ export function TaskChat({
   // P6+: `mdComponents` 已统一到 `@/components/chat/markdown-block`,
   //      在页面顶部 import;这里不再重复定义,避免不同位置样式漂移。
 
-  const isCodingMode = task.mode === 'coding'
-
   // ─── Tab content ───────────────────────────────────────────────────
 
   const renderTabContent = () => {
-    if (activeTab === 'preview' && isCodingMode) {
-      // P6+ 预览增强:
-      //   1) previewLoading 阶段 → PreviewPlaceholder 骨架屏(不再是一行 "正在启动预览...")
-      //   2) previewGatewayUrl 就绪后 → 顶部 BrowserControls(前进/后退/刷新/地址栏),
-      //      下方 iframe 带 fade-in 过渡 + iframe 未 onLoad 时叠加 Loader 遮罩
-      if (previewLoading) {
-        return (
-          <div className="flex-1 overflow-hidden -mx-3 -mt-3 relative">
-            <PreviewPlaceholder />
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="flex flex-col items-center gap-2 text-sm text-muted-foreground bg-background/80 backdrop-blur rounded-md px-4 py-3 shadow text-center">
-                <div className="flex items-center gap-2">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  正在启动预览...
-                </div>
-                <p className="text-xs text-muted-foreground/70 max-w-[200px]">首次启动需初始化环境,通常约 30-60 秒</p>
-              </div>
-            </div>
-          </div>
-        )
-      }
-      if (previewError) {
-        return (
-          <div className="flex-1 overflow-hidden -mx-3 -mt-3 flex flex-col items-center justify-center gap-2">
-            <p className="text-sm text-destructive">{previewError}</p>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setPreviewGatewayUrl(null)
-                loadPreviewUrl()
-              }}
-            >
-              重试
-            </Button>
-          </div>
-        )
-      }
-      if (previewGatewayUrl) {
-        return (
-          <div className="flex-1 overflow-hidden -mx-3 -mt-3 flex flex-col">
-            {/* 浏览器工具栏 */}
-            <div className="flex h-8 shrink-0 items-center gap-1 border-b bg-muted/20 px-2">
-              <BrowserControls
-                previewUrl={previewGatewayUrl}
-                iframeRef={previewIframeRef}
-                onHardRefresh={() => setPreviewKey((k) => k + 1)}
-                className="flex-1 min-w-0"
-              />
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => window.open(previewGatewayUrl, '_blank')}
-                className="h-6 w-6 p-0 flex-shrink-0"
-                title="Open in new window"
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={async () => {
-                  if (checkingPreviewErrors) return
-                  setCheckingPreviewErrors(true)
-                  try {
-                    const res = await fetch(`/api/tasks/${taskId}/preview-errors`)
-                    const data = await res.json()
-                    if (data.hasErrors && data.errors) {
-                      await chatSendMessage(`预览页面有错误，请修复：\n\n${data.errors}`, () => {})
-                    } else {
-                      toast.success('No errors found')
-                    }
-                  } catch {
-                    toast.error('Failed to check errors')
-                  } finally {
-                    setCheckingPreviewErrors(false)
-                  }
-                }}
-                className="h-6 w-6 p-0 flex-shrink-0"
-                title="Fix preview errors"
-                disabled={checkingPreviewErrors}
-              >
-                {checkingPreviewErrors ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <AlertTriangle className="h-3.5 w-3.5" />
-                )}
-              </Button>
-            </div>
-            {/* iframe 区 */}
-            <div className="relative flex-1 min-h-0 bg-muted/5">
-              {/* 未 load 完遮罩:骨架屏 + 中央加载器 */}
-              {!iframeLoaded && (
-                <div className="absolute inset-0 z-10">
-                  <PreviewPlaceholder />
-                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                    <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/60" />
-                  </div>
-                </div>
-              )}
-              <iframe
-                key={previewKey}
-                ref={previewIframeRef}
-                src={previewGatewayUrl}
-                className={`w-full h-full border-0 transition-opacity duration-300 ${
-                  iframeLoaded ? 'opacity-100' : 'opacity-0'
-                }`}
-                title="Project Preview"
-                sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-                onLoad={() => setIframeLoaded(true)}
-              />
-            </div>
-          </div>
-        )
-      }
-      return <div className="flex-1 overflow-hidden -mx-3 -mt-3" />
-    }
-
-    if (activeTab === 'cloud') {
-      return (
-        <div className="flex-1 overflow-hidden -mx-3 -mt-3">
-          <CloudDashboard envId={sessionEnvId} theme={dashboardTheme} style={{ height: '100%' }} />
-        </div>
-      )
-    }
-
     if (activeTab === 'deployments') {
       const handleDeleteDeployment = async (deploymentId: string) => {
         try {
@@ -1496,22 +1308,6 @@ export function TaskChat({
           >
             Deployments
           </button>
-          {isCodingMode && (
-            <button
-              onClick={() => setActiveTab('preview')}
-              className={`text-sm font-semibold px-2 py-1 rounded transition-colors whitespace-nowrap flex-shrink-0 ${currentTab === 'preview' ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-            >
-              Preview
-            </button>
-          )}
-          {!readOnly && (
-            <button
-              onClick={() => setActiveTab('cloud')}
-              className={`text-sm font-semibold px-2 py-1 rounded transition-colors whitespace-nowrap flex-shrink-0 ${currentTab === 'cloud' ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-            >
-              Cloud
-            </button>
-          )}
         </div>
         <Button variant="ghost" size="sm" onClick={handleRefresh} className="h-6 w-6 p-0 flex-shrink-0" title="Refresh">
           <RefreshCw className="h-4 w-4" />

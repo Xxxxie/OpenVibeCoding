@@ -1,4 +1,6 @@
 import type { Task } from '@coder/shared'
+import { CloudDashboard } from '@coder/dashboard/CloudDashboard'
+import type { Theme } from '@coder/dashboard/CloudDashboard'
 
 interface Connector {
   id: string
@@ -37,9 +39,13 @@ import {
   Maximize,
   Minimize,
   AlertTriangle,
+  Cloud,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useTheme } from 'next-themes'
+import { useAtomValue } from 'jotai'
+import { sessionAtom } from '@/lib/atoms/session'
 import { toast } from 'sonner'
 import { Claude, CodeBuddy, Codex, Copilot, Cursor, Gemini, OpenCode } from '@/components/logos'
 import { useTasks } from '@/components/app-layout'
@@ -189,6 +195,12 @@ export function TaskDetails({
   initialPrompt,
   onInitialPromptConsumed,
 }: TaskDetailsProps) {
+  // ── Theme & session (for CloudDashboard) ──
+  const { resolvedTheme } = useTheme()
+  const dashboardTheme: Theme = resolvedTheme === 'light' ? 'light' : 'dark'
+  const session = useAtomValue(sessionAtom)
+  const sessionEnvId = session?.envId || ''
+
   // ── Chat stream — hoisted here so it survives TaskChat remounts ──
   const chatStream = useChatStream(task.id, { onStreamComplete })
 
@@ -235,7 +247,7 @@ export function TaskDetails({
   const [subMode, setSubMode] = useState<'local' | 'remote'>(hasBranch ? 'remote' : 'local')
   const viewMode: 'local' | 'remote' | 'all' | 'all-local' =
     filesPane === 'files' ? (subMode === 'local' ? 'all-local' : 'all') : subMode
-  const [activeTab, setActiveTab] = useState<'code' | 'chat' | 'preview'>('code')
+  const [activeTab, setActiveTab] = useState<'code' | 'chat' | 'preview' | 'cloud'>('code')
   const [showFilesList, setShowFilesList] = useState(false)
   const [showPreview, setShowPreview] = useState(false)
   const [sandboxTimeRemaining, setSandboxTimeRemaining] = useState<string | null>(null)
@@ -257,6 +269,7 @@ export function TaskDetails({
     return raw ? raw[2] === 'true' : true // default open for coding mode
   })
   const [showChatPane, setShowChatPane] = useState(() => getShowChatPane())
+  const [showCloudPane, setShowCloudPane] = useState(false)
   const [previewKey, setPreviewKey] = useState(0)
 
   // Coding mode preview state (P6+: /api/tasks/:id/preview-url 接口驱动)
@@ -531,7 +544,7 @@ export function TaskDetails({
   // ─── Derived pane visibility flags ──────────────────────────────────
   const hasFilesSupport = hasBranch || !!task.sandboxId
   const showCodeViewer = (showCodePane && hasBranch) || (!!selectedFile && showFilesPane)
-  const hasMiddlePane = showCodeViewer || showPreviewPane
+  const hasMiddlePane = showCodeViewer || showPreviewPane || showCloudPane
 
   // Helper function to format dates - show only time if same day as today
   const formatDateTime = (date: Date) => {
@@ -1894,18 +1907,19 @@ export function TaskDetails({
                 variant="ghost"
                 size="sm"
                 onClick={() => {
-                  // Files 和 Preview 互斥:打开 Files 时关 Preview
+                  // Files 和 Preview/Cloud 互斥
                   if (showPreviewPane) {
                     setShowPreviewPane(false)
                     saveShowPreviewPane(false)
                   }
+                  setShowCloudPane(false)
                   const newValue = !showFilesPane
                   setShowFilesPane(newValue)
                   saveShowFilesPane(newValue)
                 }}
                 className={cn(
                   'h-7 px-3 text-xs font-medium transition-colors',
-                  showFilesPane && !showPreviewPane
+                  showFilesPane && !showPreviewPane && !showCloudPane
                     ? 'bg-accent text-accent-foreground'
                     : 'text-muted-foreground hover:text-foreground hover:bg-accent/50',
                 )}
@@ -1919,11 +1933,12 @@ export function TaskDetails({
                 variant="ghost"
                 size="sm"
                 onClick={() => {
-                  // Preview 和 Files 互斥:打开 Preview 时关 Files
+                  // Preview 和 Files/Cloud 互斥
                   if (!showPreviewPane) {
                     setShowFilesPane(false)
                     saveShowFilesPane(false)
                   }
+                  setShowCloudPane(false)
                   const newValue = !showPreviewPane
                   setShowPreviewPane(newValue)
                   saveShowPreviewPane(newValue)
@@ -1938,6 +1953,31 @@ export function TaskDetails({
                 Preview
               </Button>
             )}
+            {/* Cloud 按钮 */}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                // Cloud 和 Files/Preview 互斥
+                if (showFilesPane) {
+                  setShowFilesPane(false)
+                  saveShowFilesPane(false)
+                }
+                if (showPreviewPane) {
+                  setShowPreviewPane(false)
+                  saveShowPreviewPane(false)
+                }
+                setShowCloudPane(!showCloudPane)
+              }}
+              className={cn(
+                'h-7 px-3 text-xs font-medium transition-colors',
+                showCloudPane
+                  ? 'bg-accent text-accent-foreground'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-accent/50',
+              )}
+            >
+              Cloud
+            </Button>
             {/* Code pane toggle (注释保留以供将来恢复) */}
             {/* <Button variant="ghost" size="sm" ... Code </Button> */}
             <Button
@@ -2140,8 +2180,8 @@ export function TaskDetails({
               </div>
             ) : null}
 
-            {/* Resize Handle - Code/Preview */}
-            {showPreviewPane && (showCodeViewer || showFilesPane) && (
+            {/* Resize Handle - Code/Preview/Cloud */}
+            {(showPreviewPane || showCloudPane) && (showCodeViewer || showFilesPane) && (
               <div className="w-3 cursor-col-resize flex-shrink-0 relative group">
                 <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-px bg-border group-hover:bg-primary/50 transition-colors" />
               </div>
@@ -2475,8 +2515,15 @@ export function TaskDetails({
               </div>
             )}
 
+            {/* Cloud Dashboard */}
+            {showCloudPane && (
+              <div className="flex-1 min-h-0 min-w-0">
+                <CloudDashboard envId={sessionEnvId} theme={dashboardTheme} style={{ height: '100%' }} />
+              </div>
+            )}
+
             {/* Resize Handle - Preview/Chat or Code/Chat */}
-            {showChatPane && (showPreviewPane || showCodeViewer || showFilesPane) && (
+            {showChatPane && (showPreviewPane || showCodeViewer || showFilesPane || showCloudPane) && (
               <div
                 className="w-3 cursor-col-resize flex-shrink-0 relative group"
                 onMouseDown={() => setResizingPane('chat')}
@@ -2758,6 +2805,11 @@ export function TaskDetails({
                   )}
                 </div>
               </div>
+
+              {/* Cloud Tab */}
+              <div className={cn('h-full', activeTab !== 'cloud' && 'hidden')}>
+                <CloudDashboard envId={sessionEnvId} theme={dashboardTheme} style={{ height: '100%' }} />
+              </div>
             </div>
 
             {/* Bottom Tab Bar */}
@@ -2783,15 +2835,27 @@ export function TaskDetails({
                   <MessageSquare className="h-5 w-5" />
                   <span className="text-xs font-medium">Chat</span>
                 </button>
+                {isCodingMode && (
+                  <button
+                    onClick={() => setActiveTab('preview')}
+                    className={cn(
+                      'flex-1 flex flex-col items-center justify-center gap-1 transition-colors',
+                      activeTab === 'preview' ? 'text-primary' : 'text-muted-foreground',
+                    )}
+                  >
+                    <Monitor className="h-5 w-5" />
+                    <span className="text-xs font-medium">Preview</span>
+                  </button>
+                )}
                 <button
-                  onClick={() => setActiveTab('preview')}
+                  onClick={() => setActiveTab('cloud')}
                   className={cn(
                     'flex-1 flex flex-col items-center justify-center gap-1 transition-colors',
-                    activeTab === 'preview' ? 'text-primary' : 'text-muted-foreground',
+                    activeTab === 'cloud' ? 'text-primary' : 'text-muted-foreground',
                   )}
                 >
-                  <Monitor className="h-5 w-5" />
-                  <span className="text-xs font-medium">Sandbox</span>
+                  <Cloud className="h-5 w-5" />
+                  <span className="text-xs font-medium">Cloud</span>
                 </button>
               </div>
             </div>
