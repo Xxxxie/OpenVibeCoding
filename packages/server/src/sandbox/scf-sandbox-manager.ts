@@ -78,7 +78,7 @@ export class SandboxInstance {
     this.baseUrl = `https://${this.deps.sandboxEnvId}.api.tcloudbasegateway.com/v1/functions/${ctx.functionName}`
     this.status = ctx.status
     this.mode = ctx.mode
-    this.sandboxMode = ctx.sandboxMode || 'shared'
+    this.sandboxMode = ctx.sandboxMode || 'isolated'
     this.isCodingMode = ctx.isCodingMode || false
     this.mcpConfig = ctx.mcpConfig
   }
@@ -304,7 +304,8 @@ export class ScfSandboxManager {
     const { exists: functionExists } = await this.checkFunctionExists(functionName)
 
     if (functionExists) {
-      await this.waitForFunctionReady(functionName)
+      progress({ phase: 'reuse', message: '连接已有沙箱...\n' })
+      await this.waitForFunctionReady(functionName, undefined, undefined, progress)
       const instanceDeps = await this.buildInstanceDeps()
       const mcpConfig = await this.buildSandboxMcpConfig(
         functionName,
@@ -355,7 +356,7 @@ export class ScfSandboxManager {
       envId: scfSessionId,
       status: 'ready',
       mode: 'shared',
-      sandboxMode: (options?.sandboxMode || 'shared') as any,
+      sandboxMode: (options?.sandboxMode || 'isolated') as any,
       isCodingMode: options?.isCodingMode || false,
     })
   }
@@ -378,7 +379,10 @@ export class ScfSandboxManager {
       await this.createFunction(functionName)
 
       try {
-        await Promise.all([this.waitForFunctionReady(functionName), this.createGatewayApi(functionName)])
+        await Promise.all([
+          this.waitForFunctionReady(functionName, undefined, undefined, progress),
+          this.createGatewayApi(functionName),
+        ])
       } catch (networkError: any) {
         console.error(`[ScfSandbox] Network setup failed, rolling back: ${networkError.message}`)
         await this.deleteFunction(functionName).catch((delErr) => {
@@ -583,7 +587,12 @@ export class ScfSandboxManager {
     }
   }
 
-  private async waitForFunctionReady(functionName: string, maxRetries = 120, retryInterval = 3000): Promise<void> {
+  private async waitForFunctionReady(
+    functionName: string,
+    maxRetries = 120,
+    retryInterval = 3000,
+    onProgress?: SandboxProgressCallback,
+  ): Promise<void> {
     const envConfig = this.getEnvConfig()
 
     const app = new CloudBase({
@@ -593,6 +602,7 @@ export class ScfSandboxManager {
       envId: envConfig.envId,
     })
 
+    let progressEmitted = false
     for (let i = 0; i < maxRetries; i++) {
       try {
         const result = await (app.commonService() as any).call({
@@ -608,6 +618,10 @@ export class ScfSandboxManager {
         const status = result?.Status
         if (status === 'Active' || status === 'active' || status === 'Running' || status === 'running') {
           return
+        }
+        if (!progressEmitted) {
+          progressEmitted = true
+          onProgress?.({ phase: 'wait_creating', message: '沙箱启动中...\n' })
         }
       } catch (error: any) {
         if (

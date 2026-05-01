@@ -41,7 +41,28 @@ const PHASE_CONFIG: Record<AgentPhaseName, PhaseConfig> = {
   preparing: {
     Icon: Rocket,
     iconClass: 'text-blue-500',
-    label: () => '准备中...',
+    label: (toolName) => {
+      switch (toolName) {
+        case 'sandbox:reuse':
+          return '连接已有沙箱...'
+        case 'sandbox:create':
+          return '创建沙箱...'
+        case 'sandbox:wait_creating':
+          return '沙箱启动中...'
+        case 'sandbox:pull_image':
+          return '拉取镜像...'
+        case 'sandbox:wait_ready':
+          return '等待沙箱就绪...'
+        case 'sandbox:init_mcp':
+          return '初始化工作空间...'
+        case 'sandbox:ready':
+          return '沙箱已就绪...'
+        case 'sandbox:error':
+          return '沙箱启动异常，回退中...'
+        default:
+          return '准备中...'
+      }
+    },
   },
   model_responding: {
     Icon: Sparkles,

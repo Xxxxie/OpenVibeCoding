@@ -7,7 +7,11 @@ import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk'
 import { v4 as uuidv4 } from 'uuid'
 import { loadConfig } from '../config/store.js'
 import { persistenceService } from './persistence.service.js'
-import { scfSandboxManager, type SandboxInstance } from '../sandbox/scf-sandbox-manager.js'
+import {
+  scfSandboxManager,
+  type SandboxInstance,
+  type SandboxProgressCallback,
+} from '../sandbox/scf-sandbox-manager.js'
 import { createSandboxMcpClient } from '../sandbox/sandbox-mcp-proxy.js'
 import { archiveToGit } from '../sandbox/git-archive.js'
 import { getCodingSystemPrompt } from './coding-mode.js'
@@ -89,7 +93,12 @@ export async function getSupportedModels(): Promise<ModelInfo[]> {
 /**
  * 等待沙箱健康检查就绪（轮询 /health）
  */
-async function waitForSandboxHealth(sandbox: SandboxInstance, callback: AgentCallback): Promise<boolean> {
+async function waitForSandboxHealth(
+  sandbox: SandboxInstance,
+  _callback: AgentCallback,
+  onProgress?: SandboxProgressCallback,
+): Promise<boolean> {
+  onProgress?.({ phase: 'wait_ready', message: '等待沙箱就绪...\n' })
   for (let i = 0; i < HEALTH_MAX_RETRIES; i++) {
     try {
       const res = await sandbox.request('/health', {
@@ -101,9 +110,6 @@ async function waitForSandboxHealth(sandbox: SandboxInstance, callback: AgentCal
       }
     } catch {
       // 继续轮询
-    }
-    if (i === 0) {
-      callback({ type: 'text', content: '正在等待工作空间就绪...\n' })
     }
     await new Promise((r) => setTimeout(r, HEALTH_INTERVAL_MS))
   }
@@ -120,8 +126,11 @@ async function initSandboxWorkspace(
   secret: { envId: string; secretId: string; secretKey: string; token?: string },
   conversationId: string,
   preferredCwd?: string,
+  onProgress?: SandboxProgressCallback,
 ): Promise<{ workspace: string; vitePort?: number }> {
   const fallbackWorkspace = preferredCwd || `/tmp/workspace/${secret.envId}/${conversationId}`
+
+  onProgress?.({ phase: 'init_mcp', message: '初始化工作空间...\n' })
 
   // Fire session/init in background — injects credentials into the sandbox session.
   // The actual workspace + vite initialisation is triggered lazily by /api/scope/info
@@ -173,6 +182,7 @@ async function initSandboxWorkspace(
           console.log(
             `[Agent] initSandboxWorkspace ready via scope/info, workspace: ${data.workspace}, vitePort: ${data.vitePort}`,
           )
+          onProgress?.({ phase: 'ready', message: '沙箱已就绪\n' })
           return { workspace: data.workspace, vitePort: data.vitePort ?? undefined }
         }
       }
@@ -816,19 +826,30 @@ export class CloudbaseAgentService {
     // 首个 phase:准备阶段(沙箱启动、工作空间初始化、历史恢复全部发生在 query() 之前)
     emitPhase('preparing')
 
+    // 沙箱子阶段 → emitPhase('preparing', 'sandbox:xxx') 桥接
+    // 让前端 AgentStatusIndicator 能在长耗时的沙箱创建流程中持续看到细粒度进度
+    const sandboxProgressBridge: SandboxProgressCallback = ({ phase }) => {
+      emitPhase('preparing', `sandbox:${phase}`)
+    }
+
     if (sandboxEnabled) {
       try {
-        sandboxInstance = await scfSandboxManager.getOrCreate(conversationId, userContext.envId, {
-          mode: 'shared',
-          workspaceIsolation: sandboxMode as 'shared' | 'isolated',
-          sandboxSessionId,
-          isCodingMode,
-        })
+        sandboxInstance = await scfSandboxManager.getOrCreate(
+          conversationId,
+          userContext.envId,
+          {
+            mode: 'shared',
+            workspaceIsolation: sandboxMode as 'shared' | 'isolated',
+            sandboxSessionId,
+            isCodingMode,
+          },
+          sandboxProgressBridge,
+        )
 
         toolOverrideConfig = await sandboxInstance.getToolOverrideConfig()
 
         // ── 健康检查：等待沙箱就绪 ──────────────────────────────────
-        const sandboxReady = await waitForSandboxHealth(sandboxInstance, wrappedCallback)
+        const sandboxReady = await waitForSandboxHealth(sandboxInstance, wrappedCallback, sandboxProgressBridge)
         if (!sandboxReady) {
           wrappedCallback({ type: 'text', content: '沙箱启动超时，将使用受限模式继续对话。\n\n' })
           sandboxInstance = null
@@ -844,6 +865,7 @@ export class CloudbaseAgentService {
             },
             conversationId,
             resolvedCwd || undefined,
+            sandboxProgressBridge,
           )
           if (initResult.workspace) {
             detectedSandboxCwd = initResult.workspace
@@ -1125,7 +1147,7 @@ export class CloudbaseAgentService {
       if (toolCallInProgress) return // Don't set timeout while tool is executing
       iterationTimeoutTimer = setTimeout(() => {
         abortController.abort()
-        ;(currentQuery as any)?.cleanup?.()
+        Promise.resolve((currentQuery as any)?.cleanup?.()).catch(() => {})
       }, ITERATION_TIMEOUT_MS)
     }
 
@@ -1568,6 +1590,22 @@ export class CloudbaseAgentService {
       console.log('[Agent] entering finally block')
       if (connectTimer) clearTimeout(connectTimer)
       if (iterationTimeoutTimer) clearTimeout(iterationTimeoutTimer)
+
+      // Explicitly signal the query iterator to stop, preventing the SDK's
+      // internal stdio pipe from writing after the for-await loop exits.
+      // This avoids EPIPE errors when the child process tries to write to
+      // a closed pipe during cleanup.
+      // Note: these may reject with "Session not found" when cancel races with
+      // the SDK's internal ProcessTransport cleanup — safe to ignore.
+      try {
+        if (currentQuery) {
+          const returnResult = typeof currentQuery.return === 'function' ? currentQuery.return() : undefined
+          const cleanupResult = typeof currentQuery.cleanup === 'function' ? currentQuery.cleanup() : undefined
+          await Promise.allSettled([returnResult, cleanupResult].filter(Boolean))
+        }
+      } catch {
+        // ignore cleanup errors
+      }
 
       // Flush remaining events to DB FIRST — this must happen before cleanup,
       // so any in-flight events are persisted for SSE replay on reconnect.

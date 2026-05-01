@@ -394,8 +394,10 @@ export function TaskChat({
 
   // ─── Handlers ──────────────────────────────────────────────────────
 
+  const isAgentBusy = task.status === 'processing' || task.status === 'pending'
+
   const handleSendMessage = async () => {
-    if (!newMessage.trim() || isSending) return
+    if (!newMessage.trim() || isSending || isAgentBusy) return
     const text = newMessage.trim()
     setNewMessage('')
     await chatSendMessage(text, (draft) => setNewMessage(draft))
@@ -405,6 +407,7 @@ export function TaskChat({
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
+      if (isAgentBusy) return
       handleSendMessage()
     }
   }
@@ -446,6 +449,8 @@ export function TaskChat({
     try {
       await cancelSession()
       toast.success('Task stopped successfully!')
+      // Refetch task data so task.status updates from 'processing' to 'stopped'
+      onStreamComplete?.()
     } catch {
       toast.error('Failed to stop task')
     } finally {
@@ -961,6 +966,21 @@ export function TaskChat({
                   return (
                     <div key={agentMessage.id} className="mt-4">
                       <div className="space-y-1">
+                        {/*
+                          P4: AgentStatusIndicator 必须在 "Generating response..." / parts map 三元判断
+                          之外渲染,否则首轮 agent message 还没任何 content/parts 时,会走 Generating 分支
+                          导致 phase 指示器完全不显示(即使 agentPhase state 正确)。
+                        */}
+                        {!readOnly &&
+                          isLatestGroup &&
+                          isLatestMessage &&
+                          isStreamingResponse &&
+                          agentPhase?.phase &&
+                          agentPhase.phase !== 'idle' && (
+                            <div className="px-2 pb-1">
+                              <AgentStatusIndicator phase={agentPhase.phase} toolName={agentPhase.toolName} />
+                            </div>
+                          )}
                         <div className="text-xs text-muted-foreground px-2">
                           {!agentMessage.content.trim() &&
                           !agentMessage.parts?.some(
@@ -1117,23 +1137,6 @@ export function TaskChat({
                                 }
                                 return null
                               })}
-                              {/*
-                              P4 / P1 就地渲染：
-                              - AgentStatusIndicator：仅在**最新 group** 的最新 agentMessage 且流式进行中展示
-                                （随当前回合消息尾部滚动；否则下一轮开始时会错误地挂在旧 group 的末尾）
-                              - InterruptionCard：如果当前 toolConfirm 对应的 tool_call 就在本 agentMessage.parts 内，
-                                就在此消息末尾渲染；否则其它 agentMessage 不展示，避免"固定在输入框上方"。
-                            */}
-                              {!readOnly &&
-                                isLatestGroup &&
-                                isLatestMessage &&
-                                isStreamingResponse &&
-                                agentPhase?.phase &&
-                                agentPhase.phase !== 'idle' && (
-                                  <div className="pt-1">
-                                    <AgentStatusIndicator phase={agentPhase.phase} toolName={agentPhase.toolName} />
-                                  </div>
-                                )}
                               {!readOnly &&
                                 toolConfirm &&
                                 agentMessage.parts?.some(
@@ -1334,21 +1337,27 @@ export function TaskChat({
               className="w-full min-h-[60px] max-h-[120px] resize-none pr-12 text-base md:text-xs"
               disabled={isSending}
             />
-            {(task.status === 'processing' || task.status === 'pending') && isSending ? (
+            {isAgentBusy || isSending ? (
               <button
                 onClick={handleStopTask}
                 disabled={isStopping}
                 className="absolute bottom-2 right-2 rounded-full h-5 w-5 bg-primary text-primary-foreground hover:bg-primary/90 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Stop agent"
               >
-                <Square className="h-3 w-3" fill="currentColor" />
+                {isStopping ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Square className="h-3 w-3" fill="currentColor" />
+                )}
               </button>
             ) : (
               <button
                 onClick={handleSendMessage}
-                disabled={!newMessage.trim() || isSending}
+                disabled={!newMessage.trim()}
                 className="absolute bottom-2 right-2 rounded-full h-5 w-5 bg-primary text-primary-foreground hover:bg-primary/90 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Send message"
               >
-                {isSending ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArrowUp className="h-3 w-3" />}
+                <ArrowUp className="h-3 w-3" />
               </button>
             )}
           </div>
