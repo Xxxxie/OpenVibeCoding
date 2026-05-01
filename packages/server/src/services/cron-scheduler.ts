@@ -1,11 +1,11 @@
-import cron from 'node-cron'
+import cron, { type ScheduledTask } from 'node-cron'
 import { nanoid } from 'nanoid'
 import { hostname } from 'os'
 import { getDb } from '../db/index.js'
 import type { CronTask } from '../db/types.js'
 
 // Map of cronTaskId -> ScheduledTask
-const scheduledJobs = new Map<string, cron.ScheduledTask>()
+const scheduledJobs = new Map<string, ScheduledTask>()
 
 // Unique pod identifier for distributed locking
 const POD_ID = `${hostname()}-${process.pid}`
@@ -86,28 +86,11 @@ async function executeCronTask(cronTaskId: string, userId: string): Promise<void
       id: taskId,
       userId: task.userId,
       prompt: task.prompt,
-      title: null,
+      mode: 'default',
+      status: 'pending',
       repoUrl: task.repoUrl || null,
       selectedAgent: task.selectedAgent || 'codebuddy',
       selectedModel: task.selectedModel || null,
-      installDependencies: false,
-      maxDuration: 300,
-      keepAlive: false,
-      enableBrowser: false,
-      status: 'pending',
-      progress: 0,
-      logs: '[]',
-      error: null,
-      branchName: null,
-      sandboxId: null,
-      agentSessionId: null,
-      sandboxUrl: null,
-      previewUrl: null,
-      prUrl: null,
-      prNumber: null,
-      prStatus: null,
-      prMergeCommitSha: null,
-      mcpServerIds: null,
       createdAt: ts,
       updatedAt: ts,
     })

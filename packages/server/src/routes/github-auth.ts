@@ -264,16 +264,14 @@ githubAuth.get('/callback', async (c) => {
           provider: 'github',
           externalId: externalId,
           accessToken: encryptedToken,
-          refreshToken: null,
           scope: tokenData.scope,
           username: githubUser.login,
-          email: email || null,
+          email: email || undefined,
           name: githubUser.name || githubUser.login,
           avatarUrl: githubUser.avatar_url,
+          role: 'user',
+          status: 'active',
           apiKey: encrypt(`sak_${nanoid(40)}`),
-          createdAt: now,
-          updatedAt: now,
-          lastLoginAt: now,
         })
       }
 

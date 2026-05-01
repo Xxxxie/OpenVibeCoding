@@ -38,6 +38,8 @@ export type AppEnv = {
     userEnv: UserEnv | undefined
     /** Scopes from Server API Key auth, undefined for cookie auth */
     apiKeyScopes: string[] | undefined
+    /** Admin user info, set by requireAdmin middleware */
+    adminUser: any
   }
 }
 

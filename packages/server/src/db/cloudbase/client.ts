@@ -12,6 +12,9 @@ const COLLECTION_NAMES = [
   'user_resources',
   'settings',
   'deployments',
+  'miniprogram_apps',
+  'cron_tasks',
+  'admin_logs',
 ] as const
 
 let app: ReturnType<typeof CloudBase.init> | null = null
@@ -40,11 +43,11 @@ function getApp(): ReturnType<typeof CloudBase.init> {
   return app
 }
 
-export function getDatabase() {
+export function getDatabase(): any {
   return getApp().database()
 }
 
-export function getCommand() {
+export function getCommand(): any {
   return getApp().database().command
 }
 
@@ -54,7 +57,7 @@ export function getCollectionName(name: string): string {
   return `${COLLECTION_PREFIX}${name}`
 }
 
-export async function getCollection(name: (typeof COLLECTION_NAMES)[number]) {
+export async function getCollection(name: (typeof COLLECTION_NAMES)[number]): Promise<any> {
   const db = getDatabase()
   const fullName = getCollectionName(name)
 

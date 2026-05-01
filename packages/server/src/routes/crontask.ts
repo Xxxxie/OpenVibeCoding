@@ -45,8 +45,6 @@ app.post('/', async (c) => {
     repoUrl: repoUrl || null,
     selectedAgent: selectedAgent || 'codebuddy',
     selectedModel: selectedModel || null,
-    lastRunAt: null,
-    nextRunAt: null,
   })
 
   if (newTask.enabled) {

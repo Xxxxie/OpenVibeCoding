@@ -10,8 +10,8 @@ import { Octokit } from '@octokit/rest'
 import { deleteArchiveBranch, SandboxInstance } from '../sandbox/index.js'
 import { persistenceService } from '../agent/persistence.service'
 import { deleteConversationViaSandbox, scfSandboxManager, archiveToGit } from '../sandbox/index.js'
-import { CODING_DEV_SERVER_PORT } from '../agent/coding-mode.js'
 import type { Octokit as OctokitType } from '@octokit/rest'
+import type { Task } from '../db/types.js'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -96,13 +96,18 @@ async function runCommandInScfSandbox(
 }
 
 async function getScfSandbox(
-  task: { sandboxId: string | null; sandboxSessionId?: string | null },
+  task: Task,
   envId: string,
+  options?: { sandboxMode?: 'shared' | 'isolated'; isCodingMode?: boolean },
 ): Promise<SandboxInstance | null> {
-  if (!task.sandboxId) return null
   try {
     const scfSessionId = task.sandboxSessionId || envId
-    return (await scfSandboxManager.getExisting(task.sandboxId, scfSessionId)) ?? null
+    return (
+      (await scfSandboxManager.getExisting(task.id, scfSessionId, {
+        sandboxMode: (options?.sandboxMode || task.sandboxMode || 'shared') as 'shared' | 'isolated',
+        isCodingMode: options?.isCodingMode ?? task.mode === 'coding',
+      })) ?? null
+    )
   } catch {
     return null
   }
@@ -407,7 +412,11 @@ tasksRouter.delete('/:taskId', requireUserEnv, async (c) => {
         await deleteArchiveBranch(taskId)
       } else {
         const scfSessionId = existing.sandboxSessionId || envId
-        const sandbox = await scfSandboxManager.getExisting(taskId, scfSessionId).catch(() => null)
+        const sandbox = await scfSandboxManager
+          .getExisting(taskId, scfSessionId, {
+            sandboxMode: existing.sandboxMode || 'shared',
+          })
+          .catch(() => null)
         if (sandbox) {
           await deleteConversationViaSandbox(sandbox, envId, taskId, existing.sandboxCwd || undefined)
         }
@@ -2138,7 +2147,7 @@ tasksRouter.get('/:taskId/sandbox-health', requireUserEnv, async (c) => {
 })
 
 // ---------------------------------------------------------------------------
-// GET /:taskId/preview-health — 检查 dev server 是否实际响应（沙箱内 curl）
+// GET /:taskId/preview-health — 检查 dev server 是否实际响应（via /api/scope/info）
 // ---------------------------------------------------------------------------
 tasksRouter.get('/:taskId/preview-health', requireUserEnv, async (c) => {
   try {
@@ -2148,24 +2157,39 @@ tasksRouter.get('/:taskId/preview-health', requireUserEnv, async (c) => {
     const task = await findActiveTask(taskId, session.user.id)
     if (!task) return c.json({ status: 'not_found' })
     if (!task.sandboxId) return c.json({ status: 'no_sandbox' })
-    const sandbox = await getScfSandbox(task, envId)
+
+    const taskMode = (task as any).mode as string | null | undefined
+    const isCodingMode = taskMode === 'coding'
+    const sandboxConfig = resolveSandboxConfig({
+      sandboxMode: task.sandboxMode,
+      sandboxSessionId: task.sandboxSessionId,
+      sandboxCwd: task.sandboxCwd,
+      envId,
+      taskId,
+    })
+    const sandbox = await getScfSandbox(task, envId, {
+      sandboxMode: sandboxConfig.sandboxMode,
+      isCodingMode,
+    })
     if (!sandbox) return c.json({ status: 'no_sandbox' })
-    // 在沙箱内部 curl dev server，避免跨域问题
-    const result = await runCommandInScfSandbox(
-      sandbox,
-      `curl -s -o /dev/null -w "%{http_code}" http://localhost:${CODING_DEV_SERVER_PORT}/ 2>/dev/null || echo "0"`,
-      8000,
-    )
-    const code = result.output?.trim()
-    const alive = code === '200' || code === '302' || code === '304'
-    // 同时读取 supervisor state
-    const stateResult = await runCommandInScfSandbox(
-      sandbox,
-      `cat /tmp/devserver.state 2>/dev/null || echo "unknown"`,
-      3000,
-    )
-    const supervisorState = stateResult.output?.trim() || 'unknown'
-    return c.json({ status: alive ? 'running' : 'stopped', httpCode: code, supervisorState })
+
+    // Query scope/info — scope headers are injected automatically by sandbox.request()
+    const res = await sandbox.request('/api/scope/info', {
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!res.ok) {
+      return c.json({ status: 'error', message: `scope/info returned ${res.status}` })
+    }
+    const info = (await res.json()) as {
+      success?: boolean
+      workspace?: string
+      vitePort?: number | null
+    }
+    if (!info.success) {
+      return c.json({ status: 'error', message: 'scope/info not successful' })
+    }
+    const alive = !!info.vitePort
+    return c.json({ status: alive ? 'running' : 'stopped', vitePort: info.vitePort })
   } catch (error) {
     return c.json({ status: 'error', message: (error as Error).message })
   }
@@ -2411,8 +2435,12 @@ tasksRouter.get('/:taskId/preview-url', requireUserEnv, async (c) => {
       let resolvedSessionId = sandboxConfig.sandboxSessionId
       let resolvedCwd = sandboxConfig.sandboxCwd
 
+      const taskMode = (task as any).mode as string | null | undefined
+      const isCodingMode = taskMode === 'coding'
+      const scopeOpts = { sandboxMode: sandboxConfig.sandboxMode, isCodingMode }
+
       if (task.sandboxId) {
-        sandbox = await getScfSandbox(task, envId)
+        sandbox = await getScfSandbox(task, envId, scopeOpts)
       }
 
       if (!sandbox) {
@@ -2422,6 +2450,7 @@ tasksRouter.get('/:taskId/preview-url', requireUserEnv, async (c) => {
             mode: 'shared',
             workspaceIsolation: sandboxConfig.sandboxMode,
             sandboxSessionId: sandboxConfig.sandboxSessionId,
+            isCodingMode,
           })
 
           await getDb().tasks.update(taskId, {
@@ -2437,63 +2466,67 @@ tasksRouter.get('/:taskId/preview-url', requireUserEnv, async (c) => {
       }
 
       // ── coding mode: 确保 workspace + vite 就绪 ──────────────────────
-      const taskMode = (task as any).mode as string | null | undefined
-      const isCodingMode = taskMode === 'coding'
+      // /api/scope/info with X-Scope-Template: coding triggers initialization on first call:
+      //   - seedCodingTemplate (first time) or git restore (warm restart)
+      //   - ensureViteDev: npm install + spawn vite + crash auto-restart
+      // We poll scope/info until vitePort is returned.
       if (isCodingMode) {
-        // /api/session/init 内部完成全部初始化：
-        //   - seedCodingTemplate（首次）或 git restore（二次启动）
-        //   - ensureViteDev: npm install + spawn vite + crash 自动重启
+        // Inject credentials via session/init (fire-and-forget)
         try {
           const { credentials: userCredentials } = c.get('userEnv')!
           await emit('progress', '正在初始化工作空间...')
-          await sandbox!.request('/api/session/init', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              env: {
-                CLOUDBASE_ENV_ID: envId,
-                ...(userCredentials?.secretId ? { TENCENTCLOUD_SECRETID: userCredentials.secretId } : {}),
-                ...(userCredentials?.secretKey ? { TENCENTCLOUD_SECRETKEY: userCredentials.secretKey } : {}),
-                ...(userCredentials?.sessionToken ? { TENCENTCLOUD_SESSIONTOKEN: userCredentials.sessionToken } : {}),
-              },
-            }),
-            signal: AbortSignal.timeout(60_000),
-          })
+          sandbox!
+            .request('/api/session/init', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                env: {
+                  CLOUDBASE_ENV_ID: envId,
+                  ...(userCredentials?.secretId ? { TENCENTCLOUD_SECRETID: userCredentials.secretId } : {}),
+                  ...(userCredentials?.secretKey ? { TENCENTCLOUD_SECRETKEY: userCredentials.secretKey } : {}),
+                  ...(userCredentials?.sessionToken ? { TENCENTCLOUD_SESSIONTOKEN: userCredentials.sessionToken } : {}),
+                },
+              }),
+              signal: AbortSignal.timeout(60_000),
+            })
+            .catch((err: Error) => {
+              console.warn('[preview-url] session/init failed:', err.message)
+            })
         } catch (err) {
-          console.warn('[preview-url] session/init failed:', (err as Error).message)
+          console.warn('[preview-url] session/init setup failed:', (err as Error).message)
         }
       }
 
-      // ── 等待 vite 端口响应 ──────────────────────────────────────────────
+      // ── Poll /api/scope/info for vitePort ─────────────────────────────────
       await emit('progress', '正在等待开发服务器就绪...')
       const maxWaitMs = 120_000
       const pollInterval = 2000
       const startTime = Date.now()
-      let port = CODING_DEV_SERVER_PORT
-      let alive = false
+      let port: number | null = null
 
       while (Date.now() - startTime < maxWaitMs) {
         try {
-          const pingRes = await sandbox!.request('/api/tools/bash', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              command: `curl -s -o /dev/null -w "%{http_code}" http://localhost:${port}/ 2>/dev/null || echo "0"`,
-              timeout: 5000,
-            }),
+          const infoRes = await sandbox!.request('/api/scope/info', {
             signal: AbortSignal.timeout(10_000),
           })
-          const pingData = (await pingRes.json()) as { result?: { output?: string } }
-          const code = pingData.result?.output?.trim()
-          if (code === '200' || code === '302' || code === '304') {
-            alive = true
-            break
+          if (infoRes.ok) {
+            const info = (await infoRes.json()) as {
+              success?: boolean
+              workspace?: string
+              vitePort?: number | null
+            }
+            if (info.success && info.vitePort) {
+              port = info.vitePort
+              break
+            }
           }
-        } catch {}
+        } catch {
+          // scope/info not available yet
+        }
         await new Promise((r) => setTimeout(r, pollInterval))
       }
 
-      if (!alive) {
+      if (!port) {
         await emit('error', `Dev server 未能在 ${maxWaitMs / 1000}s 内就绪`)
         return
       }
@@ -2507,7 +2540,17 @@ tasksRouter.get('/:taskId/preview-url', requireUserEnv, async (c) => {
         previewBase = `https://${sandboxEnvId}.service.tcloudbase.com/preview`
       }
 
-      const gatewayUrl = `${previewBase}/${port}/?cloudbase_session_id=${resolvedSessionId}`
+      // Build gateway URL with scope query params
+      // - cloudbase_session_id: routes to the correct SCF session
+      // - scope_id: only in shared mode, routes to the correct sub-workspace
+      // - scope_template: signals coding template (vite dev server)
+      let gatewayUrl = `${previewBase}/${port}/?cloudbase_session_id=${resolvedSessionId}`
+      if (sandboxConfig.sandboxMode === 'shared') {
+        gatewayUrl += `&scope_id=${taskId}`
+      }
+      if (isCodingMode) {
+        gatewayUrl += `&scope_template=coding`
+      }
       await emit('ready', 'Dev server ready', { gatewayUrl, port })
     } catch (err) {
       // 顶层异常兜底：确保前端总能收到 error 事件而非静默关闭

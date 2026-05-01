@@ -3,6 +3,8 @@ import { requireAuth, type AppEnv } from './auth'
 import { getDb } from '../db/index.js'
 import { deleteCookie } from 'hono/cookie'
 
+export type { AppEnv }
+
 /**
  * Require admin role
  */

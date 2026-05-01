@@ -23,13 +23,9 @@ async function createAdmin(username: string, password: string) {
       externalId: username,
       accessToken: '',
       username,
-      email: null,
       name: username,
-      role: 'admin', // Set as admin
+      role: 'admin',
       status: 'active',
-      createdAt: now,
-      updatedAt: now,
-      lastLoginAt: now,
     })
 
     // Create local credentials

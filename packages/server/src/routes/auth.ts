@@ -47,16 +47,10 @@ auth.post('/register', async (c) => {
       provider: 'local',
       externalId: trimmedUsername,
       accessToken: '',
-      refreshToken: null,
-      scope: null,
       username: trimmedUsername,
-      email: null,
-      name: null,
-      avatarUrl: null,
+      role: 'user',
+      status: 'active',
       apiKey: encrypt(`sak_${nanoid(40)}`),
-      createdAt: now,
-      updatedAt: now,
-      lastLoginAt: now,
     })
 
     await getDb().localCredentials.create({
@@ -166,7 +160,27 @@ auth.post('/register', async (c) => {
       sameSite: 'Lax',
     })
 
-    return c.json({ success: true, username: trimmedUsername })
+    // Fetch envId (shared mode creates it synchronously above)
+    let envId: string | undefined
+    try {
+      const resource = await getDb().userResources.findByUserId(userId)
+      envId = resource?.envId || undefined
+    } catch {
+      // ignore
+    }
+
+    return c.json({
+      success: true,
+      user: {
+        id: userId,
+        username: trimmedUsername,
+        email: undefined,
+        name: trimmedUsername,
+        avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(trimmedUsername)}&background=6366f1&color=fff`,
+        role: 'user',
+      },
+      envId,
+    })
   } catch (error) {
     console.error('Error registering local user:', error)
     return c.json({ error: 'Registration failed' }, 500)
@@ -236,7 +250,29 @@ auth.post('/login', async (c) => {
       sameSite: 'Lax',
     })
 
-    return c.json({ success: true })
+    // Fetch envId for the response (same logic as /me)
+    let envId: string | undefined
+    try {
+      const resource = await getDb().userResources.findByUserId(user.id)
+      envId = resource?.envId || undefined
+    } catch {
+      // ignore
+    }
+
+    return c.json({
+      success: true,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email || undefined,
+        name: user.name || user.username,
+        avatar:
+          user.avatarUrl ||
+          `https://ui-avatars.com/api/?name=${encodeURIComponent(user.username)}&background=6366f1&color=fff`,
+        role: user.role || 'user',
+      },
+      envId,
+    })
   } catch (error) {
     console.error('Error logging in local user:', error)
     return c.json({ error: 'Login failed' }, 500)

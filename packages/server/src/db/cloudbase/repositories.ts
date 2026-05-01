@@ -89,6 +89,15 @@ class CloudBaseUserRepository implements UserRepository {
     const collection = await getCollection('users')
     const ts = now()
     const doc: User = {
+      refreshToken: null,
+      scope: null,
+      email: null,
+      name: null,
+      avatarUrl: null,
+      disabledReason: null,
+      disabledAt: null,
+      disabledBy: null,
+      apiKey: null,
       ...user,
       createdAt: user.createdAt ?? ts,
       updatedAt: user.updatedAt ?? ts,
@@ -115,7 +124,7 @@ class CloudBaseUserRepository implements UserRepository {
   async findAll(limit = 20, offset = 0): Promise<User[]> {
     const collection = await getCollection('users')
     const { data } = await collection.limit(limit).skip(offset).get()
-    return data.map((doc) => stripCloudBaseId<User>(doc as Record<string, unknown>))
+    return data.map((doc: any) => stripCloudBaseId<User>(doc as Record<string, unknown>))
   }
 
   async count(): Promise<number> {
@@ -263,6 +272,30 @@ class CloudBaseTaskRepository implements TaskRepository {
     const collection = await getCollection('tasks')
     const ts = now()
     const doc: Task = {
+      title: null,
+      repoUrl: null,
+      selectedAgent: null,
+      selectedModel: null,
+      installDependencies: null,
+      maxDuration: null,
+      keepAlive: null,
+      enableBrowser: null,
+      progress: null,
+      logs: null,
+      error: null,
+      branchName: null,
+      sandboxId: null,
+      sandboxSessionId: null,
+      sandboxCwd: null,
+      sandboxMode: null,
+      agentSessionId: null,
+      sandboxUrl: null,
+      previewUrl: null,
+      prUrl: null,
+      prNumber: null,
+      prStatus: null,
+      prMergeCommitSha: null,
+      mcpServerIds: null,
       ...task,
       createdAt: task.createdAt ?? ts,
       updatedAt: task.updatedAt ?? ts,
@@ -462,6 +495,13 @@ class CloudBaseCronTaskRepository implements CronTaskRepository {
     const collection = await getCollection('cron_tasks')
     const ts = now()
     const doc: CronTask = {
+      repoUrl: null,
+      selectedAgent: null,
+      selectedModel: null,
+      lastRunAt: null,
+      nextRunAt: null,
+      lockedBy: null,
+      lockedAt: null,
       ...task,
       createdAt: task.createdAt ?? ts,
       updatedAt: task.updatedAt ?? ts,
@@ -819,7 +859,7 @@ class CloudBaseAdminLogRepository implements AdminLogRepository {
       .where({ adminUserId: _.eq(adminUserId) })
       .limit(limit)
       .get()
-    return data.map((doc) => stripCloudBaseId<AdminLog>(doc as Record<string, unknown>))
+    return data.map((doc: any) => stripCloudBaseId<AdminLog>(doc as Record<string, unknown>))
   }
 
   async findByTargetUserId(targetUserId: string, limit = 50): Promise<AdminLog[]> {
@@ -829,13 +869,13 @@ class CloudBaseAdminLogRepository implements AdminLogRepository {
       .where({ targetUserId: _.eq(targetUserId) })
       .limit(limit)
       .get()
-    return data.map((doc) => stripCloudBaseId<AdminLog>(doc as Record<string, unknown>))
+    return data.map((doc: any) => stripCloudBaseId<AdminLog>(doc as Record<string, unknown>))
   }
 
   async findAll(limit = 50, offset = 0): Promise<AdminLog[]> {
     const collection = await getCollection('admin_logs')
     const { data } = await collection.limit(limit).skip(offset).get()
-    return data.map((doc) => stripCloudBaseId<AdminLog>(doc as Record<string, unknown>))
+    return data.map((doc: any) => stripCloudBaseId<AdminLog>(doc as Record<string, unknown>))
   }
 }
 

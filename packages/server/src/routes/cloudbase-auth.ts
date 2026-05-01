@@ -51,16 +51,13 @@ cloudbaseAuth.post('/login', async (c) => {
         provider: 'cloudbase',
         externalId,
         accessToken: '',
-        refreshToken: null,
-        scope: null,
         username,
-        email: email || null,
-        name: nickName || null,
-        avatarUrl: avatarUrl || null,
+        email: email || undefined,
+        name: nickName || undefined,
+        avatarUrl: avatarUrl || undefined,
+        role: 'user',
+        status: 'active',
         apiKey: encrypt(`sak_${nanoid(40)}`),
-        createdAt: now,
-        updatedAt: now,
-        lastLoginAt: now,
       })
 
       // Provision CloudBase resources for new user

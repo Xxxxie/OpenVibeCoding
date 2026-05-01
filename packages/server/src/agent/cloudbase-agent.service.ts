@@ -120,11 +120,12 @@ async function initSandboxWorkspace(
   secret: { envId: string; secretId: string; secretKey: string; token?: string },
   conversationId: string,
   preferredCwd?: string,
-): Promise<string | undefined> {
-  const workspace = preferredCwd || `/tmp/workspace/${secret.envId}/${conversationId}`
+): Promise<{ workspace: string; vitePort?: number }> {
+  const fallbackWorkspace = preferredCwd || `/tmp/workspace/${secret.envId}/${conversationId}`
 
-  // Fire session/init（不等响应，沙箱内部可能需要很久做 git restore + npm install）
-  // 沙箱网关有自己的超时限制，等待会导致 AbortError
+  // Fire session/init in background — injects credentials into the sandbox session.
+  // The actual workspace + vite initialisation is triggered lazily by /api/scope/info
+  // with X-Scope-Template: coding, but we still need credential injection first.
   sandbox
     .request('/api/session/init', {
       method: 'POST',
@@ -150,36 +151,40 @@ async function initSandboxWorkspace(
       console.warn('[Agent] session/init background error:', (e as Error).message)
     })
 
-  // 轮询等待 workspace 就绪（session/init 在后台创建目录 + seed 模板）
+  // Poll /api/scope/info to get the workspace path (and vitePort if coding mode).
+  // Scope headers (X-Scope-Id, X-Scope-Template) are injected automatically by sandbox.request().
+  // The first request with X-Scope-Template: coding triggers template init + vite dev server.
   const maxWaitMs = 120_000
   const pollInterval = 2000
   const startTime = Date.now()
 
   while (Date.now() - startTime < maxWaitMs) {
     try {
-      const checkRes = await sandbox.request('/api/tools/bash', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          command: `test -f "${workspace}/package.json" && echo "ready" || echo "waiting"`,
-          timeout: 5000,
-        }),
+      const res = await sandbox.request('/api/scope/info', {
         signal: AbortSignal.timeout(10_000),
       })
-      const data = (await checkRes.json()) as { result?: { output?: string } }
-      if (data.result?.output?.trim() === 'ready') {
-        console.log(`[Agent] initSandboxWorkspace ready, workspace: ${workspace}, preferredCwd: ${preferredCwd}`)
-        return workspace
+      if (res.ok) {
+        const data = (await res.json()) as {
+          success?: boolean
+          workspace?: string
+          vitePort?: number | null
+        }
+        if (data.success && data.workspace) {
+          console.log(
+            `[Agent] initSandboxWorkspace ready via scope/info, workspace: ${data.workspace}, vitePort: ${data.vitePort}`,
+          )
+          return { workspace: data.workspace, vitePort: data.vitePort ?? undefined }
+        }
       }
     } catch {
-      // bash 调用失败，沙箱可能还在启动
+      // scope/info not available yet, sandbox may still be starting
     }
     await new Promise((r) => setTimeout(r, pollInterval))
   }
 
-  // 超时兜底：目录可能还没就绪，但返回路径让后续流程继续
-  console.warn(`[Agent] initSandboxWorkspace timeout after ${maxWaitMs / 1000}s, returning workspace anyway`)
-  return workspace
+  // Timeout fallback: return the computed workspace path so the agent can continue
+  console.warn(`[Agent] initSandboxWorkspace timeout after ${maxWaitMs / 1000}s, returning fallback workspace`)
+  return { workspace: fallbackWorkspace }
 }
 
 /**
@@ -817,6 +822,7 @@ export class CloudbaseAgentService {
           mode: 'shared',
           workspaceIsolation: sandboxMode as 'shared' | 'isolated',
           sandboxSessionId,
+          isCodingMode,
         })
 
         toolOverrideConfig = await sandboxInstance.getToolOverrideConfig()
@@ -828,7 +834,7 @@ export class CloudbaseAgentService {
           sandboxInstance = null
         } else {
           // ── 初始化工作空间：注入【登录用户凭证】──────────────────
-          const sandboxCwd = await initSandboxWorkspace(
+          const initResult = await initSandboxWorkspace(
             sandboxInstance,
             {
               envId: userContext.envId,
@@ -839,18 +845,15 @@ export class CloudbaseAgentService {
             conversationId,
             resolvedCwd || undefined,
           )
-          if (sandboxCwd) {
-            detectedSandboxCwd = sandboxCwd
-            wrappedCallback({ type: 'session', sandboxCwd } as any)
-            console.log(`[Agent] Sandbox workspace initialized, cwd: ${sandboxCwd}`)
+          if (initResult.workspace) {
+            detectedSandboxCwd = initResult.workspace
+            wrappedCallback({ type: 'session', sandboxCwd: initResult.workspace } as any)
+            console.log(`[Agent] Sandbox workspace initialized, cwd: ${initResult.workspace}`)
           }
 
           // Create sandbox MCP client，使用【登录用户凭证】操作 CloudBase 资源
           sandboxMcpClient = await createSandboxMcpClient({
-            baseUrl: sandboxInstance.baseUrl,
-            scfSessionId: sandboxSessionId,
-            conversationId,
-            getAccessToken: () => sandboxInstance!.getAccessToken(),
+            sandbox: sandboxInstance,
             getCredentials: async () => ({
               cloudbaseEnvId: userContext.envId,
               secretId: userCredentials?.secretId || '',
@@ -1113,7 +1116,9 @@ export class CloudbaseAgentService {
     let connectTimer: ReturnType<typeof setTimeout> | undefined
     let iterationTimeoutTimer: ReturnType<typeof setTimeout> | undefined
     let toolCallInProgress = false // Pause iteration timeout while tools are executing
-    const abortController = new AbortController()
+    // Use the registry's AbortController so that session/cancel can directly abort the LLM query
+    const registryRun = getAgentRun(conversationId)
+    const abortController = registryRun?.abortController ?? new AbortController()
 
     function resetIterationTimeout() {
       if (iterationTimeoutTimer) clearTimeout(iterationTimeoutTimer)
@@ -1970,7 +1975,7 @@ export class CloudbaseAgentService {
           /* ignore */
         }
       }
-      if (!localPath) localPath = toolInfo?.input?.localPath as string | undefined
+      if (!localPath) localPath = (toolInfo?.input as Record<string, unknown>)?.localPath as string | undefined
 
       const isFile = localPath ? /\.[a-zA-Z0-9]+$/.test(localPath.replace(/\/+$/, '').split('/').pop() || '') : false
       const deployUrl = CloudbaseAgentService.extractDeployUrl(rawText, isFile)
@@ -2134,7 +2139,7 @@ export class CloudbaseAgentService {
       // pending tool call still has an empty input (i.e. no input_json_delta was received)
       const pendingTool = tracker.pendingToolCalls.get(toolId)
       const hasInput = block.input && typeof block.input === 'object' && Object.keys(block.input).length > 0
-      if (hasInput && pendingTool && Object.keys(pendingTool.input).length === 0) {
+      if (hasInput && pendingTool && Object.keys(pendingTool.input as object).length === 0) {
         pendingTool.input = block.input
         callback({
           type: 'tool_input_update',

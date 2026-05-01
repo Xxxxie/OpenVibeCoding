@@ -431,7 +431,7 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
  * SSE endpoint: replay existing ACP events + poll for new events until turn completes
  */
 acp.get('/observe/:sessionId', requireUserEnv, async (c) => {
-  const sessionId = c.req.param('sessionId')
+  const sessionId = c.req.param('sessionId')!
   const { envId, userId } = c.get('userEnv')!
 
   if (!envId) {
@@ -440,14 +440,14 @@ acp.get('/observe/:sessionId', requireUserEnv, async (c) => {
 
   let turnId = c.req.query('turnId') || undefined
   if (!turnId) {
-    const latest = await persistenceService.getLatestRecordStatus(sessionId, userId, envId)
+    const latest = await persistenceService.getLatestRecordStatus(sessionId, userId!, envId!)
     if (!latest || (latest.status !== 'pending' && latest.status !== 'streaming')) {
       return c.json({ error: 'No active turn to observe' }, 404)
     }
     turnId = latest.recordId
   }
 
-  return observeStream(c, null, sessionId, turnId, envId, userId)
+  return observeStream(c, null, sessionId, turnId, envId!, userId!)
 })
 
 async function observeStream(

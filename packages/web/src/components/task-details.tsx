@@ -423,9 +423,9 @@ export function TaskDetails({
           signal: AbortSignal.timeout(12000),
         })
         if (!res.ok) return
-        const data = (await res.json()) as { status: string; supervisorState?: string }
+        const data = (await res.json()) as { status: string; vitePort?: number | null }
         if (data.status === 'stopped' && !cancelled) {
-          console.log(`[preview] Dev server stopped (supervisorState=${data.supervisorState}), restarting...`)
+          console.log('[preview] Dev server stopped, restarting...')
           clearInterval(interval)
           setPreviewLoadingMessage('Dev server 已停止，正在重启...')
           void loadPreviewGatewayUrl()
@@ -2201,6 +2201,7 @@ export function TaskDetails({
                         onHardRefresh={() => {
                           setPreviewKey((k) => k + 1)
                         }}
+                        loading={previewGatewayLoading}
                         className="flex-1 min-w-0"
                       />
                       <Button

@@ -41,7 +41,7 @@ router.post('/:name/invoke', requireUserEnv, async (c) => {
     const manager = createManager(getCreds(c))
     const name = c.req.param('name')
     const body = await c.req.json()
-    const result = await manager.functions.invokeFunction(name, body)
+    const result = await manager.functions.invokeFunction(name!, body)
     return c.json({ result: result.RetMsg })
   } catch (e: any) {
     return c.json({ error: e.message }, 500)

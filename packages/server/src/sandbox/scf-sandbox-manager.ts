@@ -38,6 +38,10 @@ export class SandboxInstance {
   readonly baseUrl: string
   readonly status: 'creating' | 'ready' | 'error'
   readonly mode: SandboxMode
+  /** Workspace isolation mode: 'shared' shares an SCF instance across tasks, 'isolated' is 1:1 */
+  readonly sandboxMode: 'shared' | 'isolated'
+  /** Whether this task is in coding mode (triggers X-Scope-Template: coding) */
+  readonly isCodingMode: boolean
 
   readonly mcpConfig?: {
     type: 'sse' | 'http'
@@ -62,6 +66,8 @@ export class SandboxInstance {
       envId: string
       status: 'creating' | 'ready' | 'error'
       mode: SandboxMode
+      sandboxMode?: 'shared' | 'isolated'
+      isCodingMode?: boolean
       mcpConfig?: SandboxInstance['mcpConfig']
     },
   ) {
@@ -72,6 +78,8 @@ export class SandboxInstance {
     this.baseUrl = `https://${this.deps.sandboxEnvId}.api.tcloudbasegateway.com/v1/functions/${ctx.functionName}`
     this.status = ctx.status
     this.mode = ctx.mode
+    this.sandboxMode = ctx.sandboxMode || 'shared'
+    this.isCodingMode = ctx.isCodingMode || false
     this.mcpConfig = ctx.mcpConfig
   }
 
@@ -87,11 +95,31 @@ export class SandboxInstance {
     }
   }
 
+  /**
+   * Build scope headers based on sandbox mode.
+   * - X-Scope-Id: only sent in 'shared' mode (isolates sub-workspaces within the shared session)
+   * - X-Scope-Template: sent when in coding mode (triggers template init + vite dev server)
+   */
+  static buildScopeHeaders(
+    scopeId: string,
+    sandboxMode: 'shared' | 'isolated',
+    isCodingMode: boolean,
+  ): Record<string, string> {
+    const headers: Record<string, string> = {}
+    if (sandboxMode === 'shared') {
+      headers['X-Scope-Id'] = scopeId
+    }
+    if (isCodingMode) {
+      headers['X-Scope-Template'] = 'coding'
+    }
+    return headers
+  }
+
   async getAuthHeaders(): Promise<Record<string, string>> {
     const accessToken = await this.getAccessToken()
     return {
       ...SandboxInstance.buildAuthHeaders(accessToken, this.envId),
-      'X-Conversation-Id': this.conversationId,
+      ...SandboxInstance.buildScopeHeaders(this.conversationId, this.sandboxMode, this.isCodingMode),
     }
   }
 
@@ -119,7 +147,7 @@ export class ScfSandboxManager {
   private readonly config: ScfSandboxConfig = {
     timeoutMs: 30 * 60 * 1000,
     maxCacheSize: 50,
-    functionPrefix: 'sandbox',
+    functionPrefix: 'sandbox-dev',
     runtime: 'Nodejs16.13',
     memory: 2048,
     timeout: 900,
@@ -211,7 +239,6 @@ export class ScfSandboxManager {
         }
       }
 
-      console.log('[ScfSandbox] Got admin access token, expires_in:', expiresIn)
       return accessToken
     } catch (err) {
       console.error('[ScfSandbox] getAdminAccessToken failed:', (err as Error).message)
@@ -232,6 +259,8 @@ export class ScfSandboxManager {
     scfSessionId: string,
     conversationId: string,
     sandboxEnvId: string,
+    sandboxMode: 'shared' | 'isolated' = 'shared',
+    isCodingMode = false,
   ): Promise<SandboxInstance['mcpConfig']> {
     const accessToken = await this.getAdminAccessToken()
     const url = `https://${sandboxEnvId}.api.tcloudbasegateway.com/v1/functions/${functionName}/mcp`
@@ -240,7 +269,7 @@ export class ScfSandboxManager {
       url,
       headers: {
         ...SandboxInstance.buildAuthHeaders(accessToken, scfSessionId),
-        'X-Conversation-Id': conversationId,
+        ...SandboxInstance.buildScopeHeaders(conversationId, sandboxMode, isCodingMode),
       },
     }
   }
@@ -254,6 +283,8 @@ export class ScfSandboxManager {
       workspaceIsolation?: 'shared' | 'isolated'
       /** Pre-computed SCF session ID (overrides workspaceIsolation logic) */
       sandboxSessionId?: string
+      /** Whether this task is in coding mode */
+      isCodingMode?: boolean
     },
     onProgress?: SandboxProgressCallback,
   ): Promise<SandboxInstance> {
@@ -261,6 +292,7 @@ export class ScfSandboxManager {
     const mode = options?.mode || 'shared'
     const isolation = options?.workspaceIsolation || 'shared'
     const scfSessionId = options?.sandboxSessionId || (isolation === 'shared' ? envId : conversationId)
+    const isCodingMode = options?.isCodingMode || false
 
     const envConfig = this.getEnvConfig()
     const functionPrefix = envConfig.functionPrefix || this.config.functionPrefix
@@ -279,6 +311,8 @@ export class ScfSandboxManager {
         scfSessionId,
         conversationId,
         instanceDeps.sandboxEnvId,
+        isolation,
+        isCodingMode,
       )
 
       return new SandboxInstance(instanceDeps, {
@@ -287,6 +321,8 @@ export class ScfSandboxManager {
         envId: scfSessionId,
         status: 'ready',
         mode,
+        sandboxMode: isolation,
+        isCodingMode,
         mcpConfig,
       })
     }
@@ -300,7 +336,11 @@ export class ScfSandboxManager {
    * @param conversationId 会话ID
    * @param scfSessionId SCF session ID（shared模式=envId，isolated模式=conversationId）
    */
-  async getExisting(conversationId: string, scfSessionId: string): Promise<SandboxInstance | null> {
+  async getExisting(
+    conversationId: string,
+    scfSessionId: string,
+    options?: { sandboxMode?: 'shared' | 'isolated' | string; isCodingMode?: boolean },
+  ): Promise<SandboxInstance | null> {
     const envConfig = this.getEnvConfig()
     const functionPrefix = envConfig.functionPrefix || this.config.functionPrefix
     const functionName = this.generateFunctionName('shared', functionPrefix)
@@ -315,6 +355,8 @@ export class ScfSandboxManager {
       envId: scfSessionId,
       status: 'ready',
       mode: 'shared',
+      sandboxMode: (options?.sandboxMode || 'shared') as any,
+      isCodingMode: options?.isCodingMode || false,
     })
   }
 
@@ -327,6 +369,8 @@ export class ScfSandboxManager {
     onProgress?: SandboxProgressCallback,
   ): Promise<SandboxInstance> {
     const progress = onProgress || (() => {})
+    const isolation: 'shared' | 'isolated' = options?.workspaceIsolation || 'shared'
+    const isCodingMode: boolean = options?.isCodingMode || false
 
     try {
       progress({ phase: 'create', message: '正在创建工作空间...\n' })
@@ -344,7 +388,14 @@ export class ScfSandboxManager {
       }
 
       const instanceDeps = await this.buildInstanceDeps()
-      const mcpConfig = await this.buildSandboxMcpConfig(functionName, envId, conversationId, instanceDeps.sandboxEnvId)
+      const mcpConfig = await this.buildSandboxMcpConfig(
+        functionName,
+        envId,
+        conversationId,
+        instanceDeps.sandboxEnvId,
+        isolation,
+        isCodingMode,
+      )
 
       return new SandboxInstance(instanceDeps, {
         functionName,
@@ -352,6 +403,8 @@ export class ScfSandboxManager {
         envId,
         status: 'ready',
         mode,
+        sandboxMode: isolation,
+        isCodingMode,
         mcpConfig,
       })
     } catch (error: any) {

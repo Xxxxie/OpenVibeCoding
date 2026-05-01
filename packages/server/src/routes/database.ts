@@ -45,7 +45,7 @@ router.post('/collections', requireUserEnv, async (c) => {
 
 router.delete('/collections/:name', requireUserEnv, async (c) => {
   try {
-    await deleteCollection(getCreds(c), c.req.param('name'))
+    await deleteCollection(getCreds(c), c.req.param('name')!)
     return c.json({ success: true })
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
@@ -70,7 +70,7 @@ router.get('/collections/:name/documents', requireUserEnv, async (c) => {
       }
     }
 
-    const result = await queryDocuments(getCreds(c), name, page, pageSize, where)
+    const result = await queryDocuments(getCreds(c), name!, page, pageSize, where)
     return c.json(result)
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
@@ -80,7 +80,7 @@ router.get('/collections/:name/documents', requireUserEnv, async (c) => {
 router.post('/collections/:name/documents', requireUserEnv, async (c) => {
   try {
     const data = await c.req.json()
-    const id = await insertDocument(getCreds(c), c.req.param('name'), data)
+    const id = await insertDocument(getCreds(c), c.req.param('name')!, data)
     return c.json({ _id: id })
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
@@ -90,7 +90,7 @@ router.post('/collections/:name/documents', requireUserEnv, async (c) => {
 router.put('/collections/:name/documents/:id', requireUserEnv, async (c) => {
   try {
     const data = await c.req.json()
-    await updateDocument(getCreds(c), c.req.param('name'), c.req.param('id'), data)
+    await updateDocument(getCreds(c), c.req.param('name')!, c.req.param('id')!, data)
     return c.json({ success: true })
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
@@ -99,7 +99,7 @@ router.put('/collections/:name/documents/:id', requireUserEnv, async (c) => {
 
 router.delete('/collections/:name/documents/:id', requireUserEnv, async (c) => {
   try {
-    await deleteDocument(getCreds(c), c.req.param('name'), c.req.param('id'))
+    await deleteDocument(getCreds(c), c.req.param('name')!, c.req.param('id')!)
     return c.json({ success: true })
   } catch (e: any) {
     return c.json({ error: e.message }, 500)

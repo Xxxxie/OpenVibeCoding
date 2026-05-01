@@ -21,14 +21,8 @@ import { scheduleTask, unscheduleTask } from '../services/cron-scheduler.js'
 // ─── Types ───────────────────────────────────────────────────────
 
 export interface SandboxMcpDeps {
-  /** 沙箱 CloudBase Gateway 基础 URL */
-  baseUrl: string
-  /** SCF session ID (envId) for X-Cloudbase-Session-Id header */
-  scfSessionId: string
-  /** Conversation ID for per-conversation isolation in shared container */
-  conversationId: string
-  /** 获取最新网关 access token（带缓存，调每次都是最新） */
-  getAccessToken: () => Promise<string>
+  /** SandboxInstance — handles auth headers, scope headers, and request routing */
+  sandbox: SandboxInstance
   /** 获取最新 TencentCloud 密钥（用于注入容器 env） */
   getCredentials: () => Promise<{
     cloudbaseEnvId: string
@@ -135,7 +129,7 @@ function jsonSchemaPropertyToZod(propSchema: any): z.ZodTypeAny {
  * 创建沙箱 MCP Server 并通过 InMemoryTransport 返回已连接的 Client。
  *
  * - 完全在进程内，零 IPC 开销，无 stdio/子进程
- * - getAccessToken / getCredentials 每次调用都是最新，天然解决 token 过期
+ * - 所有请求通过 SandboxInstance.request()，天然解决 token 过期和 scope header 注入
  * - Server 内部对 gateway 401/403 抛出 AuthRequiredError，Client 侧可感知并重连
  */
 export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
@@ -148,10 +142,7 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
   close: () => Promise<void>
 }> {
   const {
-    baseUrl,
-    scfSessionId,
-    conversationId,
-    getAccessToken,
+    sandbox,
     getCredentials,
     bashTimeoutMs = 30_000,
     workspaceFolderPaths = '',
@@ -163,21 +154,12 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
   } = deps
 
   // ── HTTP helpers ────────────────────────────────────────────────
-
-  async function buildHeaders(): Promise<Record<string, string>> {
-    const token = await getAccessToken()
-    return {
-      'Content-Type': 'application/json',
-      ...SandboxInstance.buildAuthHeaders(token, scfSessionId),
-      'X-Conversation-Id': conversationId,
-    }
-  }
+  // All requests go through sandbox.request() which injects auth + scope headers.
 
   async function apiCall(tool: string, body: unknown, timeoutMs = bashTimeoutMs): Promise<any> {
-    const headers = await buildHeaders()
-    const res = await fetch(`${baseUrl}/api/tools/${tool}`, {
+    const res = await sandbox.request(`/api/tools/${tool}`, {
       method: 'POST',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     })
@@ -195,12 +177,11 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
 
   async function injectCredentials(): Promise<void> {
     const creds = await getCredentials()
-    const headers = await buildHeaders()
-    const res = await fetch(`${baseUrl}/api/session/env`, {
+    const res = await sandbox.request('/api/session/env', {
       method: 'PUT',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        conversationId,
+        conversationId: sandbox.conversationId,
         CLOUDBASE_ENV_ID: creds.cloudbaseEnvId,
         TENCENTCLOUD_SECRETID: creds.secretId,
         TENCENTCLOUD_SECRETKEY: creds.secretKey,
@@ -219,10 +200,7 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
   async function fetchCloudbaseSchema(): Promise<any[]> {
     const tmpPath = `.mcporter-schema.json`
     await bashCall(`mcporter list cloudbase --schema --output json > ${tmpPath} 2>&1`, 20_000)
-    const headers = await buildHeaders()
-    const res = await fetch(`${baseUrl}/e2b-compatible/files?path=${encodeURIComponent(tmpPath)}`, {
-      headers,
-    })
+    const res = await sandbox.request(`/e2b-compatible/files?path=${encodeURIComponent(tmpPath)}`)
     if (!res.ok) throw new Error(`Failed to read schema file: ${res.status}`)
     const parsed = (await res.json()) as any
     if (!Array.isArray(parsed.tools)) throw new Error('No tools array in schema response')
@@ -456,10 +434,9 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
           }
         }
 
-        const headers = await buildHeaders()
-        const res = await fetch(`${baseUrl}/api/miniprogram/deploy`, {
+        const res = await sandbox.request('/api/miniprogram/deploy', {
           method: 'POST',
-          headers,
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             appid: appId,
             privateKey,
@@ -538,14 +515,9 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
     { jobId: z.string().describe('publishMiniprogram 返回的 jobId') },
     async (args: Record<string, unknown>) => {
       try {
-        const headers = await buildHeaders()
-        const res = await fetch(
-          `${baseUrl}/api/miniprogram/deploy/status?jobId=${encodeURIComponent(args.jobId as string)}`,
-          {
-            method: 'GET',
-            headers,
-            signal: AbortSignal.timeout(30_000),
-          },
+        const res = await sandbox.request(
+          `/api/miniprogram/deploy/status?jobId=${encodeURIComponent(args.jobId as string)}`,
+          { signal: AbortSignal.timeout(30_000) },
         )
         const body = (await res.json().catch(() => null)) as any
         return {
@@ -647,10 +619,9 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
             }
           }
 
-          const headers = await buildHeaders()
-          const res = await fetch(`${baseUrl}/api/miniprogram/deploy`, {
+          const res = await sandbox.request('/api/miniprogram/deploy', {
             method: 'POST',
-            headers,
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               appid: appId,
               privateKey,
@@ -686,14 +657,9 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
       { jobId: z.string().describe('publishMiniprogram 返回的 jobId') },
       async (args: Record<string, unknown>) => {
         try {
-          const headers = await buildHeaders()
-          const res = await fetch(
-            `${baseUrl}/api/miniprogram/deploy/status?jobId=${encodeURIComponent(args.jobId as string)}`,
-            {
-              method: 'GET',
-              headers,
-              signal: AbortSignal.timeout(30_000),
-            },
+          const res = await sandbox.request(
+            `/api/miniprogram/deploy/status?jobId=${encodeURIComponent(args.jobId as string)}`,
+            { signal: AbortSignal.timeout(30_000) },
           )
           const body = (await res.json().catch(() => null)) as any
           return {
@@ -907,7 +873,7 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
   })
 
   log(
-    `[sandbox-mcp] Ready. baseUrl=${baseUrl} session=${scfSessionId} conversation=${conversationId} tools=${cloudbaseTools.length}\n`,
+    `[sandbox-mcp] Ready. sandbox=${sandbox.functionName} session=${sandbox.envId} scope=${sandbox.conversationId} mode=${sandbox.sandboxMode} coding=${sandbox.isCodingMode} tools=${cloudbaseTools.length}\n`,
   )
 
   return {

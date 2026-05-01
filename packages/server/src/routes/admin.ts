@@ -195,8 +195,8 @@ admin.post('/users/:userId/disable', async (c) => {
     action: 'user_disable',
     targetUserId: userId,
     details: JSON.stringify({ reason }),
-    ipAddress: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
-    userAgent: c.req.header('user-agent'),
+    ipAddress: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || null,
+    userAgent: c.req.header('user-agent') || null,
   })
 
   return c.json({ success: true })
@@ -222,8 +222,9 @@ admin.post('/users/:userId/enable', async (c) => {
     adminUserId: adminUser.id,
     action: 'user_enable',
     targetUserId: userId,
-    ipAddress: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
-    userAgent: c.req.header('user-agent'),
+    details: null,
+    ipAddress: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || null,
+    userAgent: c.req.header('user-agent') || null,
   })
 
   return c.json({ success: true })
@@ -256,8 +257,8 @@ admin.delete('/users/:userId', async (c) => {
     action: 'user_delete',
     targetUserId: userId,
     details: JSON.stringify({ username: user.username, email: user.email }),
-    ipAddress: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
-    userAgent: c.req.header('user-agent'),
+    ipAddress: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || null,
+    userAgent: c.req.header('user-agent') || null,
   })
 
   // Clean up cloud resources (CAM user, policy, CloudBase env) before deleting DB records
@@ -307,8 +308,8 @@ admin.post('/users/:userId/set-role', async (c) => {
     action: 'user_role_change',
     targetUserId: userId,
     details: JSON.stringify({ oldRole, newRole: role }),
-    ipAddress: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
-    userAgent: c.req.header('user-agent'),
+    ipAddress: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || null,
+    userAgent: c.req.header('user-agent') || null,
   })
 
   return c.json({ success: true })
@@ -344,8 +345,9 @@ admin.post('/users/:userId/reset-password', async (c) => {
     adminUserId: adminUser.id,
     action: 'password_reset',
     targetUserId: userId,
-    ipAddress: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
-    userAgent: c.req.header('user-agent'),
+    details: null,
+    ipAddress: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || null,
+    userAgent: c.req.header('user-agent') || null,
   })
 
   return c.json({ success: true })
@@ -386,14 +388,11 @@ admin.post('/users/create', async (c) => {
     externalId: username,
     accessToken: '',
     username,
-    email: email || null,
+    email: email || undefined,
     name: username,
     role,
     status: 'active',
     apiKey: encrypt(`sak_${nanoid(40)}`),
-    createdAt: now,
-    updatedAt: now,
-    lastLoginAt: now,
   })
 
   // Create credentials
@@ -475,8 +474,8 @@ admin.post('/users/create', async (c) => {
     action: 'user_create',
     targetUserId: userId,
     details: JSON.stringify({ username, email, role }),
-    ipAddress: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
-    userAgent: c.req.header('user-agent'),
+    ipAddress: c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || null,
+    userAgent: c.req.header('user-agent') || null,
   })
 
   return c.json({

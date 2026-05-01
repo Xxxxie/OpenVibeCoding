@@ -186,23 +186,37 @@ export interface AdminLog {
 
 // ─── Creation Types (omit auto-generated timestamps) ────────────────────────
 
-export type NewUser = Omit<User, 'createdAt' | 'updatedAt' | 'lastLoginAt'> & {
-  createdAt?: number
-  updatedAt?: number
-  lastLoginAt?: number
-}
+/** Fields that default to null when creating a User */
+type UserNullableFields = 'refreshToken' | 'scope' | 'email' | 'name' | 'avatarUrl' | 'disabledReason' | 'disabledAt' | 'disabledBy' | 'apiKey'
+
+export type NewUser = Omit<User, 'createdAt' | 'updatedAt' | 'lastLoginAt' | UserNullableFields> &
+  Partial<Pick<User, UserNullableFields>> & {
+    createdAt?: number
+    updatedAt?: number
+    lastLoginAt?: number
+  }
 
 export type NewLocalCredential = Omit<LocalCredential, 'createdAt' | 'updatedAt'> & {
   createdAt?: number
   updatedAt?: number
 }
 
-export type NewTask = Omit<Task, 'createdAt' | 'updatedAt' | 'completedAt' | 'deletedAt'> & {
-  createdAt?: number
-  updatedAt?: number
-  completedAt?: number | null
-  deletedAt?: number | null
-}
+/** Fields that default to null when creating a Task */
+type TaskNullableFields =
+  | 'title' | 'repoUrl' | 'selectedAgent' | 'selectedModel'
+  | 'installDependencies' | 'maxDuration' | 'keepAlive' | 'enableBrowser'
+  | 'progress' | 'logs' | 'error' | 'branchName'
+  | 'sandboxId' | 'sandboxSessionId' | 'sandboxCwd' | 'sandboxMode'
+  | 'agentSessionId' | 'sandboxUrl' | 'previewUrl'
+  | 'prUrl' | 'prNumber' | 'prStatus' | 'prMergeCommitSha' | 'mcpServerIds'
+
+export type NewTask = Omit<Task, 'createdAt' | 'updatedAt' | 'completedAt' | 'deletedAt' | TaskNullableFields> &
+  Partial<Pick<Task, TaskNullableFields>> & {
+    createdAt?: number
+    updatedAt?: number
+    completedAt?: number | null
+    deletedAt?: number | null
+  }
 
 export type NewConnector = Omit<Connector, 'createdAt' | 'updatedAt'> & {
   createdAt?: number
@@ -214,10 +228,14 @@ export type NewMiniProgramApp = Omit<MiniProgramApp, 'createdAt' | 'updatedAt'> 
   updatedAt?: number
 }
 
-export type NewCronTask = Omit<CronTask, 'createdAt' | 'updatedAt'> & {
-  createdAt?: number
-  updatedAt?: number
-}
+/** Fields that default to null when creating a CronTask */
+type CronTaskNullableFields = 'repoUrl' | 'selectedAgent' | 'selectedModel' | 'lastRunAt' | 'nextRunAt' | 'lockedBy' | 'lockedAt'
+
+export type NewCronTask = Omit<CronTask, 'createdAt' | 'updatedAt' | CronTaskNullableFields> &
+  Partial<Pick<CronTask, CronTaskNullableFields>> & {
+    createdAt?: number
+    updatedAt?: number
+  }
 
 export type NewAccount = Omit<Account, 'createdAt' | 'updatedAt'> & {
   createdAt?: number
