@@ -1,6 +1,7 @@
 import { StrictMode, useEffect, useState, useCallback, Component, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router'
+import { Toaster } from '@/components/ui/sonner'
 import { Provider as JotaiProvider, useAtom, useAtomValue } from 'jotai'
 import { AppLayout } from './components/app-layout'
 import { HomePage } from './pages/HomePage'
@@ -364,6 +365,7 @@ createRoot(document.getElementById('root')!).render(
         <BrowserRouter>
           <App />
         </BrowserRouter>
+        <Toaster />
       </ThemeProvider>
     </JotaiProvider>
   </StrictMode>,
