@@ -13,9 +13,10 @@ import {
   type AgentCallback,
   type AgentCallbackMessage,
 } from '@coder/shared'
-import { CloudbaseAgentService, cloudbaseAgentService, getSupportedModels } from '../agent/cloudbase-agent.service.js'
+import { CloudbaseAgentService, getSupportedModels } from '../agent/cloudbase-agent.service.js'
 import { persistenceService } from '../agent/persistence.service.js'
 import { getAgentRun } from '../agent/agent-registry.js'
+import { agentRuntimeRegistry } from '../agent/runtime/index.js'
 import { loadConfig } from '../config/store.js'
 import { getDb } from '../db/index.js'
 import { nanoid } from 'nanoid'
@@ -23,9 +24,9 @@ import { requireUserEnv, type AppEnv } from '../middleware/auth.js'
 
 const acp = new Hono<AppEnv>()
 
-// 除 /health 外，所有 ACP 路由都需要登录 + 用户环境校验
+// 除 /health 与 /runtimes 外，所有 ACP 路由都需要登录 + 用户环境校验
 acp.use('/*', async (c, next) => {
-  if (c.req.path.endsWith('/health') || c.req.path.endsWith('/config')) {
+  if (c.req.path.endsWith('/health') || c.req.path.endsWith('/config') || c.req.path.endsWith('/runtimes')) {
     return next()
   }
   // If using API key auth, verify it has 'acp' scope
@@ -194,8 +195,15 @@ acp.delete('/conversation/:conversationId', async (c) => {
  * 简单的聊天端点，返回 SSE 流式响应
  */
 acp.post('/chat', async (c) => {
-  const body = await c.req.json<{ prompt: string; conversationId?: string; model?: string; mode?: string }>()
-  const { prompt, conversationId, model, mode } = body
+  const body = await c.req.json<{
+    prompt: string
+    conversationId?: string
+    model?: string
+    mode?: string
+    /** Runtime override：tencent-sdk | opencode-acp | ... 默认 tencent-sdk */
+    runtime?: string
+  }>()
+  const { prompt, conversationId, model, mode, runtime: runtimeName } = body
 
   const { envId, userId, credentials: userCredentials } = c.get('userEnv')!
   if (!envId) {
@@ -214,8 +222,13 @@ acp.post('/chat', async (c) => {
     }
   }
 
+  const runtime = agentRuntimeRegistry.resolve({
+    explicitRuntime: runtimeName,
+    conversationId: actualConversationId,
+  })
+
   return observeStreamWithLiveCallback(c, null, actualConversationId, envId, userId, async (callback) => {
-    return cloudbaseAgentService.chatStream(prompt, callback, {
+    return runtime.chatStream(prompt, callback, {
       conversationId: actualConversationId,
       envId,
       userId,
@@ -405,9 +418,15 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
     // ignore
   }
 
+  // Resolve runtime: explicit param > env var > default
+  const runtime = agentRuntimeRegistry.resolve({
+    explicitRuntime: params.runtime,
+    conversationId: sessionId,
+  })
+
   // Launch agent with liveCallback for real-time SSE push
   return observeStreamWithLiveCallback(c, id, sessionId, envId, userId, async (callback) => {
-    return cloudbaseAgentService.chatStream(effectivePrompt, callback, {
+    return runtime.chatStream(effectivePrompt, callback, {
       conversationId: sessionId,
       envId,
       userId,
@@ -754,6 +773,27 @@ acp.get('/config', (c) => {
   return c.json({
     configured: !!(config.llm?.apiKey && config.llm?.endpoint),
     model: config.llm?.model || 'claude-3-5-sonnet-20241022',
+  })
+})
+
+/**
+ * GET /api/agent/runtimes
+ *
+ * 列出所有已注册的 Agent Runtime 及其默认值。
+ * 前端可用此构建 runtime 选择器。
+ */
+acp.get('/runtimes', async (c) => {
+  const runtimes = agentRuntimeRegistry.list()
+  const defaultRuntime = agentRuntimeRegistry.resolve()
+  const items = await Promise.all(
+    runtimes.map(async (r) => ({
+      name: r.name,
+      available: await r.isAvailable().catch(() => false),
+    })),
+  )
+  return c.json({
+    default: defaultRuntime.name,
+    runtimes: items,
   })
 })
 
