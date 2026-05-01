@@ -210,13 +210,18 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
   const runPromptStream = useCallback(
     async (assistantMsgId: string, params: Record<string, unknown>) => {
       try {
+        console.log('[runPromptStream] starting stream for', assistantMsgId)
         for await (const update of acpClient.stream('session/prompt', params)) {
           applyStreamUpdate(update, assistantMsgId)
         }
+        console.log('[runPromptStream] stream completed normally')
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : 'Agent request failed'
-        setMessages((prev) => prev.map((m) => (m.id === assistantMsgId ? { ...m, content: `Error: ${errMsg}` } : m)))
+        console.error('[runPromptStream] stream error:', errMsg, err)
+        // Remove the empty agent placeholder message
+        setMessages((prev) => prev.filter((m) => m.id !== assistantMsgId))
         toast.error(errMsg)
+        throw err // re-throw so callers (sendMessage etc.) can restore draft
       }
     },
     [acpClient, applyStreamUpdate],
@@ -262,8 +267,9 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
   /** Send a follow-up message in an existing conversation. */
   const sendMessage = useCallback(
     async (text: string, onRestoreDraft: (text: string) => void) => {
+      const userMsgId = `local-${Date.now()}`
       const userMsg: TaskMessage = {
-        id: `local-${Date.now()}`,
+        id: userMsgId,
         taskId,
         role: 'user',
         content: text,
@@ -272,6 +278,7 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
       }
       setMessages((prev) => [...prev, userMsg])
 
+      let assistantMsgId: string | null = null
       try {
         const ready = await ensureACPSession()
         if (!ready) {
@@ -284,16 +291,15 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
           })
           if (!response.ok) {
             const data = await response.json()
-            toast.error(data.error || 'Failed to send message')
-            onRestoreDraft(text)
+            throw new Error(data.error || 'Failed to send message')
           }
           return
         }
 
-        const assistantMsgId = `stream-${Date.now()}`
+        assistantMsgId = `stream-${Date.now()}`
         setMessages((prev) => [
           ...prev,
-          { id: assistantMsgId, taskId, role: 'agent', content: '', parts: [], createdAt: Date.now() },
+          { id: assistantMsgId!, taskId, role: 'agent', content: '', parts: [], createdAt: Date.now() },
         ])
         enterStreaming()
         await runPromptStream(assistantMsgId, {
@@ -302,8 +308,12 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
           ...(planMode.active ? { permissionMode: 'plan' as const } : {}),
         })
       } catch (err) {
-        console.error('Error sending message:', err)
-        toast.error('Failed to send message')
+        const errMsg = err instanceof Error ? err.message : 'Failed to send message'
+        console.error('[sendMessage] error:', errMsg)
+        // Remove both the optimistic user message and the empty agent placeholder
+        // (server rejected the prompt, so neither exists in DB)
+        setMessages((prev) => prev.filter((m) => m.id !== userMsgId && m.id !== assistantMsgId))
+        toast.error(errMsg)
         onRestoreDraft(text)
       } finally {
         await exitStreaming()

@@ -167,7 +167,29 @@ export class AcpClient {
 
     if (!res.ok || !res.body) {
       const msg = await extractErrorMessage(res)
+      console.error(`[AcpClient] stream ${method} failed: ${res.status}`, msg)
       throw new AcpStreamError(msg || `ACP stream failed: ${res.status} ${res.statusText}`, method)
+    }
+
+    // The response may be a plain JSON-RPC error (not SSE) when the server
+    // rejects the request synchronously (e.g. "A prompt turn is already in progress").
+    // Detect by content-type: SSE uses text/event-stream, errors use application/json.
+    const contentType = res.headers.get('content-type') || ''
+    console.log(`[AcpClient] stream response content-type: ${contentType}`)
+    if (!contentType.includes('text/event-stream')) {
+      // Not SSE — try to parse as JSON-RPC error
+      try {
+        const text = await res.text()
+        console.log(`[AcpClient] non-SSE response body:`, text.slice(0, 500))
+        const json = JSON.parse(text) as JsonRpcResponse
+        if (json.error) {
+          throw new AcpStreamError(json.error.message || 'ACP request rejected', method)
+        }
+      } catch (e) {
+        if (e instanceof AcpStreamError) throw e
+        console.warn(`[AcpClient] failed to parse non-SSE response:`, e)
+      }
+      return
     }
 
     yield* parseSseBody(res, method)
@@ -185,6 +207,19 @@ export class AcpClient {
     if (!res.ok || !res.body) {
       const msg = await extractErrorMessage(res)
       throw new AcpStreamError(msg || `ACP observe failed: ${res.status} ${res.statusText}`, 'observe')
+    }
+
+    const contentType = res.headers.get('content-type') || ''
+    if (!contentType.includes('text/event-stream')) {
+      try {
+        const json = (await res.json()) as JsonRpcResponse
+        if (json.error) {
+          throw new AcpStreamError(json.error.message || 'ACP observe rejected', 'observe')
+        }
+      } catch (e) {
+        if (e instanceof AcpStreamError) throw e
+      }
+      return
     }
 
     yield* parseSseBody(res, 'observe')
