@@ -107,6 +107,7 @@ export async function archiveToGit(
 }
 
 /**
+ * @deprecated
  * 删除远端归档分支上指定会话的目录
  *
  * 由于 session 共享改造后，分支名 = envId，同一分支上有多个 conversation 目录。
@@ -147,6 +148,7 @@ export async function deleteArchiveDirectory(envId: string, conversationId: stri
 }
 
 /**
+ * @deprecated
  * 批量删除远端归档目录
  *
  * @param items 要删除的 {envId, conversationId} 列表
@@ -183,6 +185,7 @@ export async function deleteConversationViaSandbox(
   const workspace = sandboxCwd || `/tmp/workspace/${envId}/${conversationId}`
 
   try {
+    console.log(`[GitArchive] deleteConversationViaSandbox ${workspace}`)
     const res = await sandbox.request('/api/tools/bash', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -192,6 +195,8 @@ export async function deleteConversationViaSandbox(
 
     if (!res.ok) {
       const body = await res.text().catch(() => '')
+      console.log(`[GitArchive] deleteConversationViaSandbox failed:`, body)
+
       return
     }
 

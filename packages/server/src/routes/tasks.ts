@@ -104,7 +104,7 @@ async function getScfSandbox(
     const scfSessionId = task.sandboxSessionId || envId
     return (
       (await scfSandboxManager.getExisting(task.id, scfSessionId, {
-        sandboxMode: (options?.sandboxMode || task.sandboxMode || 'shared') as 'shared' | 'isolated',
+        sandboxMode: (options?.sandboxMode || task.sandboxMode || 'isolated') as 'shared' | 'isolated',
         isCodingMode: options?.isCodingMode ?? task.mode === 'coding',
       })) ?? null
     )
@@ -408,13 +408,15 @@ tasksRouter.delete('/:taskId', requireUserEnv, async (c) => {
   // Try to clean up via sandbox (rm -rf workspace dir + git archive sync); fall back to direct API delete
   ;(async () => {
     try {
-      if (existing.mode === 'isolated') {
+      console.log('[TASK] DELETE', existing)
+      const { sandboxMode = 'isolated' } = existing
+      if (sandboxMode === 'isolated') {
         await deleteArchiveBranch(taskId)
       } else {
         const scfSessionId = existing.sandboxSessionId || envId
         const sandbox = await scfSandboxManager
           .getExisting(taskId, scfSessionId, {
-            sandboxMode: existing.sandboxMode || 'shared',
+            sandboxMode: existing.sandboxMode || undefined,
           })
           .catch(() => null)
         if (sandbox) {
@@ -2507,7 +2509,7 @@ tasksRouter.get('/:taskId/preview-url', requireUserEnv, async (c) => {
       while (Date.now() - startTime < maxWaitMs) {
         try {
           const infoRes = await sandbox!.request('/api/scope/info', {
-            signal: AbortSignal.timeout(10_000),
+            signal: AbortSignal.timeout(30_000),
           })
           if (infoRes.ok) {
             const info = (await infoRes.json()) as {

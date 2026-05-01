@@ -187,7 +187,16 @@ export interface AdminLog {
 // ─── Creation Types (omit auto-generated timestamps) ────────────────────────
 
 /** Fields that default to null when creating a User */
-type UserNullableFields = 'refreshToken' | 'scope' | 'email' | 'name' | 'avatarUrl' | 'disabledReason' | 'disabledAt' | 'disabledBy' | 'apiKey'
+type UserNullableFields =
+  | 'refreshToken'
+  | 'scope'
+  | 'email'
+  | 'name'
+  | 'avatarUrl'
+  | 'disabledReason'
+  | 'disabledAt'
+  | 'disabledBy'
+  | 'apiKey'
 
 export type NewUser = Omit<User, 'createdAt' | 'updatedAt' | 'lastLoginAt' | UserNullableFields> &
   Partial<Pick<User, UserNullableFields>> & {
@@ -203,12 +212,30 @@ export type NewLocalCredential = Omit<LocalCredential, 'createdAt' | 'updatedAt'
 
 /** Fields that default to null when creating a Task */
 type TaskNullableFields =
-  | 'title' | 'repoUrl' | 'selectedAgent' | 'selectedModel'
-  | 'installDependencies' | 'maxDuration' | 'keepAlive' | 'enableBrowser'
-  | 'progress' | 'logs' | 'error' | 'branchName'
-  | 'sandboxId' | 'sandboxSessionId' | 'sandboxCwd' | 'sandboxMode'
-  | 'agentSessionId' | 'sandboxUrl' | 'previewUrl'
-  | 'prUrl' | 'prNumber' | 'prStatus' | 'prMergeCommitSha' | 'mcpServerIds'
+  | 'title'
+  | 'repoUrl'
+  | 'selectedAgent'
+  | 'selectedModel'
+  | 'installDependencies'
+  | 'maxDuration'
+  | 'keepAlive'
+  | 'enableBrowser'
+  | 'progress'
+  | 'logs'
+  | 'error'
+  | 'branchName'
+  | 'sandboxId'
+  | 'sandboxSessionId'
+  | 'sandboxCwd'
+  | 'sandboxMode'
+  | 'agentSessionId'
+  | 'sandboxUrl'
+  | 'previewUrl'
+  | 'prUrl'
+  | 'prNumber'
+  | 'prStatus'
+  | 'prMergeCommitSha'
+  | 'mcpServerIds'
 
 export type NewTask = Omit<Task, 'createdAt' | 'updatedAt' | 'completedAt' | 'deletedAt' | TaskNullableFields> &
   Partial<Pick<Task, TaskNullableFields>> & {
@@ -229,7 +256,14 @@ export type NewMiniProgramApp = Omit<MiniProgramApp, 'createdAt' | 'updatedAt'> 
 }
 
 /** Fields that default to null when creating a CronTask */
-type CronTaskNullableFields = 'repoUrl' | 'selectedAgent' | 'selectedModel' | 'lastRunAt' | 'nextRunAt' | 'lockedBy' | 'lockedAt'
+type CronTaskNullableFields =
+  | 'repoUrl'
+  | 'selectedAgent'
+  | 'selectedModel'
+  | 'lastRunAt'
+  | 'nextRunAt'
+  | 'lockedBy'
+  | 'lockedAt'
 
 export type NewCronTask = Omit<CronTask, 'createdAt' | 'updatedAt' | CronTaskNullableFields> &
   Partial<Pick<CronTask, CronTaskNullableFields>> & {

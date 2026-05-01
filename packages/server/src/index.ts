@@ -12,7 +12,27 @@ const __dirname = dirname(__filename)
 
 // Prevent unhandled rejections from crashing the process (agent-sdk Transport errors)
 process.on('unhandledRejection', (err) => {
+  // "Session not found" is thrown by agent-sdk's internal ProcessTransport when
+  // the child process sends data after abort/cancel. This happens asynchronously
+  // inside the SDK's readline handler — we cannot catch it at the source.
+  const msg = err instanceof Error ? err.message : String(err)
+  if (msg.includes('Session not found')) {
+    console.debug('[Server] SDK cleanup rejection (expected after cancel):', msg)
+    return
+  }
   console.error('[Server] Unhandled rejection:', err)
+})
+
+// Prevent EPIPE / ECONNRESET etc from crashing the process.
+// These occur when agent-sdk's internal stdio pipe or sandbox socket closes
+// while data is still being written — expected during agent cleanup.
+process.on('uncaughtException', (err) => {
+  const code = err && typeof err === 'object' && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined
+  if (code === 'EPIPE' || code === 'ECONNRESET' || code === 'ECONNREFUSED') {
+    console.warn(`[Server] Ignored uncaught ${code}:`, (err as Error).message)
+  } else {
+    console.error('[Server] Uncaught exception:', err)
+  }
 })
 
 import { authMiddleware } from './middleware/auth'

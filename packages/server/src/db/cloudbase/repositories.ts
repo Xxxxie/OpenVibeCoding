@@ -203,6 +203,23 @@ class CloudBaseLocalCredentialRepository implements LocalCredentialRepository {
 
 // ─── Task Repository ────────────────────────────────────────────────────────
 
+/** Apply business defaults for Task fields that may be missing in legacy DB records */
+function withTaskDefaults(task: Record<string, unknown>): Task {
+  const doc = stripCloudBaseId<Task>(task)
+  return {
+    ...doc,
+    mode: doc.mode || 'default',
+    status: doc.status || 'pending',
+    selectedAgent: doc.selectedAgent ?? 'codebuddy',
+    sandboxMode: doc.sandboxMode || 'isolated',
+    installDependencies: doc.installDependencies ?? false,
+    maxDuration: doc.maxDuration ?? 300,
+    keepAlive: doc.keepAlive ?? false,
+    enableBrowser: doc.enableBrowser ?? false,
+    progress: doc.progress ?? 0,
+  }
+}
+
 class CloudBaseTaskRepository implements TaskRepository {
   async findById(id: string): Promise<Task | null> {
     const _ = getCommand()
@@ -212,7 +229,7 @@ class CloudBaseTaskRepository implements TaskRepository {
       .limit(1)
       .get()
     if (!data || data.length === 0) return null
-    return stripCloudBaseId<Task>(data[0] as Record<string, unknown>)
+    return withTaskDefaults(data[0] as Record<string, unknown>)
   }
 
   async findByIdAndUserId(id: string, userId: string): Promise<Task | null> {
@@ -223,7 +240,7 @@ class CloudBaseTaskRepository implements TaskRepository {
       .limit(1)
       .get()
     if (!data || data.length === 0) return null
-    return stripCloudBaseId<Task>(data[0] as Record<string, unknown>)
+    return withTaskDefaults(data[0] as Record<string, unknown>)
   }
 
   async findByUserId(userId: string, limit = 20): Promise<Task[]> {
@@ -234,7 +251,7 @@ class CloudBaseTaskRepository implements TaskRepository {
       .orderBy('createdAt', 'desc')
       .limit(limit)
       .get()
-    return (data as Record<string, unknown>[]).map((doc) => stripCloudBaseId<Task>(doc))
+    return (data as Record<string, unknown>[]).map((doc) => withTaskDefaults(doc))
   }
 
   async findByRepoAndPr(userId: string, prNumber: number, repoUrl: string): Promise<Task[]> {
@@ -244,7 +261,7 @@ class CloudBaseTaskRepository implements TaskRepository {
       .where({ userId: _.eq(userId), prNumber: _.eq(prNumber), repoUrl: _.eq(repoUrl), deletedAt: _.eq(null) })
       .limit(1)
       .get()
-    return (data as Record<string, unknown>[]).map((doc) => stripCloudBaseId<Task>(doc))
+    return (data as Record<string, unknown>[]).map((doc) => withTaskDefaults(doc))
   }
 
   async findAll(limit: number, offset: number, filters?: { userId?: string; status?: string }): Promise<Task[]> {
@@ -255,7 +272,7 @@ class CloudBaseTaskRepository implements TaskRepository {
     if (filters?.status) where.status = _.eq(filters.status)
     const { data } = await collection.where(where).orderBy('createdAt', 'desc').skip(offset).limit(limit).get()
     if (!data) return []
-    return (data as Record<string, unknown>[]).map((doc) => stripCloudBaseId<Task>(doc))
+    return (data as Record<string, unknown>[]).map((doc) => withTaskDefaults(doc))
   }
 
   async count(filters?: { userId?: string; status?: string }): Promise<number> {
@@ -272,15 +289,17 @@ class CloudBaseTaskRepository implements TaskRepository {
     const collection = await getCollection('tasks')
     const ts = now()
     const doc: Task = {
+      // ── Business defaults (for optional fields) ──
+      selectedAgent: 'codebuddy',
+      installDependencies: false,
+      maxDuration: 300,
+      keepAlive: false,
+      enableBrowser: false,
+      progress: 0,
+      // ── Nullable defaults ──
       title: null,
       repoUrl: null,
-      selectedAgent: null,
       selectedModel: null,
-      installDependencies: null,
-      maxDuration: null,
-      keepAlive: null,
-      enableBrowser: null,
-      progress: null,
       logs: null,
       error: null,
       branchName: null,
@@ -296,6 +315,7 @@ class CloudBaseTaskRepository implements TaskRepository {
       prStatus: null,
       prMergeCommitSha: null,
       mcpServerIds: null,
+      // ── Caller overrides (spread after defaults) ──
       ...task,
       createdAt: task.createdAt ?? ts,
       updatedAt: task.updatedAt ?? ts,
