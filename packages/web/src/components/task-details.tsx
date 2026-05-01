@@ -408,14 +408,17 @@ export function TaskDetails({
     }
   }, [previewKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 后台健康检查：iframe 显示后每 15s 通过后端检查 dev server 是否实际响应。
+  // 后台健康检查：iframe 显示后每 30s 通过后端检查 dev server 是否实际响应。
   // 后端在沙箱内部 curl localhost:5173，避免跨域问题。
   // status==='stopped' 说明 vite 没在跑，自动重新拉起。
+  // 页面不可见时暂停轮询；切回可见时立即查一次，避免用户盯着已失效的 iframe。
   useEffect(() => {
     if (!isCodingMode || !previewGatewayUrl || previewGatewayLoading) return
 
     let cancelled = false
-    const interval = setInterval(async () => {
+    let interval: ReturnType<typeof setInterval> | null = null
+
+    const checkHealth = async () => {
       if (cancelled) return
       try {
         const res = await fetch(`/api/tasks/${task.id}/preview-health`, {
@@ -426,18 +429,44 @@ export function TaskDetails({
         const data = (await res.json()) as { status: string; vitePort?: number | null }
         if (data.status === 'stopped' && !cancelled) {
           console.log('[preview] Dev server stopped, restarting...')
-          clearInterval(interval)
+          if (interval) clearInterval(interval)
           setPreviewLoadingMessage('Dev server 已停止，正在重启...')
           void loadPreviewGatewayUrl()
         }
       } catch {
         // 网络错误忽略
       }
-    }, 15000)
+    }
+
+    const startPolling = () => {
+      if (interval) return
+      interval = setInterval(checkHealth, 30000)
+    }
+    const stopPolling = () => {
+      if (interval) {
+        clearInterval(interval)
+        interval = null
+      }
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void checkHealth()
+        startPolling()
+      } else {
+        stopPolling()
+      }
+    }
+
+    if (document.visibilityState === 'visible') {
+      startPolling()
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
 
     return () => {
       cancelled = true
-      clearInterval(interval)
+      stopPolling()
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
   }, [isCodingMode, previewGatewayUrl, previewGatewayLoading, loadPreviewGatewayUrl, task.id])
 

@@ -118,11 +118,7 @@ export function BrowserControls({ previewUrl, iframeRef, onHardRefresh, loading,
         title="刷新"
         aria-label="刷新"
       >
-        {loading ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <RotateCw className="h-3.5 w-3.5" />
-        )}
+        {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
       </button>
       <form
         className="ml-1 flex-1 min-w-0"
