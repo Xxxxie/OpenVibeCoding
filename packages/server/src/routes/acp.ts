@@ -608,6 +608,8 @@ async function observeStreamWithLiveCallback(
 
     // ── Poll loop (safety net for missed events + completion) ─
     const startTime = Date.now()
+    let doneGraceTicks = 0 // After agent completes, wait a few ticks for eventBuffer flush
+    const DONE_GRACE_TICKS = 3 // ~1.5s grace period (3 * 500ms)
     while (Date.now() - startTime < MAX_POLL_DURATION) {
       if (stream.closed || stream.aborted) {
         console.log(`[SSE] Stream closed/aborted for ${sessionId}`)
@@ -631,16 +633,27 @@ async function observeStreamWithLiveCallback(
           lastSeq = Math.max(lastSeq, evt.seq)
         }
 
-        if (isDone && newEvents.length === 0) {
-          console.log(
-            `[SSE] Agent done for ${sessionId}, status=${run?.status}, lastSeq=${lastSeq}, breaking poll loop`,
-          )
-          break
+        if (isDone) {
+          if (newEvents.length === 0) {
+            doneGraceTicks++
+            if (doneGraceTicks >= DONE_GRACE_TICKS) {
+              console.log(
+                `[SSE] Agent done for ${sessionId}, status=${run?.status}, lastSeq=${lastSeq}, breaking poll loop`,
+              )
+              break
+            }
+          } else {
+            // Got new events after done — reset grace counter to drain remaining
+            doneGraceTicks = 0
+          }
         }
       } catch (err) {
         if (isDone) {
-          console.log(`[SSE] Agent done (with poll error) for ${sessionId}, status=${run?.status}`)
-          break
+          doneGraceTicks++
+          if (doneGraceTicks >= DONE_GRACE_TICKS) {
+            console.log(`[SSE] Agent done (with poll error) for ${sessionId}, status=${run?.status}`)
+            break
+          }
         }
       }
 

@@ -45,7 +45,16 @@ export function completeAgent(
   }
 }
 
-export function removeAgent(conversationId: string): void {
+/**
+ * Remove agent from registry.
+ * Only deletes if the current entry matches the given turnId (prevents a stale
+ * setTimeout from removing a newer run that reused the same conversationId).
+ */
+export function removeAgent(conversationId: string, turnId?: string): void {
+  if (turnId) {
+    const run = runningAgents.get(conversationId)
+    if (run && run.turnId !== turnId) return // stale removal — skip
+  }
   runningAgents.delete(conversationId)
 }
 

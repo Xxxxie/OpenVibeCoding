@@ -1676,7 +1676,7 @@ export class CloudbaseAgentService {
       }, 600)
 
       // Schedule registry cleanup after observers have time to detect completion
-      setTimeout(() => removeAgent(conversationId), 30_000)
+      setTimeout(() => removeAgent(conversationId, assistantMessageId), 30_000)
 
       if (syncError) {
         throw syncError
