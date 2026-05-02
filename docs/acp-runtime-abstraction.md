@@ -1,76 +1,116 @@
-# Agent Runtime 抽象层与 OpenCode ACP 集成
+# Agent Runtime 抽象层 + OpenCode ACP + 沙箱集成
 
 > 分支：`feat/acp-runtime-abstraction`
 > 基线：`feature/refactor @ 17eca8e`
 > 交付：2026-05-02
-> 状态：已完成、全量 type-check / lint / build / e2e 通过
+> 状态：已完成，type-check / lint / build / 4 组 e2e 全通过
 
 ## 1. 目标
 
-把服务端**具体 agent 实现**与**会话/流式/持久化基础设施**解耦：
-- 原状：`routes/acp.ts` 直接调用 `cloudbaseAgentService.chatStream`（基于 patch 过的 `@tencent-ai/agent-sdk`）
-- 重构：通过 `IAgentRuntime` 接口抽象，可在 `tencent-sdk` / `opencode-acp` 之间切换
-- 为将来接入 Codex / Gemini CLI / Claude Code ACP 铺路
+两阶段目标：
 
-**首个备选 agent**：OpenCode (`opencode acp`，模型无关，支持 Moonshot Kimi、OpenAI、Anthropic 等)。
+**阶段 A（已完成）**：抽象 `IAgentRuntime` 接口，把 server 与具体 agent 实现解耦。Tencent SDK 作为默认 runtime；新增 OpenCode ACP runtime 作为第二个实现。
+
+**阶段 B（本次完成）**：让 OpenCode runtime 严格遵守 **agent/sandbox 分离原则**：
+- Agent（opencode acp 子进程）只负责 LLM 决策，跑在 server 本地
+- 所有文件/shell 工具调用通过一个 MCP bridge 桥接到 SCF 沙箱 HTTP API
+- OpenCode 的内置 `read/write/bash/edit` 工具被禁用，只能用 `sbx_*` MCP 工具
 
 ## 2. 架构
 
 ```
-┌───────────────────────────────────────────────────────────────────────┐
-│ routes/acp.ts                                                         │
-│                                                                       │
-│   /chat & /acp(session/prompt) ────► agentRuntimeRegistry.resolve()  │
-│                                             │                         │
-│                                             ▼                         │
-│                              ┌──────────────────────────────┐         │
-│                              │ IAgentRuntime                │         │
-│                              │  name / isAvailable()        │         │
-│                              │  getSupportedModels()        │         │
-│                              │  chatStream(prompt, cb, opt) │         │
-│                              └──────────────┬───────────────┘         │
-│                                             │                         │
-│                        ┌────────────────────┼──────────────────────┐  │
-│                        ▼                    ▼                      ▼  │
-│           ┌──────────────────┐  ┌──────────────────────┐  (未来扩展) │
-│           │ TencentSdkRuntime│  │  OpencodeAcpRuntime  │             │
-│           │  (进程内，现状)  │  │  (spawn opencode acp)│             │
-│           │                  │  │                      │             │
-│           │ 委托给           │  │ ClientSideConnection │             │
-│           │ cloudbaseAgent   │  │ NDJSON over stdio    │             │
-│           │ Service          │  │                      │             │
-│           └──────────────────┘  └──────────────────────┘             │
-│                                                                       │
-└───────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│ Server 进程（agent 域）                                               │
+│                                                                      │
+│   routes/acp.ts                                                      │
+│      │                                                               │
+│      ▼                                                               │
+│   IAgentRuntime  ──►  TencentSdkRuntime (in-process)                │
+│      │                                                               │
+│      └─►  OpencodeAcpRuntime                                         │
+│              │                                                       │
+│              ├─ 准备 per-session 临时目录:                           │
+│              │   /tmp/opencode-session-<uuid>/                       │
+│              │    └── .opencode/opencode.json                        │
+│              │        • agent.sandboxed.tools = { read:false, ... } │
+│              │        • mcp.sbx = { command: node bridge.js, ... }   │
+│              │                                                       │
+│              ├─ spawn opencode acp --cwd <临时目录>                  │
+│              │    └─ opencode 读到配置，禁用内置工具                 │
+│              │       spawn MCP bridge 作为子进程                     │
+│              │                                                       │
+│              ├─ ACP 握手 → session/new → setSessionMode('sandboxed')│
+│              │                                                       │
+│              └─ session/update 事件 → AgentCallbackMessage → SSE    │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+            ┌────────────────────────────────────────────┐
+            │ sandbox-mcp-bridge.js (Node 子进程)         │
+            │                                            │
+            │   MCP stdio server                         │
+            │   env: SANDBOX_BASE_URL, AUTH_HEADERS      │
+            │                                            │
+            │   tools: sbx_read / sbx_write / sbx_bash / │
+            │           sbx_edit / sbx_glob / sbx_grep   │
+            │                                            │
+            │   each call → fetch SANDBOX_BASE_URL/...   │
+            └──────────────────────┬─────────────────────┘
+                                   │
+                                   │ HTTPS (Bearer + Scope headers)
+                                   ▼
+            ┌───────────────────────────────────────────┐
+            │ Sandbox (SCF 容器, sandbox 域)             │
+            │                                           │
+            │   /api/tools/read                         │
+            │   /api/tools/write                        │
+            │   /api/tools/bash                         │
+            │   /api/tools/edit                         │
+            │                                           │
+            │   cwd: /tmp/workspace/<env>/<conv>        │
+            │   (scope 隔离目录, 强制相对路径)           │
+            └───────────────────────────────────────────┘
 ```
 
-**流事件翻译**：所有 runtime 统一把自己的内部事件流翻译为 `AgentCallbackMessage`（`text` / `thinking` / `tool_use` / `tool_result` / `result` / `error` / `agent_phase` / ...），由 `CloudbaseAgentService.convertToSessionUpdate()` 统一转为 ACP `SessionUpdate` → 前端无感知。
+### 关键分离
 
-## 3. 新增文件
+| 层 | 进程 | 负责 | 不负责 |
+|---|---|---|---|
+| Agent | opencode (server 本地) | LLM 决策、调用 MCP 工具 | 文件 IO、shell |
+| Bridge | sandbox-mcp-bridge.js | MCP → HTTP 翻译、凭证注入 | LLM、执行 |
+| Sandbox | SCF 容器 | 执行 read/write/bash | 模型、网络决策 |
 
+## 3. 文件清单
+
+### 新增
 ```
 packages/server/src/agent/runtime/
-├── types.ts                  # IAgentRuntime 接口、ChatStreamResult、RuntimeSelectorOptions
-├── tencent-sdk-runtime.ts    # 将 cloudbaseAgentService 包装为 IAgentRuntime（极薄 adapter）
-├── opencode-acp-runtime.ts   # spawn `opencode acp`、ACP 握手、事件翻译
-├── registry.ts               # AgentRuntimeRegistry：注册、选择策略、可用性检查
-└── index.ts                  # 公共导出
+├── types.ts                       # IAgentRuntime 接口
+├── registry.ts                    # AgentRuntimeRegistry + 选择策略
+├── tencent-sdk-runtime.ts         # Tencent SDK 薄 adapter
+├── opencode-acp-runtime.ts        # OpenCode runtime 主体
+├── opencode-session-config.ts     # per-session 工作目录 + opencode.json 生成
+├── acp-transport.ts               # stdio transport 工厂
+├── sandbox-mcp-bridge.ts          # ★ 独立进程：MCP server → 沙箱 HTTP 桥
+└── index.ts                       # 公共导出
 
 packages/server/scripts/
-├── test-opencode-runtime.mts # e2e#1: 直接调用 runtime，验证工具调用、文件写入
-├── test-acp-http-e2e.mts     # e2e#2: 起 server，验证 /runtimes 公开端点
-└── test-acp-chat-http.mts    # e2e#3: 完整 HTTP SSE，mock auth 走 /chat-test
+├── test-opencode-runtime.mts       # e2e#1: 本地模式直调 runtime
+├── test-acp-http-e2e.mts           # e2e#2: HTTP 公开端点
+├── test-acp-chat-http.mts          # e2e#3: 完整 SSE HTTP 流
+└── test-opencode-sandbox-e2e.mts   # ★ e2e#4: 沙箱隔离验证（真实 SCF）
+
+docs/
+└── acp-runtime-abstraction.md      # 本文档
 ```
 
-## 4. 改动现有文件
-
+### 改动
 | 文件 | 改动 |
 |---|---|
-| `packages/server/package.json` | + `@agentclientprotocol/sdk@^0.21.0` |
-| `packages/server/src/routes/acp.ts` | 1) 从 `cloudbaseAgentService.chatStream` → `runtime.chatStream`（`/chat` 与 `handleSessionPrompt` 两处）<br>2) 新增 `GET /api/agent/runtimes` 列出已注册 runtime<br>3) `/runtimes` 与 `/health` / `/config` 一起放入 auth 豁免名单 |
-| `packages/shared/src/types/agent.ts` | `SessionPromptParams.runtime?: string` 新增字段 |
+| `packages/server/package.json` | +`@agentclientprotocol/sdk`、+`@modelcontextprotocol/sdk`；build 脚本加 sandbox-mcp-bridge.ts |
+| `packages/server/src/routes/acp.ts` | 通过 registry 选 runtime；新增 `GET /api/agent/runtimes`；`/runtimes` 加入 auth 豁免 |
+| `packages/shared/src/types/agent.ts` | `SessionPromptParams.runtime?: string` |
 
-## 5. IAgentRuntime 接口
+## 4. IAgentRuntime 接口
 
 ```ts
 export interface IAgentRuntime {
@@ -81,261 +121,232 @@ export interface IAgentRuntime {
 }
 
 export interface ChatStreamResult {
-  turnId: string         // assistantMessageId
+  turnId: string
   alreadyRunning: boolean
 }
 ```
 
-**行为约定**（所有实现者必须遵守）：
-1. `chatStream` 同步返回 `{ turnId, alreadyRunning }`（不等 agent 跑完）
-2. 后台 fire-and-forget 跑 agent，通过 `callback` 实时推送 `AgentCallbackMessage`
-3. 完成时推送 `type: 'result'`
-4. abort 时推送 `type: 'error', content: 'Aborted'`
-5. callback 调用顺序需保持单调时间序
+### 行为约定
+1. `chatStream` 同步返回 `{ turnId, alreadyRunning }`
+2. 后台 fire-and-forget 跑 agent，通过 `callback` 推送 `AgentCallbackMessage`
+3. 完成时推送 `type: 'result'`；abort 时推送 `type: 'error', content: 'Aborted'`
+4. callback 调用保持时间序
 
-## 6. Runtime 选择策略
+## 5. Runtime 选择
 
-`AgentRuntimeRegistry.resolve(opts)` 按优先级：
-1. `opts.explicitRuntime`（来自请求 body 的 `runtime` 字段 / task 记录）
-2. `process.env.AGENT_RUNTIME`（部署级 override）
-3. `process.env.AGENT_RUNTIME_DEFAULT` 或内置默认 `tencent-sdk`
-
-**前端用法**：
-```typescript
-// 发 prompt 时传入 runtime
-fetch('/api/agent/chat', {
-  method: 'POST',
-  body: JSON.stringify({
-    prompt: '...',
-    conversationId: '...',
-    runtime: 'opencode-acp',  // 或 'tencent-sdk'
-  })
-})
-
-// 或者通过 session/prompt (JSON-RPC) 的 params.runtime
+```ts
+// 选择优先级：
+// 1. body.runtime / params.runtime  (请求级 override)
+// 2. process.env.AGENT_RUNTIME       (部署级 override)
+// 3. AGENT_RUNTIME_DEFAULT 或 'tencent-sdk'
+const runtime = agentRuntimeRegistry.resolve({ explicitRuntime: body.runtime })
 ```
 
-**列出可用 runtime**（用于前端选择器）：
+**前端选择 runtime**：
 ```
-GET /api/agent/runtimes
-→ {"default":"tencent-sdk","runtimes":[
-    {"name":"tencent-sdk","available":true},
-    {"name":"opencode-acp","available":true}
-  ]}
+POST /api/agent/chat
+{ "prompt": "...", "runtime": "opencode-acp" }
 ```
 
-## 7. OpencodeAcpRuntime 细节
-
-### 依赖
-- `@agentclientprotocol/sdk@^0.21.0`
-- 系统装了 `opencode-ai` CLI（`npm i -g opencode-ai`）
-- 模型 provider 配置见 `~/.config/opencode/opencode.json`
-- API key 见 `~/.local/share/opencode/auth.json`
-
-### 模型配置示例（Moonshot Kimi）
+**列出可用 runtime**：`GET /api/agent/runtimes`（公开端点）
 ```json
-// ~/.config/opencode/opencode.json
 {
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "moonshot": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Moonshot",
-      "options": { "baseURL": "https://api.moonshot.cn/v1" },
-      "models": {
-        "kimi-k2-0905-preview": { "name": "Kimi K2 (0905)" },
-        "kimi-k2-turbo-preview": { "name": "Kimi K2 Turbo" }
-      }
-    }
-  }
+  "default": "tencent-sdk",
+  "runtimes": [
+    { "name": "tencent-sdk",  "available": true },
+    { "name": "opencode-acp", "available": true }
+  ]
 }
 ```
 
-```json
-// ~/.local/share/opencode/auth.json
-{
-  "moonshot": { "type": "api", "key": "sk-xxx" }
-}
-```
+## 6. OpencodeAcpRuntime 运行模式
 
-### 环境变量
-- `OPENCODE_BIN`：opencode 可执行路径，默认 `opencode`
-- `OPENCODE_DEFAULT_MODEL`：默认模型，默认 `moonshot/kimi-k2-0905-preview`
-- `OPENCODE_ACP_DEBUG=1`：打印 opencode stderr 与未识别事件
+### 模式 A：有 `envId`（生产 / 沙箱模式）
+1. `scfSandboxManager.getOrCreate(convId, envId)` 获取/创建沙箱
+2. 创建临时目录 `/tmp/opencode-session-<uuid>/`
+3. 写 `.opencode/opencode.json`：
+   - 定义 agent `sandboxed`（`mode: primary`，`tools: { read:false, write:false, bash:false, edit:false, grep:false, glob:false, webfetch:false, patch:false, sbx_*:true }`）
+   - 定义 `mcp.sbx`：local stdio，command `["node", "<path>/sandbox-mcp-bridge.js"]`，env 传 `SANDBOX_BASE_URL` + `SANDBOX_AUTH_HEADERS_JSON`
+4. 写 AGENTS.md：system prompt 告诉模型用 `sbx_*` 相对路径
+5. spawn `opencode acp --cwd <临时目录>`
+6. ACP 握手、setSessionMode('sandboxed')、set model、prompt
+7. 会话结束清理临时目录
 
-### ACP 流程
-```
-spawn opencode acp --cwd <cwd>
-  │
-  ▼
-ClientSideConnection (NDJSON over stdio)
-  │
-  ├─ initialize { protocolVersion: 1, clientCapabilities: { fs, terminal: false } }
-  ├─ newSession { cwd, mcpServers: [] }
-  ├─ unstable_setSessionModel { sessionId, modelId }  # best-effort
-  └─ prompt { sessionId, prompt: [{ type: 'text', text }] }
-     │
-     ▼
-  session/update 事件流 → handleSessionUpdate → emit AgentCallbackMessage
-     │
-     ▼
-  callback → 前端 SSE + stream events 落库
-```
+### 模式 B：无 `envId`（本地开发）
+1. **不**禁用内置工具（opencode 就用本地文件系统）
+2. 使用 `options.cwd` 作为 opencode 的 cwd（不创建临时目录，仅在其下写 `.opencode/opencode.json` 空配置）
+3. 其余 ACP 流程相同
 
-### ACP SessionUpdate → AgentCallbackMessage 映射
+## 7. Sandbox MCP Bridge
 
-| ACP `sessionUpdate` | AgentCallbackMessage `type` | 备注 |
+独立进程（`sandbox-mcp-bridge.js`），通过 stdio 实现 MCP 协议，对外暴露：
+
+| 工具 | 转发到 | 说明 |
 |---|---|---|
-| `agent_message_chunk` (text) | `text` | 流式正文 |
-| `agent_thought_chunk` (text) | `thinking` | 思考链 |
-| `tool_call` | `tool_use` | title → name，rawInput → input |
-| `tool_call_update` (in_progress) | `tool_input_update` | 中间状态 |
-| `tool_call_update` (completed/failed) | `tool_result` | is_error = (status === 'failed') |
-| `plan` | `thinking` (文本化) | 首版极简处理 |
-| `available_commands_update` / `usage_update` / `current_mode_update` | 静默吞掉 | 噪声 |
+| `read` | POST /api/tools/read | 读文件 |
+| `write` | POST /api/tools/write | 写文件 |
+| `edit` | POST /api/tools/edit | 字符串替换 |
+| `bash` | POST /api/tools/bash | shell 命令 |
+| `glob` | POST /api/tools/glob | 文件匹配 |
+| `grep` | POST /api/tools/grep | 内容搜索 |
 
-### 权限请求
-OpenCode 用 `requestPermission` 请求权限（edit / bash / webfetch 等工具）。
-当前实现：**自动 allow_once**（与 PoC 一致）。
+OpenCode 在给工具命名时会加 MCP server 名前缀，因此 LLM 看到的是 `sbx_read`、`sbx_write` 等。
 
-TODO：接入真实的 ToolConfirm UI 回调（复用 `askAnswers` / `toolConfirmation` 机制），
-需要把 ACP `requestPermission` 映射到 `AgentCallbackMessage.type='tool_confirm'`，
-并在收到用户决策后重新 resolve promise。**当前首版未做**，但框架已留接口。
+### 沙箱路径约束
+**必须使用相对路径**。沙箱侧的 `/api/tools/*` 对所有绝对路径返回 `403 Path traversal blocked`。
+相对路径会被解析到 scope 隔离目录 `/tmp/workspace/<envId>/<conversationId>/`。
 
-## 8. 首版已知限制
+AGENTS.md 已明确告诉模型这一点；bridge 不做路径转换（让沙箱自己判定最稳）。
 
-OpenCode runtime 实现为**最小可用**，暂不覆盖以下现有 Tencent SDK 特性：
+## 8. 测试结果
+
+### e2e#1: 本地模式（`test-opencode-runtime.mts`）
+```
+[e2e] event counts: {
+  "agent_phase": 2,
+  "tool_use": 1,
+  "tool_input_update": 1,
+  "tool_result": 1,
+  "text": 2,
+  "result": 1
+}
+hello.txt content: "hello from runtime"
+PASS: file created with correct content
+OVERALL: PASS
+```
+
+### e2e#2: HTTP 公开端点（`test-acp-http-e2e.mts`）
+```
+/health: PASS
+/runtimes: PASS (opencode-acp registered)
+```
+
+### e2e#3: 完整 HTTP SSE（`test-acp-chat-http.mts`）
+```
+status=200 content-type=text/event-stream
+received 21 SSE events
+update:agent_message_chunk: 18
+update:agent_phase: 2
+DONE: 1
+agent text: 我是OpenCode，一个运行在您计算机上的交互式通用AI代理...
+OVERALL: PASS
+```
+
+### ★ e2e#4: 沙箱隔离（`test-opencode-sandbox-e2e.mts`）
+```
+[tool_use ▶] name=sbx_write id=sbx_write:0
+[tool_result ◯] out={"output":"Wrote file successfully."}
+[result] sandbox={ baseUrl: ".../sandbox-shared", conversationId: "sandbox-e2e-..." }
+
+[sandbox-e2e] sandbox file content = "1: hello from sandbox i24jd6en"
+[sandbox-e2e] local /tmp/hello-sandbox-...txt exists = false
+
+  text events:                 PASS
+  result event:                PASS
+  used sbx_* tools:            PASS (count=1)
+  did NOT use builtin tools:   PASS (count=0)
+  sandbox file has expected:   PASS
+  local NOT polluted:          PASS
+OVERALL: PASS
+```
+
+这个 e2e 真实跑通了**完整链路**：
+- LLM（Moonshot Kimi） → MCP sbx_write → sandbox-mcp-bridge → SCF /api/tools/write → 沙箱文件系统
+- 直接调沙箱 /api/tools/read **独立验证**文件确实在沙箱里
+- 本地 /tmp/ 文件系统**未被污染**
+
+### 质量校验
+- `pnpm type-check` ✅（所有包）
+- `pnpm lint` ✅
+- `pnpm build` ✅（server + web）
+- `pnpm format` ✅
+
+## 9. 首版限制
 
 | 特性 | 状态 |
 |---|---|
 | askAnswers resume（AskUserQuestion） | ❌ 未实现 |
-| toolConfirmation resume（ToolConfirm UI） | ❌ 未实现（默认 allow_once） |
-| 沙箱 (SCF) 集成 | ❌ 进程内本地执行，OpenCode 的 read/write/bash 走本地文件系统 |
-| coding-mode 初始化（dev server / preview proxy） | ❌ 未集成 |
-| 消息持久化到 CloudBase tasks collection | ⚠️ 只持久化 stream events，不落 messages 表 |
-| git-archive / persistence.syncMessages | ❌ 未集成 |
-| maxTurns | ❌ 交给 opencode 自己控制 |
-| permissionMode（plan 模式） | ❌ 可通过 session/set_mode 映射，但未接线 |
+| toolConfirmation resume（ToolConfirm UI 对接） | ❌ 默认 allow_once |
+| coding-mode 模板初始化（vite dev server） | ❌ 未集成 |
+| git-archive / syncMessages DB 持久化 | ❌ 仅 stream events 落库 |
+| maxTurns / cancel 细节 | ⚠️ 只基础 abort |
+| permissionMode ('plan') | ⚠️ 可接 set_session_mode，未接线 |
+| OpenCode agent 的工具允许列表 wildcard 语法 | ✅ `sbx_*: true` 已验证 |
 
-**这些限制不影响首版验证架构可行性**。如果要投产 OpenCode 为主 runtime，需要补足上述项——但**架构本身对此开放**（IAgentRuntime 接口足够表达所有能力，实现方自行决定是否支持）。
-
-## 9. 测试结果
-
-### e2e#1: `test-opencode-runtime.mts`（直接调 runtime）
-```
-[e2e] workdir = /tmp/opencode-runtime-e2e
-[e2e] available = true
-[tool_use ▶] write id=write:0 input={}
-[tool_result ◯] tool_use_id=write:0 is_error=false out={"output":"Wrote file successfully."...}
-[result] {"stopReason":"end_turn","usage":null}
-hello.txt content: "hello from runtime"
-  text events:        PASS (2)
-  tool_use events:    PASS (1)
-  tool_result events: PASS (1)
-  result events:      PASS (1)
-  file created:       PASS
-OVERALL: PASS
-```
-
-### e2e#2: `test-acp-http-e2e.mts`（起 server，公开端点）
-```
-/health = { status: 'ok', service: 'acp' }
-/runtimes = {
-  "default": "tencent-sdk",
-  "runtimes": [
-    { "name": "tencent-sdk", "available": true },
-    { "name": "opencode-acp", "available": true }
-  ]
-}
-  /health: PASS
-  /runtimes: PASS (opencode-acp registered)
-```
-
-### e2e#3: `test-acp-chat-http.mts`（完整 HTTP SSE，mock auth）
-```
-status=200 content-type=text/event-stream
-received 21 SSE events
-event type distribution: {
-  "update:agent_phase": 2,
-  "update:agent_message_chunk": 18,
-  "DONE": 1
-}
-agent text: 我是OpenCode，一个运行在您计算机上的交互式通用AI代理，专注于通过实际行动
-  stream completed with [DONE]: PASS
-  received agent text:          PASS
-OVERALL: PASS
-```
-
-### 质量校验
-- `pnpm type-check` ✅
-- `pnpm lint` ✅
-- `pnpm build` (server + web) ✅
-- `pnpm format` ✅（无格式化差异）
-
-## 10. 如何运行 e2e 测试
+## 10. 如何运行
 
 ```bash
-# 前提：
-#   1. npm i -g opencode-ai
-#   2. ~/.config/opencode/opencode.json 配好 moonshot provider
-#   3. ~/.local/share/opencode/auth.json 有 moonshot key
-#   4. packages/server/.env 填好 TCB_*（仅 e2e#2/#3 需要）
+# 前提
+npm i -g opencode-ai
+# ~/.config/opencode/opencode.json 配好 moonshot（或其他 provider）
+# ~/.local/share/opencode/auth.json 放 API key
+# packages/server/.env 填 TCB_* 等
+# pnpm install + pnpm build:server
 
 cd packages/server
 
-# e2e #1: runtime 层（最快，~60s）
+# e2e#1 本地模式 (~60s)
 npx tsx scripts/test-opencode-runtime.mts
 
-# e2e #2: HTTP 公开端点（~10s）
+# e2e#2 HTTP 公开端点 (~10s)
 npx tsx --env-file=.env scripts/test-acp-http-e2e.mts
 
-# e2e #3: 完整 SSE chat 流（~30s）
+# e2e#3 HTTP SSE (~60s)
 npx tsx --env-file=.env scripts/test-acp-chat-http.mts
+
+# e2e#4 沙箱隔离 ★ (~90s, 需要真实 SCF 环境)
+npx tsx --env-file=.env scripts/test-opencode-sandbox-e2e.mts
 ```
 
-## 11. 后续路线图
+## 11. 设计决策
 
-1. **完善 OpencodeAcpRuntime**（2-3 天）
-   - 实现 ToolConfirm 回调映射（`requestPermission` → `tool_confirm` → 用户决策 → resolve）
-   - 接入 `askAnswers` / `toolConfirmation` resume 机制
-   - 消息持久化到 tasks（参考 cloudbase-agent.service 的 `preSavePendingRecords` / `syncMessages`）
+### 为什么不把 opencode 塞到沙箱里？
+违反 agent/sandbox 分离原则：
+- agent（决策）应在受控 server 环境里，便于集中管理凭证、监控、升级
+- sandbox（执行）是"纯体力活"容器，应尽量纯净、快速启停
+- 把 agent 塞沙箱会让 sandbox 镜像臃肿、重启成本大、依赖版本难管控
 
-2. **SCF 沙箱化 OpenCode**（1-2 天）
-   - 打一个含 opencode-ai 的 SCF 镜像
-   - 改 OpencodeAcpRuntime，支持通过 CloudBase Gateway 转发 stdio 到 SCF
-   - 所有 read/write/bash 自动在沙箱内执行，和现有 SCF 架构一致
+### 为什么用 MCP 而不是 ACP client 回调？
+调研发现 OpenCode 的 ACP agent **不发 `fs/*` / `terminal/*` 回调**（所有内置工具在其进程内执行）。
+MCP 是 OpenCode 会主动调用的唯一可插拔扩展点。
 
-3. **接入更多 agent**（每个 1-2 天）
-   - Claude Code ACP (`@agentclientprotocol/claude-agent-acp`)
-   - Gemini CLI (`gemini --experimental-acp`)
-   - Codex CLI（一旦确认其 ACP 启动方式）
+### 为什么 per-session 临时目录（而不是全局 opencode.json）？
+- 不同 session 有不同的沙箱凭证（不同 user、不同 env）
+- opencode 读 cwd 下 `.opencode/opencode.json` 覆盖全局，天然做到 per-session 隔离
+- 避免 session 间 race condition（并发时互不干扰）
 
-4. **前端 UI**（0.5-1 天）
-   - Task 创建表单 + Settings 里加 runtime 选择器
-   - 基于 `GET /api/agent/runtimes` 动态列出
+### 为什么 MCP bridge 是独立 .js 文件（而不是嵌入 runtime）？
+- OpenCode 期望 MCP server 是独立可执行（command + args）
+- 独立文件让 bridge 本身可被外部用户 inspect、debug、单独测
+- tsup bundle 出一份自包含的 js，部署只多一个文件
 
-## 12. 设计决策
+### 为什么 LLM 看到的工具名是 `sbx_*`（不是 `sandbox_*`）？
+OpenCode 给 MCP 工具自动加 `<server_name>_` 前缀。
+我们把 server 名定为 `sbx`（短）、工具名就是 `read`/`write`/...，合成结果简洁。
+之前用 `sandbox_write` 会变成 `sbx_sandbox_write`，冗余。
 
-### 为什么 TencentSdkRuntime 是极薄 adapter 而不是重写？
-`cloudbase-agent.service.ts` 2200 行里沉淀了大量沙箱、coding-mode、persistence、askAnswers/toolConfirmation 业务。重写风险太高、收益有限。Adapter 模式确保 100% 行为兼容，零回归。
+## 12. 后续路线
 
-### 为什么 ACP runtime 每次都 spawn 新进程？
-OpenCode 本身支持单进程多 session，理论上可复用。但这会带来：
-- 进程生命周期管理复杂度（何时 kill？）
-- session 清理（opencode 里跑完不会自动 gc）
-- 凭证泄露风险（一个进程服务多用户）
+1. **接 ToolConfirm UI**（1-2 天）
+   把 ACP `requestPermission` 与 MCP tool 执行前的确认映射到现有前端 ToolConfirm 组件。
 
-首版选**每次新 spawn**，启动成本约 1-2s，可接受。后续可加进程池。
+2. **消息持久化对齐 Tencent 路线**（2-3 天）
+   参考 `cloudbase-agent.service.ts` 的 `preSavePendingRecords` / `syncMessages` 做同样落库。
 
-### 为什么 runtime 层不引入 IPersistence / ISandbox 子抽象？
-YAGNI。首版只证明"能切 agent"。Tencent runtime 直接用 `cloudbaseAgentService`（深度耦合 CloudBase），OpenCode runtime 只用 stream events（最小耦合）。等真正接入第 3 个 runtime、发现共同痛点再抽象。
+3. **接更多 ACP agent**（每个 1-2 天）
+   Claude Code ACP、Gemini CLI、Qwen Code。都能复用 `OpencodeAcpRuntime` 的代码骨架，只需改启动命令。
 
-### 为什么 `convertToSessionUpdate` 还留在 CloudbaseAgentService 的静态方法？
-它的输入是标准的 `AgentCallbackMessage`，输出是 ACP `SessionUpdate`，与任何 runtime 无关。保留静态位置避免过度重构（搬家会改 routes/acp.ts 的 import）。将来可以挪到 `agent/acp-event.ts` 或类似文件。
+4. **前端 Runtime 选择器**（0.5 天）
+   Task 创建表单加下拉，基于 `GET /runtimes` 动态列出。
+
+5. **生产部署**（镜像打包、环境变量管理）
+   `sandbox-mcp-bridge.js` 已随 server 一起 build 到 dist，部署跟着走。
+   opencode 可通过镜像 `RUN npm i -g opencode-ai` 或 lazy install 策略。
 
 ## 13. 引用
 
 - Agent Client Protocol: https://agentclientprotocol.com
 - OpenCode: https://github.com/sst/opencode
-- ACP SDK: https://www.npmjs.com/package/@agentclientprotocol/sdk
-- 深度分析备忘录: `docs/opencode-acp-integration-memo.md`（首轮调研，已印证）
+- OpenCode Agent config: https://opencode.ai/docs/agents/
+- Model Context Protocol: https://modelcontextprotocol.io
+- 深度调研备忘录: `/Users/yang/git/coding-agent-template/docs/opencode-acp-integration-memo.md`
