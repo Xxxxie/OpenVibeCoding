@@ -46,7 +46,7 @@ import { getAcpTransportFactory, type AcpTransport } from './acp-transport.js'
 import { ensureOpencodeToolsInstalled } from './opencode-installer.js'
 import { registerPending, resolvePending, rejectPendingForConversation } from './pending-permission-registry.js'
 import { resolvePendingQuestion, rejectPendingQuestionsForConversation } from './pending-question-registry.js'
-import { OpencodeMessageBuilder, findLastRecordIds } from './opencode-message-builder.js'
+import { OpencodeMessageBuilder, findLastRecordIds, buildHistoryContextPrompt } from './opencode-message-builder.js'
 import { scfSandboxManager, type SandboxInstance } from '../../sandbox/scf-sandbox-manager.js'
 import { spawn } from 'node:child_process'
 import os from 'node:os'
@@ -291,9 +291,14 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
     // 记录本轮的 liveCallback（resume 时可替换，因为 SSE 流可能已更新）
     registerLiveCallback(conversationId, callback)
 
-    this.launchAgent(prompt, callback, options, conversationId, turnId, abortController).catch((err) => {
-      console.error('[OpencodeAcpRuntime] background agent error:', err)
-    })
+    // 本轮预存的 user/assistant record ids（用于 buildHistoryContextPrompt 排除）
+    const currentRecordIds = preSaved ? new Set<string>([preSaved.userRecordId, preSaved.assistantRecordId]) : undefined
+
+    this.launchAgent(prompt, callback, options, conversationId, turnId, abortController, currentRecordIds).catch(
+      (err) => {
+        console.error('[OpencodeAcpRuntime] background agent error:', err)
+      },
+    )
 
     return { turnId, alreadyRunning: false }
   }
@@ -305,6 +310,7 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
     conversationId: string,
     turnId: string,
     abortController: AbortController,
+    excludeHistoryRecordIds?: ReadonlySet<string>,
   ): Promise<void> {
     const envId = options.envId || ''
     const userId = options.userId || 'anonymous'
@@ -467,9 +473,20 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
       }
 
       // 9. 发送 prompt（阻塞直到完成）
+      //
+      // OpenCode 每次新 session 是空白上下文，如果之前 conversation 有历史消息，
+      // 把它们作为 context prefix 拼到本轮 prompt 前面，让 LLM 能做多轮记忆。
+      //
+      // 注意：Resume 场景（toolConfirmation/askAnswers）不会走到这里（早 return 了），
+      // 所以 resume 时用的是原 opencode session 自带的上下文，不需要重新注入。
+      const contextPrompt = envId
+        ? await buildHistoryContextPrompt(conversationId, envId, userId, prompt, {
+            excludeRecordIds: excludeHistoryRecordIds,
+          })
+        : prompt
       const promptRes = await conn.prompt({
         sessionId: opencodeSessionId,
-        prompt: [{ type: 'text', text: prompt }],
+        prompt: [{ type: 'text', text: contextPrompt }],
       })
 
       await emit({ type: 'agent_phase', phase: 'idle' })

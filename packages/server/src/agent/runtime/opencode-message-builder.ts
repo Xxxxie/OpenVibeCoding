@@ -281,6 +281,82 @@ export async function findLastRecordIds(
 }
 
 /**
+ * 从 DB 读最近 N 轮历史对话，构造一个 "context prompt prefix" 让新建的 opencode
+ * session 看到之前的上下文。
+ *
+ * 为什么需要：OpenCode 每次 chatStream 都 newSession（空白上下文）。如果不注入
+ * 历史，LLM 无法回答"上一轮我说过什么"。
+ *
+ * 格式（人类可读、模型容易理解的 transcript）：
+ *   Below is the prior conversation history. Please take it into account when
+ *   responding to the new user message.
+ *
+ *   [History]
+ *   User: 你好，我叫王小明
+ *   Assistant: 你好王小明，有什么我可以帮你的？
+ *   Tool call: AskUserQuestion(...)
+ *   Tool result: User answered: 1+1=2
+ *
+ *   [Current user message]
+ *   <实际 prompt>
+ *
+ * 只截取文本 + 工具调用摘要，避免塞太长的 tool output 到 context。
+ */
+export async function buildHistoryContextPrompt(
+  conversationId: string,
+  envId: string,
+  userId: string,
+  newPrompt: string,
+  opts: { maxHistoryRecords?: number; excludeRecordIds?: ReadonlySet<string> } = {},
+): Promise<string> {
+  const { maxHistoryRecords = 20, excludeRecordIds } = opts
+  if (!envId || !conversationId) return newPrompt
+
+  try {
+    const records = await persistenceService.loadDBMessages(conversationId, envId, userId, maxHistoryRecords)
+    if (records.length === 0) return newPrompt
+
+    const lines: string[] = []
+    for (const r of records) {
+      // 排除本轮刚 preSave 的 record（user 已 done 但不是历史；assistant 是空 pending）
+      if (excludeRecordIds?.has(r.recordId)) continue
+      // 跳过未完成的（pending/error/cancel）record，它们的 parts 不可靠
+      if (r.status !== 'done') continue
+
+      const roleLabel = r.role === 'user' ? 'User' : 'Assistant'
+      // 遍历 parts，把 text / tool_call / tool_result 都转为可读摘要
+      for (const p of r.parts || []) {
+        if (p.contentType === 'text' && p.content) {
+          lines.push(`${roleLabel}: ${p.content.trim()}`)
+        } else if (p.contentType === 'reasoning' && p.content) {
+          // thinking 段不放进 context（太长且 LLM 已经消化过了）
+          continue
+        } else if (p.contentType === 'tool_call') {
+          const toolName = (p.metadata?.toolName as string) ?? (p.metadata?.toolCallName as string) ?? 'tool'
+          const inputPreview =
+            typeof p.content === 'string'
+              ? p.content.slice(0, 200)
+              : JSON.stringify(p.metadata?.input ?? {}).slice(0, 200)
+          lines.push(`(tool_call: ${toolName} ${inputPreview})`)
+        } else if (p.contentType === 'tool_result') {
+          const outputPreview = typeof p.content === 'string' ? p.content.slice(0, 300) : ''
+          const status = (p.metadata?.status as string) ?? ''
+          lines.push(`(tool_result[${status}]: ${outputPreview})`)
+        }
+      }
+    }
+
+    if (lines.length === 0) return newPrompt
+
+    const header = 'Below is the prior conversation history for this session. Use it as context when responding.'
+    return `${header}\n\n[History]\n${lines.join('\n')}\n\n[Current user message]\n${newPrompt}`
+  } catch (e) {
+    console.warn('[buildHistoryContextPrompt] failed, falling back to raw prompt:', (e as Error).message)
+    return newPrompt
+  }
+}
+
+/**
  * 避免 tsc 类型未引用警告
  */
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
