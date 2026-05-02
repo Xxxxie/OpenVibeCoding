@@ -96,9 +96,12 @@ const conversationId = 'askuser-e2e-' + Date.now()
 console.log(`\n[askuser-e2e] === Round 1 ===`)
 
 const r1 = await opencodeAcpRuntime.chatStream(
-  `我想搭建一个 web 应用后端。请使用 question 工具问我以下问题：\n` +
-    `header="Database"，question="Which database to use?"，options 包含 PostgreSQL 和 MySQL 两个选项。\n` +
-    `等我回答后再给建议。不要自己下决定，必须用 question 工具征询。`,
+  `我想搭建一个 web 应用后端。请使用 AskUserQuestion 工具问我以下问题（严格按 schema）：\n` +
+    `  question="Which database to use?"\n` +
+    `  header="Database"\n` +
+    `  options=[{label:"PostgreSQL", description:"powerful open-source"}, {label:"MySQL", description:"popular fast"}]\n` +
+    `  multiSelect=false\n` +
+    `等我回答后再给建议。不要自己下决定，必须用 AskUserQuestion 工具征询。`,
   makeCb('r1'),
   {
     conversationId,
@@ -201,15 +204,42 @@ const allText = events
 const textMentionsAnswer = allText.includes(chosenLabel) || allText.toLowerCase().includes(chosenLabel.toLowerCase())
 
 console.log('\n[askuser-e2e] assertions:')
-console.log(`  ask_user received:             PASS`)
-console.log(`  agent suspended after:         PASS (no result 3s)`)
-console.log(`  round2 resume path:            PASS (alreadyRunning=true)`)
-console.log(`  tool_result with user answer:  ${questionResult ? 'PASS' : 'FAIL'}`)
-console.log(`  final result event:            ${finalResult ? 'PASS' : 'FAIL'}`)
-console.log(`  no error event:                ${errorEv ? 'FAIL (' + errorEv.content + ')' : 'PASS'}`)
-console.log(`  text mentions answer:          ${textMentionsAnswer ? 'PASS (bonus)' : 'WARN (not required)'}`)
 
-const overall = !!questionResult && !!finalResult && !errorEv
+// ★ Tencent 契约对齐断言
+const askUserToolUse = events.find((e) => e.type === 'tool_use' && e.name === 'AskUserQuestion')
+const toolUseOk = !!askUserToolUse
+console.log(`  tool_use name='AskUserQuestion': ${toolUseOk ? 'PASS' : 'FAIL'}`)
+
+// ★ questions 字段 schema 对齐：multiSelect（不是 multiple），options[].description 必填
+const askQuestions = (askEvent.input as { questions?: Array<Record<string, unknown>> }).questions || []
+const schemaQ = askQuestions[0]
+const hasHeader = typeof schemaQ?.header === 'string'
+const hasQuestion = typeof schemaQ?.question === 'string'
+const hasOptions = Array.isArray(schemaQ?.options) && (schemaQ.options as unknown[]).length >= 2
+// multiSelect 是可选（默认 false）
+const optArr = (schemaQ?.options as Array<Record<string, unknown>>) || []
+const allOptsHaveDescription = optArr.every((o) => typeof o.label === 'string' && typeof o.description === 'string')
+console.log(`  questions[0].header/question:    ${hasHeader && hasQuestion ? 'PASS' : 'FAIL'}`)
+console.log(`  options[].label+description:     ${allOptsHaveDescription ? 'PASS' : 'FAIL'}`)
+console.log(`  options length >= 2:             ${hasOptions ? 'PASS' : 'FAIL'}`)
+
+console.log(`  ask_user received:               PASS`)
+console.log(`  agent suspended after:           PASS (no result 3s)`)
+console.log(`  round2 resume path:              PASS (alreadyRunning=true)`)
+console.log(`  tool_result with user answer:    ${questionResult ? 'PASS' : 'FAIL'}`)
+console.log(`  final result event:              ${finalResult ? 'PASS' : 'FAIL'}`)
+console.log(`  no error event:                  ${errorEv ? 'FAIL (' + errorEv.content + ')' : 'PASS'}`)
+console.log(`  text mentions answer:            ${textMentionsAnswer ? 'PASS (bonus)' : 'WARN (not required)'}`)
+
+const overall =
+  toolUseOk &&
+  hasHeader &&
+  hasQuestion &&
+  hasOptions &&
+  allOptsHaveDescription &&
+  !!questionResult &&
+  !!finalResult &&
+  !errorEv
 console.log(`\n[askuser-e2e] OVERALL: ${overall ? 'PASS' : 'FAIL'}`)
 
 server.close()

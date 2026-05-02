@@ -380,9 +380,9 @@ OpenCode 内置 `question` tool（`packages/opencode/src/tool/question.ts`），
 ```
 ┌─ Round 1 ─────────────────────────────────────────────────────────────┐
 │                                                                        │
-│  opencode 子进程 LLM 调 question 工具                                   │
+│  opencode 子进程 LLM 调 AskUserQuestion 工具                            │
 │   ↓                                                                    │
-│  ~/.config/opencode/tools/question.ts (custom override)                │
+│  ~/.config/opencode/tools/AskUserQuestion.ts (custom)                  │
 │   ↓ execute 里 fetch                                                   │
 │  POST http://127.0.0.1:<port>/api/agent/internal/ask-user              │
 │        headers: X-Internal-Token: <shared token>                       │
@@ -409,7 +409,7 @@ OpenCode 内置 `question` tool（`packages/opencode/src/tool/question.ts`），
 │     → resolvePendingQuestion(convId, toolCallId, answers)             │
 │     → HTTP res.json({ ok: true, answers })                           │
 │                                                                        │
-│  [opencode 子进程 question.ts execute 的 fetch 收到响应]                │
+│  [opencode 子进程 AskUserQuestion.ts execute 的 fetch 收到响应]        │
 │   ↓                                                                    │
 │  tool output: "User answered: \"Which DB?\" → PostgreSQL. You can..." │
 │   ↓                                                                    │
@@ -425,8 +425,12 @@ OpenCode 内置 `question` tool（`packages/opencode/src/tool/question.ts`），
 - Permission 存 ACP JSON-RPC Promise resolver
 - Question 存 HTTP response resolver（用户填答案后 res.json 返回 opencode 子进程）
 
-**`opencode-tool-templates/question.ts`**：新增 custom tool
-- 参数 schema 与 opencode 原生 question tool 一致（`header`/`question`/`options`/`multiple`）
+**`opencode-tool-templates/AskUserQuestion.ts`**：新增 custom tool（**文件名=工具名**）
+- 工具名 `AskUserQuestion` 严格对齐 Tencent SDK 契约（前端 `task-chat.tsx` 按这个名字匹配渲染 AskUserForm）
+- 参数 schema：`questions[{ question, header, options:[{label, description}], multiSelect? }]`
+  - 对齐 `packages/web/src/types/task-chat.ts:AskUserQuestionData`
+  - `multiSelect` 是 camelCase（不是 `multiple`）
+  - `option.description` **必填**（前端渲染需要）
 - execute 内 fetch 内部 endpoint，阻塞等答案
 - 返回格式化文本 + metadata.answers
 

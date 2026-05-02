@@ -1,44 +1,52 @@
 /**
- * 全局 opencode tool override / 新增工具：question
+ * AskUserQuestion custom tool — 对齐 Tencent AskUserQuestion 契约
  *
- * 作用：让 LLM 在执行中向用户提问（类似 Tencent SDK 的 AskUserQuestion）。
+ * 为什么名字/schema 要严格对齐 Tencent：
+ *   - 前端 `task-chat.tsx` 按 `part.toolName === 'AskUserQuestion'` 匹配渲染
+ *     AskUserForm；用其他名字前端识别不到
+ *   - 前端从 `part.input.questions` 取字段，结构必须是
+ *     `{ question, header, options:[{label, description}], multiSelect }`
+ *   - askAnswers resume 契约也已存在：
+ *     `{ [assistantMessageId]: { toolCallId, answers: { [header]: value } } }`
  *
- * OpenCode 原生有 question 工具但 ACP 模式默认禁用（`OPENCODE_CLIENT=acp`），
- * 且即便开启也没通过 ACP 协议路由（bus 事件没 subscriber）。我们自己实现一个同名
- * custom tool 覆盖它（同名 custom > builtin）。
+ * OpenCode 文件名约定：文件名 = tool id（ACP tool_call.title）
+ * 所以文件名 `AskUserQuestion.ts` → opencode 注册的 tool id `AskUserQuestion`
+ * → 我们 runtime 把 ACP tool_call.title 透传为 AgentCallbackMessage.name
+ * → convertToSessionUpdate 把 name 放到 sessionUpdate.title
+ * → 前端 part.toolName = 'AskUserQuestion' ✓
  *
  * 运行时行为：
- *   execute 调用 server 的 /api/agent/internal/ask-user HTTP endpoint
- *   server 挂起响应，直到下一轮 prompt 的 askAnswers 到达 → res.json(answers)
- *   execute 拿到答案 → 格式化成文本返回给 LLM
+ *   - execute 发 fetch 到 ASK_USER_URL 阻塞等答案
+ *   - 收到答案格式：{ ok: true, answers: { [header]: value } }
+ *   - 格式化文本返回给 LLM
  *
  * env 契约（由 server spawn opencode 时注入）：
- *   ASK_USER_URL            — 完整 URL，如 http://127.0.0.1:3001/api/agent/internal/ask-user
- *   ASK_USER_TOKEN          — 共享认证 token（X-Internal-Token header）
+ *   ASK_USER_URL            — server 本地回环 endpoint
+ *   ASK_USER_TOKEN          — shared secret，X-Internal-Token header
  *   ASK_USER_CONVERSATION_ID — 当前会话 id
- *
- * 如果 env 未配置（例如老版 runtime 或手动调 opencode）：
- *   → 返回一个提示文本告诉 LLM"无法向用户提问"，LLM 可改用文本方式沟通
  */
 import { z } from 'zod'
 
 const OptionSchema = z.object({
   label: z.string().describe('Short display text (1-5 words)'),
-  description: z.string().optional().describe('Explanation of this choice'),
+  description: z.string().describe('Explanation of what this option means or its implications'),
 })
 
 const QuestionSchema = z.object({
-  header: z.string().describe('Short label for this question (max 30 chars)'),
-  question: z.string().describe('The full question text'),
-  options: z.array(OptionSchema).describe('Predefined choices; user can also type custom answer'),
-  multiple: z.boolean().optional().describe('Allow multiple selection'),
+  question: z.string().describe('The complete question text (ends with ?)'),
+  header: z
+    .string()
+    .max(30)
+    .describe('Very short label for this question (max 30 chars, e.g. "Database", "Framework")'),
+  options: z.array(OptionSchema).min(2).max(4).describe('2-4 available choices'),
+  multiSelect: z.boolean().optional().describe('true = user may select multiple; false (default) = single selection'),
 })
 
 export default {
   description:
-    'Ask the user one or more multiple-choice questions during execution. Use this when you need a decision or clarification that can be expressed as a choice. Each question has a `header` (short label), `question` (full text), and `options` (list of {label, description}). Users may also type custom answers.',
+    'Ask the user one or more multiple-choice questions during execution. Use this when you need a decision or clarification that can be expressed as choices. Each question has a `question` (full text), `header` (short label), `options` (2-4 choices, each with `label` and `description`), and `multiSelect` (default false). The user may also type a custom answer.',
   args: {
-    questions: z.array(QuestionSchema).describe('Questions to ask'),
+    questions: z.array(QuestionSchema).min(1).describe('Questions to ask'),
   },
   async execute(
     args: { questions: Array<z.infer<typeof QuestionSchema>> },
@@ -55,8 +63,7 @@ export default {
       }
     }
 
-    // 用 opencode 给的 callID 作为 toolCallId（与 tool_call 事件的 id 保持一致，
-    // 方便前端关联；如 ctx 缺失就用 sessionID + 时间戳退兜）
+    // 用 opencode 的 callID 作为 toolCallId，与 tool_call 事件的 toolCallId 对齐
     const toolCallId = context.callID || `ask-${context.sessionID ?? 'unknown'}-${Date.now()}`
 
     const timeoutMs = Number(process.env.ASK_USER_TIMEOUT_MS || 10 * 60 * 1000)
@@ -88,7 +95,7 @@ export default {
         }
       }
 
-      // 格式化答案成 LLM 友好文本
+      // 格式化答案给 LLM（answer key 是 question.header）
       const formatted = args.questions
         .map((q) => {
           const a = data.answers![q.header]
