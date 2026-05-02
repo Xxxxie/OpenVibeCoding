@@ -605,7 +605,53 @@ OVERALL: PASS
 
 ### 14.8 已知边界
 
-- **无超时落库**：当前只在 tool_result 和 finalize 时落库。如果 LLM 长时间只发 text chunk 不调工具 + server 中途崩溃，会丢掉这段 text（但 stream_events 仍在，重启后可补偿）。如需更强保障可加"每 5 秒定时 flush"。
+- **无定时 flush**：当前触发 flushToDb 的时机是 tool_use + tool_result + finalize。长 text-only 段 + server 崩溃会丢尾部 text（stream_events 保底）。可加 5s 定时 flush。
 - **丢 result 事件的兜底**：如果 opencode 异常退出没发 result，`finally` 里的 finalize 会调 setRecordParts，status 视错误路径设为 `error` / `cancel`。
 - **并发写保护**：setRecordParts 用 `where recordId update`（CloudBase 是原子的）。同一 conversation 串行 turn（isAgentRunning 保护），不会有并发冲突。
 - **Resume 场景 parts 保持完整**：同一 builder 闭包在 resume 期间继续累积，tool_call→tool_result→更多 text 都在同一 assistant record 上，结构一致。
+
+### 14.9 挂起态持久化（ToolConfirm / AskUserQuestion）
+
+**核心保障**：挂起期间（用户还没确认或回答）前端用 `loadDBMessages` 能读到部分完整状态。
+
+触发 flushToDb 的 `tool_use` 里程碑确保：
+
+**第一轮挂起时 DB 状态**：
+```
+assistant status=pending parts=[text(思考), tool_call(status=in_progress)]
+                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                         opencode 已发 tool_call 事件，
+                                         立刻 flushToDb 让前端可见
+```
+
+**Round 2 resume 后 DB 状态**：
+```
+assistant status=done parts=[text, tool_call(completed), tool_result(completed), text(继续)]
+```
+
+**e2e 验证**：`scripts/test-persistence-suspend-e2e.mts`
+- 挂起期间 `loadDBMessages` 读回：assistant.status=pending, parts 含 tool_call(in_progress), 无 tool_result ✓
+- Resume 后：status=done, tool_call.status=completed, tool_result 已追加, 后续 text 顺序保持 ✓
+
+**与 Tencent SDK 对齐**：
+- Tencent 依赖 JSONL baseline + `updateToolResult` 立刻同步
+- OpenCode 依赖事件流 + messageBuilder 里程碑 flush — 实现路径不同，**可观测行为一致**
+- 前端按 toolName='AskUserQuestion' 匹配渲染 AskUserForm（见 §13 对齐工作），挂起期间打开历史能看到"待回答"卡片
+
+### 14.10 为什么**不**实现 Tencent SDK 的某些持久化步骤
+
+Tencent SDK 在 resume 时会做：
+1. **providerData 继承**（从原 tool_call 继承 messageId/model/agent）
+2. **providerData 清理**（剥离 `skipRun` / `error` 等 SDK deny 标记）
+3. **立刻同步调 updateToolResult**
+
+这些**都是为 Claude SDK 的 JSONL 行为兼容而设计**，具体原因：
+- `skipRun=false, error="..."` 是 Claude SDK 在工具被 deny 时写进 JSONL 的"拒绝标记"。不清理的话，SDK 下次 resume 读 JSONL 看到这个标记会**重新尝试调用工具**，导致死循环
+- Claude SDK 通过 JSONL 恢复上下文，要求 tool_result 和"直接执行（无确认）"的 baseline 结构一致
+
+**OpenCode runtime 不走 JSONL**，没有这些 SDK 兼容性压力：
+- 工具真实输出由 opencode 子进程通过 ACP tool_call_update 事件发回
+- messageBuilder 收到 tool_result 事件就追加 part
+- 没有"deny 标记污染"的问题（permission deny 时 opencode 的 behavior 是 tool 直接返回 "rejected"，没 skipRun 这种 SDK 内部字段）
+
+所以这部分差异**不是 bug，是设计上的正确简化**。

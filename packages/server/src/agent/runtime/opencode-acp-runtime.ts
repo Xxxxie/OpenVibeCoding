@@ -631,9 +631,11 @@ function makeEmitter(ctx: {
     // 1. 喂给消息 builder（持久化）
     if (messageBuilder) {
       messageBuilder.pushEvent(enriched)
-      // tool_result 是一个里程碑 — 触发一次 flushToDb 让 DB 反映最新状态
-      // （即使 server 中途崩溃，最坏丢失最后一段 text，下次开会话仍有结构化历史）
-      if (msg.type === 'tool_result') {
+      // 里程碑 flushToDb：
+      //   - tool_use：工具开始执行 → 立刻落库，让前端在挂起期间能看到"待回答/待确认"卡片
+      //     （尤其 AskUserQuestion / ToolConfirm 场景，会等很久才有 tool_result）
+      //   - tool_result：工具执行完毕 → 反映最新状态
+      if (msg.type === 'tool_use' || msg.type === 'tool_result') {
         messageBuilder.flushToDb().catch((e) => {
           console.error('[OpencodeAcpRuntime] flushToDb error:', e)
         })
