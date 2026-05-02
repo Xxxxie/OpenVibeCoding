@@ -22,7 +22,6 @@ export type SandboxProgressCallback = (message: {
 interface ScfSandboxConfig {
   timeoutMs: number
   maxCacheSize: number
-  functionPrefix: string
   runtime: string
   memory: number
   timeout: number
@@ -147,7 +146,6 @@ export class ScfSandboxManager {
   private readonly config: ScfSandboxConfig = {
     timeoutMs: 30 * 60 * 1000,
     maxCacheSize: 50,
-    functionPrefix: 'sandbox-dev',
     runtime: 'Nodejs16.13',
     memory: 2048,
     timeout: 900,
@@ -294,11 +292,8 @@ export class ScfSandboxManager {
     const scfSessionId = options?.sandboxSessionId || (isolation === 'shared' ? envId : conversationId)
     const isCodingMode = options?.isCodingMode || false
 
-    const envConfig = this.getEnvConfig()
-    const functionPrefix = envConfig.functionPrefix || this.config.functionPrefix
-
     const functionKey = mode === 'shared' ? 'shared' : conversationId
-    const functionName = this.generateFunctionName(functionKey, functionPrefix)
+    const functionName = this.generateFunctionName(functionKey)
 
     // Check if function exists
     const { exists: functionExists } = await this.checkFunctionExists(functionName)
@@ -342,9 +337,9 @@ export class ScfSandboxManager {
     scfSessionId: string,
     options?: { sandboxMode?: 'shared' | 'isolated' | string; isCodingMode?: boolean },
   ): Promise<SandboxInstance | null> {
-    const envConfig = this.getEnvConfig()
-    const functionPrefix = envConfig.functionPrefix || this.config.functionPrefix
-    const functionName = this.generateFunctionName('shared', functionPrefix)
+    const mode = options?.sandboxMode || 'shared'
+    const functionKey = mode === 'shared' ? 'shared' : conversationId
+    const functionName = this.generateFunctionName(functionKey)
 
     const { exists } = await this.checkFunctionExists(functionName)
     if (!exists) return null
@@ -420,7 +415,7 @@ export class ScfSandboxManager {
 
   private generateFunctionName(cacheKey: string, prefix?: string): string {
     const sanitized = cacheKey.replace(/[^a-zA-Z0-9_-]/g, '-')
-    return `${prefix || this.config.functionPrefix}-${sanitized}`.substring(0, 60)
+    return `${prefix || this.getEnvConfig().functionPrefix}-${sanitized}`.substring(0, 60)
   }
 
   private async createFunction(functionName: string): Promise<void> {
@@ -527,21 +522,24 @@ export class ScfSandboxManager {
   }
 
   /**
-   * 确保共享沙箱的预览网关 API 已注册。
-   * 可在 preview-url 接口中调用,保证网关路径可达。
-   * 结果缓存在内存中，避免每次都调用 CreateCloudBaseGWAPI。
+   * 确保该沙箱实例对应的预览网关 API 已注册。
+   * 可在 preview-url 接口中调用，保证网关路径可达。
+   * 结果按 functionName 缓存，避免每次都调用 CreateCloudBaseGWAPI。
+   *
+   * 参数接受 SandboxInstance 而不是 Task，是因为 functionName 的权威来源
+   * 在 SandboxInstance 上（由 getOrCreate 生成并持久化到实例），避免此处
+   * 再通过 task.sandboxMode 推算一次、两套生成规则飘移。
    */
-  private gatewayEnsured = false
+  private gatewayEnsuredFunctions = new Set<string>()
 
-  async ensurePreviewGateway(): Promise<string> {
+  async ensurePreviewGateway(sandbox: SandboxInstance): Promise<string> {
     const envConfig = this.getEnvConfig()
     const domain = `${envConfig.envId}.service.tcloudbase.com`
     const previewBase = `https://${domain}/preview`
 
-    if (this.gatewayEnsured) return previewBase
+    const functionName = sandbox.functionName
+    if (this.gatewayEnsuredFunctions.has(functionName)) return previewBase
 
-    const functionPrefix = envConfig.functionPrefix || this.config.functionPrefix
-    const functionName = this.generateFunctionName('shared', functionPrefix)
     try {
       await this.createGatewayApi(functionName)
       console.log(`[ScfSandbox] ensurePreviewGateway: gateway OK (${functionName})`)
@@ -551,7 +549,7 @@ export class ScfSandboxManager {
         console.warn(`[ScfSandbox] ensurePreviewGateway: createGatewayApi error: ${err.message}`)
       }
     }
-    this.gatewayEnsured = true
+    this.gatewayEnsuredFunctions.add(functionName)
     return previewBase
   }
 

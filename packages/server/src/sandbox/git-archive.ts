@@ -186,17 +186,36 @@ export async function deleteConversationViaSandbox(
 
   try {
     console.log(`[GitArchive] deleteConversationViaSandbox ${workspace}`)
+    const command = `rm -rf "${workspace}"`
     const res = await sandbox.request('/api/tools/bash', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: `rm -rf "${workspace}"`, timeout: 10000 }),
+      body: JSON.stringify({ command, timeout: 10000 }),
       signal: AbortSignal.timeout(15_000),
     })
 
     if (!res.ok) {
       const body = await res.text().catch(() => '')
-      console.log(`[GitArchive] deleteConversationViaSandbox failed:`, body)
+      console.warn(
+        `[GitArchive] deleteConversationViaSandbox HTTP ${res.status} ${res.statusText} ` +
+          `conversationId=${conversationId} workspace=${workspace} command=${JSON.stringify(command)} body=${body.slice(0, 500)}`,
+      )
+      return
+    }
 
+    // HTTP 200 but sandbox may still report a bash failure in the body.
+    const data = (await res.json().catch(() => null)) as {
+      success?: boolean
+      error?: string
+      result?: { output?: string; stderr?: string; exitCode?: number }
+    } | null
+    if (!data || data.success === false) {
+      console.warn(
+        `[GitArchive] deleteConversationViaSandbox bash failed ` +
+          `conversationId=${conversationId} workspace=${workspace} command=${JSON.stringify(command)} ` +
+          `error=${data?.error ?? '<no error>'} exitCode=${data?.result?.exitCode ?? '<n/a>'} ` +
+          `stderr=${(data?.result?.stderr ?? '').slice(0, 500)} output=${(data?.result?.output ?? '').slice(0, 500)}`,
+      )
       return
     }
 

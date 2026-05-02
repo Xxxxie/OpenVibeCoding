@@ -408,7 +408,6 @@ tasksRouter.delete('/:taskId', requireUserEnv, async (c) => {
   // Try to clean up via sandbox (rm -rf workspace dir + git archive sync); fall back to direct API delete
   ;(async () => {
     try {
-      console.log('[TASK] DELETE', existing)
       const { sandboxMode = 'isolated' } = existing
       if (sandboxMode === 'isolated') {
         await deleteArchiveBranch(taskId)
@@ -2536,7 +2535,7 @@ tasksRouter.get('/:taskId/preview-url', requireUserEnv, async (c) => {
       // ── 获取网关 URL ──────────────────────────────────────────────────
       let previewBase: string
       try {
-        previewBase = await scfSandboxManager.ensurePreviewGateway()
+        previewBase = await scfSandboxManager.ensurePreviewGateway(sandbox!)
       } catch {
         const sandboxEnvId = process.env.TCB_ENV_ID || ''
         previewBase = `https://${sandboxEnvId}.service.tcloudbase.com/preview`
