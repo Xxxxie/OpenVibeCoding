@@ -3,38 +3,28 @@
  *
  * 基于 ACP 协议的 OpenCode agent runtime，严格遵守 agent/sandbox 分离原则。
  *
- * 架构：
+ * 架构（"全局 tool override + env 注入"）：
  *
- *   server 进程
- *   │
- *   ├─ opencode acp (子进程, agent 域)
- *   │    │
- *   │    ├─ 内置 read/write/bash/edit/... — 已禁用（per-session agent config）
- *   │    │
- *   │    └─ MCP client → stdio spawn sandbox-mcp-bridge.js
- *   │                      │
- *   │                      ▼ HTTP
- *   │            ┌─────────────────────┐
- *   │            │  Sandbox (SCF)      │
- *   │            │   /api/tools/read   │
- *   │            │   /api/tools/write  │
- *   │            │   /api/tools/bash   │
- *   │            │   /workspace        │
- *   │            └─────────────────────┘
- *   │
- *   └─ IAgentRuntime.chatStream()
- *        │
- *        ▼
- *      1. 为本次 session 准备临时工作目录（放配置 + AGENTS.md）
- *      2. 获取 sandbox instance（从 scfSandboxManager）
- *      3. spawn opencode acp --cwd <临时目录>
- *      4. ACP 握手 → newSession（mcpServers 传入 sandbox-mcp-bridge）
- *      5. setSessionMode('sandboxed') 锁定只能用 sbx_* 工具
- *      6. prompt → 翻译 session/update 为 AgentCallbackMessage
- *      7. 清理临时目录、kill 子进程
+ *   server 启动时：
+ *     ensureOpencodeToolsInstalled()
+ *       └─ 把 read/write/bash/edit/grep/glob 模板拷贝到 ~/.config/opencode/tools/
+ *          （同名 custom tool 覆盖 builtin — 实测已验证）
  *
- * 首版仍保留：如果没有 envId（本地开发），自动退回"无沙箱模式"，工具本地执行。
- * 这样 e2e#1 (本地模式) 与生产沙箱模式可以共存。
+ *   每次 chatStream：
+ *     1. 如果有 envId：scfSandboxManager.getOrCreate()
+ *     2. spawn opencode acp，通过 child env 注入：
+ *          SANDBOX_MODE=1
+ *          SANDBOX_BASE_URL=<沙箱 HTTPS>
+ *          SANDBOX_AUTH_HEADERS_JSON=<凭证 JSON>
+ *     3. opencode 父进程的 env 会继承给所有子进程（MCP 服务等）
+ *     4. 工具文件里读 process.env.SANDBOX_* 决定：本地执行 vs HTTP 转发到沙箱
+ *     5. ACP 握手 → newSession → prompt → 收 session/update 流 → 翻译为 AgentCallbackMessage
+ *
+ * 相比旧方案（per-session 写 .opencode/opencode.json + MCP bridge 子进程）：
+ *   - 不再写 per-session 配置文件（只写一次全局 tools/*.js）
+ *   - 不再启 MCP 子进程（少一层进程 + 少一层 JSON-RPC 序列化）
+ *   - 工具名就是 `read`/`write`/... 与 LLM 训练期望一致
+ *   - 凭证只在进程 env 里，session 结束随进程退出清理
  */
 
 import { v4 as uuidv4 } from 'uuid'
@@ -53,74 +43,48 @@ import {
 import { persistenceService } from '../persistence.service.js'
 import { CloudbaseAgentService } from '../cloudbase-agent.service.js'
 import { getAcpTransportFactory, type AcpTransport } from './acp-transport.js'
-import { createSessionWorkspace, type SessionWorkspace } from './opencode-session-config.js'
+import { ensureOpencodeToolsInstalled } from './opencode-installer.js'
 import { scfSandboxManager, type SandboxInstance } from '../../sandbox/scf-sandbox-manager.js'
 import { spawn } from 'node:child_process'
+import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
 
 // ─── Config ──────────────────────────────────────────────────────────────
 
 const OPENCODE_BIN = process.env.OPENCODE_BIN || 'opencode'
-
-/** 默认模型（OpenCode 模型 id 格式: provider/model[/variant]） */
 const DEFAULT_OPENCODE_MODEL = process.env.OPENCODE_DEFAULT_MODEL || 'moonshot/kimi-k2-0905-preview'
 
-/** 工作空间根（沙箱侧） */
-const SANDBOX_WORKSPACE_ROOT = process.env.SANDBOX_WORKSPACE_ROOT || '/workspace'
+/** 沙箱内工作目录（agent 看到的"当前目录"概念）。相对路径工具都会以此为根。 */
+const SANDBOX_WORKSPACE_ROOT = process.env.SANDBOX_WORKSPACE_ROOT || '.'
 
-// ─── Helpers ─────────────────────────────────────────────────────────────
+// ─── State ───────────────────────────────────────────────────────────────
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
+let toolsInstallPromise: Promise<void> | null = null
 
-/**
- * 解析 sandbox-mcp-bridge.js 的绝对路径。
- *
- * 三种运行形态：
- *   1. 源码（tsx watch dev）：__filename = ...src/agent/runtime/opencode-acp-runtime.ts
- *      → 期望 dist 产物在 ../../../dist/agent/runtime/sandbox-mcp-bridge.js
- *   2. 构建后（node dist/index.js）：__filename = ...dist/index.js
- *      → 在 同目录/agent/runtime/sandbox-mcp-bridge.js
- *   3. 环境变量 override：SANDBOX_MCP_BRIDGE_PATH=...
- */
-function resolveMcpBridgePath(): string {
-  const fromEnv = process.env.SANDBOX_MCP_BRIDGE_PATH
-  if (fromEnv) return fromEnv
-
-  const candidates = [
-    // 1. src 运行：走到项目 dist
-    path.resolve(__dirname, '../../../dist/agent/runtime/sandbox-mcp-bridge.js'),
-    // 2. dist 运行：同目录
-    path.resolve(__dirname, 'sandbox-mcp-bridge.js'),
-    // 3. monorepo root dist
-    path.resolve(__dirname, '../../../../packages/server/dist/agent/runtime/sandbox-mcp-bridge.js'),
-  ]
-  for (const c of candidates) {
-    try {
-      if (fs.existsSync(c)) return c
-    } catch {
-      /* noop */
-    }
+/** 惰性确保全局 tools 已安装；多次调用只执行一次。 */
+function ensureToolsInstalledOnce(): Promise<void> {
+  if (!toolsInstallPromise) {
+    toolsInstallPromise = ensureOpencodeToolsInstalled()
+      .then((r) => {
+        if (r.installed.length || r.forced) {
+          console.log(
+            `[OpencodeAcpRuntime] installed opencode tools to ${r.installDir}: installed=${r.installed.join(',') || '-'} skipped=${r.skipped.join(',') || '-'}`,
+          )
+        }
+      })
+      .catch((err) => {
+        console.error('[OpencodeAcpRuntime] failed to install opencode tools:', err)
+        // Don't reset — broken installer is better than infinite retry loop
+      })
   }
-  // 兜底：返回第一个猜测，spawn 时会报错
-  return candidates[0]
-}
-
-// ─── Types ───────────────────────────────────────────────────────────────
-
-export interface OpencodeAcpRuntimeOptions {
-  /** 工作空间根目录（沙箱内），默认 /workspace */
-  sandboxWorkspaceRoot?: string
+  return toolsInstallPromise
 }
 
 // ─── Runtime ─────────────────────────────────────────────────────────────
 
 export class OpencodeAcpRuntime implements IAgentRuntime {
   readonly name = 'opencode-acp'
-
-  constructor(private readonly runtimeOpts: OpencodeAcpRuntimeOptions = {}) {}
 
   async isAvailable(): Promise<boolean> {
     return new Promise((resolve) => {
@@ -198,11 +162,14 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
     const emit = makeEmitter({ liveCallback, envId, userId, conversationId, turnId })
 
     let transport: AcpTransport | null = null
-    let workspace: SessionWorkspace | null = null
     let sandbox: SandboxInstance | null = null
+    let sessionWorkingDir: string | null = null
 
     try {
-      // 1. 获取沙箱（有 envId 时）
+      // 0. 确保全局 opencode tools 已安装
+      await ensureToolsInstalledOnce()
+
+      // 1. 如果有 envId，获取沙箱
       if (envId) {
         try {
           sandbox = await scfSandboxManager.getOrCreate(conversationId, envId, {
@@ -217,23 +184,37 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
 
       await emit({ type: 'agent_phase', phase: 'preparing' })
 
-      // 2. 创建 per-session 工作目录 + opencode 配置
-      workspace = await createSessionWorkspace({
-        sandbox: sandbox ?? undefined,
-        sandboxWorkspaceRoot: this.runtimeOpts.sandboxWorkspaceRoot ?? SANDBOX_WORKSPACE_ROOT,
-        mcpBridgePath: resolveMcpBridgePath(),
-        localWorkspaceDir: options.cwd,
-      })
+      // 2. 工作目录
+      //    - 沙箱模式：opencode cwd 用临时占位目录（opencode 需要一个本地目录启动，
+      //      但真实读写由 tools 转发到沙箱，不依赖这个目录）
+      //    - 本地模式：用 options.cwd 或临时目录
+      sessionWorkingDir = options.cwd ?? path.join(os.tmpdir(), `opencode-session-${uuidv4()}`)
+      if (!fs.existsSync(sessionWorkingDir)) {
+        fs.mkdirSync(sessionWorkingDir, { recursive: true })
+      }
 
-      // 3. spawn opencode acp
+      // 3. 构造 spawn env — 把沙箱凭证通过 env 注入 opencode 子进程
+      const childEnv: Record<string, string> = {}
+      if (sandbox) {
+        const authHeaders = await sandbox.getAuthHeaders()
+        childEnv.SANDBOX_MODE = '1'
+        childEnv.SANDBOX_BASE_URL = sandbox.baseUrl
+        childEnv.SANDBOX_AUTH_HEADERS_JSON = JSON.stringify(authHeaders)
+        childEnv.SANDBOX_WORKSPACE_ROOT = SANDBOX_WORKSPACE_ROOT
+      } else {
+        childEnv.SANDBOX_MODE = '0'
+      }
+
+      // 4. spawn opencode acp
       const factory = getAcpTransportFactory('local-stdio')
       transport = await factory({
-        cwd: workspace.dir,
+        cwd: sessionWorkingDir,
         signal: abortController.signal,
         debug: process.env.OPENCODE_ACP_DEBUG === '1',
+        env: childEnv,
       })
 
-      // 4. 建立 ACP connection — 这里不挂 fs/terminal 回调（OpenCode 不会调）
+      // 5. 建立 ACP connection
       const conn = new ClientSideConnection(
         () => ({
           sessionUpdate: async (params) => {
@@ -256,7 +237,7 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
         transport.stream,
       )
 
-      // 5. ACP 握手
+      // 6. ACP 握手
       await conn.initialize({
         protocolVersion: 1,
         clientCapabilities: {
@@ -265,23 +246,12 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
         },
       })
 
-      // 6. 创建 session — 此处**不传 mcpServers**，因为我们在 opencode.json 里已经配了
-      //    mcp.sbx（local stdio）。OpenCode 启动时会读 cwd 下的 .opencode/opencode.json。
+      // 7. 创建 session
       const newRes = await conn.newSession({
-        cwd: workspace.dir,
+        cwd: sessionWorkingDir,
         mcpServers: [],
       })
       const opencodeSessionId = newRes.sessionId
-
-      // 7. 切到 sandboxed agent mode（禁用所有内置工具）
-      try {
-        await conn.setSessionMode({
-          sessionId: opencodeSessionId,
-          modeId: workspace.agentMode,
-        })
-      } catch (e) {
-        console.warn('[OpencodeAcpRuntime] setSessionMode failed (continuing):', (e as Error).message)
-      }
 
       // 8. 选择模型
       try {
@@ -306,7 +276,7 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
           stopReason: promptRes.stopReason,
           usage: (promptRes as { _meta?: { usage?: unknown } })._meta?.usage ?? null,
           sandbox: sandbox ? { baseUrl: sandbox.baseUrl, conversationId: sandbox.conversationId } : null,
-          workspaceDir: workspace.dir,
+          workingDir: sessionWorkingDir,
         }),
       })
 
@@ -331,9 +301,10 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
           /* noop */
         }
       }
-      if (workspace) {
+      // 清理临时工作目录（如果是我们自己建的）
+      if (sessionWorkingDir && !options.cwd && sessionWorkingDir.startsWith(os.tmpdir())) {
         try {
-          workspace.cleanup()
+          fs.rmSync(sessionWorkingDir, { recursive: true, force: true })
         } catch {
           /* noop */
         }
