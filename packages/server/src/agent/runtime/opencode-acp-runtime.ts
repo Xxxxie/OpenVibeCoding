@@ -45,6 +45,7 @@ import { CloudbaseAgentService } from '../cloudbase-agent.service.js'
 import { getAcpTransportFactory, type AcpTransport } from './acp-transport.js'
 import { ensureOpencodeToolsInstalled } from './opencode-installer.js'
 import { registerPending, resolvePending, rejectPendingForConversation } from './pending-permission-registry.js'
+import { resolvePendingQuestion, rejectPendingQuestionsForConversation } from './pending-question-registry.js'
 import { scfSandboxManager, type SandboxInstance } from '../../sandbox/scf-sandbox-manager.js'
 import { spawn } from 'node:child_process'
 import os from 'node:os'
@@ -90,6 +91,53 @@ function getLiveCallback(conversationId: string): AgentCallback | null {
 
 function clearLiveCallback(conversationId: string): void {
   liveCallbacks.delete(conversationId)
+}
+
+/**
+ * Per-conversation emitter 注册表：launchAgent 里写入闭包 emit，
+ * 供 routes/acp.ts 的 /internal/ask-user handler 对 ask_user 消息广播。
+ */
+const emitters = new Map<string, (msg: AgentCallbackMessage) => Promise<void>>()
+
+function registerEmitter(conversationId: string, emit: (m: AgentCallbackMessage) => Promise<void>): void {
+  emitters.set(conversationId, emit)
+}
+
+function clearEmitter(conversationId: string): void {
+  emitters.delete(conversationId)
+}
+
+/**
+ * 对外暴露：routes/acp.ts 调此方法给指定 conversation 发 AgentCallbackMessage。
+ * 主要用于 /internal/ask-user endpoint：tool 请求问用户 → emit ask_user → SSE 推前端。
+ */
+export async function emitForConversation(conversationId: string, msg: AgentCallbackMessage): Promise<void> {
+  const emit = emitters.get(conversationId)
+  if (!emit) throw new Error(`no emitter registered for conversation ${conversationId}`)
+  await emit(msg)
+}
+
+/**
+ * Internal-endpoint 共享 token。
+ *
+ * 在 server 启动时生成一次（惰性），通过 env 注入 opencode 子进程。
+ * 子进程的 custom tool 通过 `X-Internal-Token` header 回调 server 时认证。
+ */
+let askUserToken: string | null = null
+export function getAskUserToken(): string {
+  if (!askUserToken) {
+    // 16 字节十六进制，足够强的临时 token
+    askUserToken = cryptoRandomToken()
+  }
+  return askUserToken
+}
+
+function cryptoRandomToken(): string {
+  // 16 bytes hex, no external deps
+  const bytes = new Uint8Array(16)
+  // Node runtime 保证有 crypto.getRandomValues
+  ;(globalThis.crypto as Crypto).getRandomValues(bytes)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
 /** 惰性确保全局 tools 已安装；多次调用只执行一次。 */
@@ -158,11 +206,15 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
   async chatStream(prompt: string, callback: AgentCallback | null, options: AgentOptions): Promise<ChatStreamResult> {
     const conversationId = options.conversationId || uuidv4()
 
-    // Resume path：已有挂起的 agent + 携带 toolConfirmation
-    //   → 不 spawn 新进程，直接 resolve 挂起的 permission Promise
-    //   → opencode 收到 outcome 后继续执行，session/update 流从卡住处继续
+    // Resume path：已有挂起的 agent + 携带 toolConfirmation / askAnswers
+    //   → 不 spawn 新进程，直接 resolve 挂起的 permission Promise / question HTTP
+    //   → opencode 收到 outcome/answers 后继续执行，session/update 流继续
     if (isAgentRunning(conversationId)) {
       const run = getAgentRun(conversationId)!
+
+      // 更新 liveCallback 到新 SSE 流（第一轮的 SSE 可能已关）
+      updateLiveCallback(conversationId, callback)
+
       if (options.toolConfirmation) {
         const resolved = resolvePending(
           conversationId,
@@ -174,18 +226,25 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
             `[OpencodeAcpRuntime] toolConfirmation arrived but no pending registration for interruptId=${options.toolConfirmation.interruptId}`,
           )
         }
-        // 记住本轮的 callback 给后续 session/update 转发：
-        // pending Promise 里关联的 emit 已经在 launchAgent 的闭包里了，
-        // 外部 callback 只有在本次 SSE 流里才能用。
-        // 最简单的做法：更新 registry 里记录的 liveCallback（下一条 AgentCallbackMessage 转发到此）
-        updateLiveCallback(conversationId, callback)
-      } else {
-        // 兜底：没有 toolConfirmation 却进来了——直接返回，让调用方走 observe
-        if (process.env.OPENCODE_ACP_DEBUG) {
-          console.log(
-            `[OpencodeAcpRuntime] chatStream re-entered without toolConfirmation (conv=${conversationId}); returning existing turn`,
-          )
+      }
+
+      if (options.askAnswers) {
+        // askAnswers 结构：{ [assistantMessageId|recordId]: { toolCallId, answers } }
+        // 我们只关心 value 里的 toolCallId + answers
+        for (const entry of Object.values(options.askAnswers)) {
+          const resolved = resolvePendingQuestion(conversationId, entry.toolCallId, entry.answers)
+          if (!resolved) {
+            console.warn(
+              `[OpencodeAcpRuntime] askAnswers arrived but no pending question for toolCallId=${entry.toolCallId}`,
+            )
+          }
         }
+      }
+
+      if (!options.toolConfirmation && !options.askAnswers && process.env.OPENCODE_ACP_DEBUG) {
+        console.log(
+          `[OpencodeAcpRuntime] chatStream re-entered without resume payload (conv=${conversationId}); returning existing turn`,
+        )
       }
       return { turnId: run.turnId, alreadyRunning: true }
     }
@@ -227,6 +286,7 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
     // 第一轮由 chatStream 调用 registerLiveCallback 写入；第二轮（resume）由
     // chatStream 的 resume 分支更新。
     const emit = makeEmitter({ envId, userId, conversationId, turnId })
+    registerEmitter(conversationId, emit)
 
     let transport: AcpTransport | null = null
     let sandbox: SandboxInstance | null = null
@@ -260,7 +320,7 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
         fs.mkdirSync(sessionWorkingDir, { recursive: true })
       }
 
-      // 3. 构造 spawn env — 把沙箱凭证通过 env 注入 opencode 子进程
+      // 3. 构造 spawn env — 把沙箱凭证 + AskUser 回调 URL 通过 env 注入 opencode 子进程
       const childEnv: Record<string, string> = {}
       if (sandbox) {
         const authHeaders = await sandbox.getAuthHeaders()
@@ -270,6 +330,15 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
         childEnv.SANDBOX_WORKSPACE_ROOT = SANDBOX_WORKSPACE_ROOT
       } else {
         childEnv.SANDBOX_MODE = '0'
+      }
+
+      // AskUser 内部 HTTP 回调：question custom tool execute 时 fetch 此 URL
+      // URL 从 ASK_USER_BASE_URL env（server 启动时设置）+ path + 查询参数拼成
+      const askUserBase = process.env.ASK_USER_BASE_URL || ''
+      if (askUserBase) {
+        childEnv.ASK_USER_URL = `${askUserBase.replace(/\/$/, '')}/api/agent/internal/ask-user`
+        childEnv.ASK_USER_TOKEN = getAskUserToken()
+        childEnv.ASK_USER_CONVERSATION_ID = conversationId
       }
 
       // 4. spawn opencode acp
@@ -380,8 +449,14 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
         conversationId,
         isAbort ? 'Aborted' : `runtime error: ${error?.message || error}`,
       )
-      if (rejectedCount > 0 && process.env.OPENCODE_ACP_DEBUG) {
-        console.log(`[OpencodeAcpRuntime] rejected ${rejectedCount} pending permissions due to error`)
+      const rejectedQ = rejectPendingQuestionsForConversation(
+        conversationId,
+        isAbort ? 'Aborted' : `runtime error: ${error?.message || error}`,
+      )
+      if ((rejectedCount > 0 || rejectedQ > 0) && process.env.OPENCODE_ACP_DEBUG) {
+        console.log(
+          `[OpencodeAcpRuntime] rejected ${rejectedCount} pending permissions + ${rejectedQ} pending questions due to error`,
+        )
       }
       try {
         await emit({
@@ -408,8 +483,9 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
           /* noop */
         }
       }
-      // 清掉 liveCallback 注册，避免 map 泄漏
+      // 清掉 liveCallback + emitter 注册，避免 map 泄漏
       clearLiveCallback(conversationId)
+      clearEmitter(conversationId)
       setTimeout(() => removeAgent(conversationId, turnId), 5000)
     }
   }

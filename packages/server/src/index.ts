@@ -146,6 +146,12 @@ async function backfillApiKeys() {
 
 const PORT = Number(process.env.PORT) || 3001
 
+// 让 OpencodeAcpRuntime 知道自己的 base URL（用于 spawn opencode 时注入 ASK_USER_URL）。
+// 仅 127.0.0.1 回环，opencode 子进程同机运行。
+if (!process.env.ASK_USER_BASE_URL) {
+  process.env.ASK_USER_BASE_URL = `http://127.0.0.1:${PORT}`
+}
+
 serve({ fetch: app.fetch, port: PORT }, () => {
   console.log(`Server running on http://localhost:${PORT}`)
   if (serveStaticFiles) {

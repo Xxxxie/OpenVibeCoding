@@ -240,7 +240,8 @@ npx tsx scripts/test-tool-confirm-e2e.mts
 |---|---|
 | ToolConfirm UI 回调 | ✅ **已接入** — 见 §12 |
 | ToolConfirmation resume 流程 | ✅ **已接入** — 见 §12 |
-| askAnswers resume | ❌ 未接入 |
+| AskUserQuestion（询问用户） | ✅ **已接入** — 见 §13 |
+| askAnswers resume | ✅ **已接入** — 见 §13 |
 | coding-mode 模板初始化 | ❌ 未集成 |
 | 消息持久化到 tasks | ⚠️ 只 stream events 落库 |
 | tool override 的版本升级 hash 匹配 | ✅ 已实现（hashFile 比较） |
@@ -249,7 +250,7 @@ npx tsx scripts/test-tool-confirm-e2e.mts
 ## 10. 后续方向
 
 1. ~~接 ToolConfirm UI~~ ✅ 完成
-2. **askAnswers / AskUserQuestion resume 流程**（2-3 天）
+2. ~~AskUserQuestion resume 流程~~ ✅ 完成
 3. **消息持久化对齐 Tencent 路线**（2-3 天）
 4. **更多 ACP agent**（Claude Code / Gemini / Qwen Code；每个 1-2 天，runtime 骨架复用）
 5. **前端 Runtime 选择器**（0.5 天）
@@ -358,3 +359,119 @@ OVERALL: PASS
 - **Custom tool override 绕开 permission 系统**：`~/.config/opencode/tools/write.ts` 覆盖 builtin write 后，permission 检查是内置代码路径，custom tool 是独立路径，**不会触发 requestPermission**。沙箱场景里的 write 转发就无权限拦截（这是预期行为：沙箱本身就隔离，无需再加一层）。
 - **Resume 不超时**：runtime 目前没有"挂起超过 N 分钟自动 reject"机制。如果用户长时间不回应，opencode 子进程会一直占用。未来可加 `PENDING_TIMEOUT_MS`。
 - **多路径挂起**：同一 conversation 同时只能一个 pending（opencode 串行执行工具）。registry 内部已防重，但多路 SSE 断开重连场景未深度测试。
+
+---
+
+## 13. AskUserQuestion（已实现）
+
+### 13.1 问题
+
+OpenCode 内置 `question` tool（`packages/opencode/src/tool/question.ts`），但：
+- 在 ACP 模式默认禁用（`OPENCODE_CLIENT=acp` 导致 tool registry 不注册）
+- 即便开启，opencode 的 ACP agent 层 **没有订阅** `Question.Event.Asked`
+  事件总线，LLM 调 question tool 时 `Deferred` 永远不会 resolve，agent 会死锁
+
+结论：**OpenCode 原生 ACP 不支持 AskUserQuestion**。需要我们自己实现。
+
+### 13.2 设计：Custom tool + 内部 HTTP endpoint
+
+与 ToolConfirm（§12）的 ACP JSON-RPC 挂起不同，AskUserQuestion 通过**内部 HTTP 回调**挂起：
+
+```
+┌─ Round 1 ─────────────────────────────────────────────────────────────┐
+│                                                                        │
+│  opencode 子进程 LLM 调 question 工具                                   │
+│   ↓                                                                    │
+│  ~/.config/opencode/tools/question.ts (custom override)                │
+│   ↓ execute 里 fetch                                                   │
+│  POST http://127.0.0.1:<port>/api/agent/internal/ask-user              │
+│        headers: X-Internal-Token: <shared token>                       │
+│        body: { conversationId, toolCallId, questions }                 │
+│   ↓                                                                    │
+│  server handler:                                                       │
+│    1. emitForConversation(convId, {type:'ask_user', id, input})       │
+│       → AgentCallbackMessage → 前端 SSE(sessionUpdate='ask_user')     │
+│    2. registerPendingQuestion(convId, toolCallId, res)                │
+│       → HTTP response 挂起（不 send）                                 │
+│                                                                        │
+│  [前端 AskUserForm 展示；用户填写；Round 1 的 SSE 流"轻松"等待]          │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌─ Round 2 ─────────────────────────────────────────────────────────────┐
+│                                                                        │
+│  前端 submit answers → POST /session/prompt                           │
+│    body.askAnswers = { <toolCallId>: { toolCallId, answers } }       │
+│                                                                        │
+│  routes/acp.ts 透传 options.askAnswers                                │
+│   ↓                                                                    │
+│  runtime.chatStream                                                   │
+│    isAgentRunning + options.askAnswers 非空                           │
+│     → resolvePendingQuestion(convId, toolCallId, answers)             │
+│     → HTTP res.json({ ok: true, answers })                           │
+│                                                                        │
+│  [opencode 子进程 question.ts execute 的 fetch 收到响应]                │
+│   ↓                                                                    │
+│  tool output: "User answered: \"Which DB?\" → PostgreSQL. You can..." │
+│   ↓                                                                    │
+│  LLM 继续推理，引用用户答案                                            │
+│   ↓                                                                    │
+│  最终 result → 第二轮 SSE 流关闭                                       │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### 13.3 核心代码
+
+**`pending-question-registry.ts`**：独立于 permission registry，因为：
+- Permission 存 ACP JSON-RPC Promise resolver
+- Question 存 HTTP response resolver（用户填答案后 res.json 返回 opencode 子进程）
+
+**`opencode-tool-templates/question.ts`**：新增 custom tool
+- 参数 schema 与 opencode 原生 question tool 一致（`header`/`question`/`options`/`multiple`）
+- execute 内 fetch 内部 endpoint，阻塞等答案
+- 返回格式化文本 + metadata.answers
+
+**`routes/acp.ts`**：新增 `POST /api/agent/internal/ask-user`
+- 认证：X-Internal-Token（仅 127.0.0.1 回环）
+- 中间件豁免 `requireUserEnv`（它是 agent 内部调用，不走用户会话）
+- 挂起 HTTP response 10 分钟，超时 408
+
+**`opencode-acp-runtime.ts`**：
+- spawn 时注入 `ASK_USER_URL`/`ASK_USER_TOKEN`/`ASK_USER_CONVERSATION_ID`
+- `chatStream` resume 分支处理 `options.askAnswers`
+- 暴露 `emitForConversation` 给 routes 用（推 ask_user 给前端 SSE）
+
+### 13.4 e2e 验证
+
+`scripts/test-ask-user-e2e.mts`：
+
+```
+Round 1:
+  +11670ms  tool_use id=question:0 name=question
+  +15092ms  ★ ask_user id=question:0 questions=[{header:Database, options:[PostgreSQL, MySQL]}]
+  [agent suspended 3s no result]
+
+模拟用户选 "PostgreSQL"
+
+Round 2 (askAnswers):
+  alreadyRunning=true
+  +18149ms  tool_result: "User answered: Which database to use? → PostgreSQL..."
+  +20341ms  tool_use skill (LLM 继续调用后续工具)
+  +36349ms  result: end_turn
+  LLM 文本: "Great! You've chosen PostgreSQL. Let me provide recommendations..."
+
+  ask_user received:             PASS
+  agent suspended after:         PASS (no result 3s)
+  round2 resume path:            PASS (alreadyRunning=true)
+  tool_result with user answer:  PASS
+  final result event:            PASS
+  no error event:                PASS
+  text mentions answer:          PASS (bonus)
+OVERALL: PASS
+```
+
+### 13.5 已知边界
+
+- **LLM 的主动性依赖 prompt 明确指示**：默认 Moonshot/Kimi 倾向于自己拍板，不会主动提问。需要在用户 prompt 里写"请使用 question 工具征询我..."才会调用。对于生产 UX，建议在 system prompt 里明确鼓励 question 工具的使用场景。
+- **超时 10 分钟**：可通过 `ASK_USER_TIMEOUT_MS` env 覆盖。超时后 opencode tool 拿到 `408` 响应，会把 "timeout" 告知 LLM，由 LLM 决定是否重试。
+- **token 静态**：runtime 首次 `getAskUserToken()` 调用时生成，此后不变。服务进程重启会重新生成。生产部署下应通过 env 显式注入稳定 token。
+- **多路 SSE 重连**：Round 1 SSE 断了后，用户重连 GET /observe/:sessionId 能继续收事件，但已经 emit 过的 ask_user 不会重放（它已落 stream events DB，由 observe 的 replay 逻辑带出）。

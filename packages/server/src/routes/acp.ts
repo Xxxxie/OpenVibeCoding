@@ -17,6 +17,8 @@ import { CloudbaseAgentService, getSupportedModels } from '../agent/cloudbase-ag
 import { persistenceService } from '../agent/persistence.service.js'
 import { getAgentRun } from '../agent/agent-registry.js'
 import { agentRuntimeRegistry } from '../agent/runtime/index.js'
+import { emitForConversation, getAskUserToken } from '../agent/runtime/opencode-acp-runtime.js'
+import { registerPendingQuestion } from '../agent/runtime/pending-question-registry.js'
 import { loadConfig } from '../config/store.js'
 import { getDb } from '../db/index.js'
 import { nanoid } from 'nanoid'
@@ -25,8 +27,21 @@ import { requireUserEnv, type AppEnv } from '../middleware/auth.js'
 const acp = new Hono<AppEnv>()
 
 // 除 /health 与 /runtimes 外，所有 ACP 路由都需要登录 + 用户环境校验
+// /internal/* 走独立 127.0.0.1 + shared token 认证（绕过用户会话）
 acp.use('/*', async (c, next) => {
-  if (c.req.path.endsWith('/health') || c.req.path.endsWith('/config') || c.req.path.endsWith('/runtimes')) {
+  const p = c.req.path
+  if (p.endsWith('/health') || p.endsWith('/config') || p.endsWith('/runtimes')) {
+    return next()
+  }
+  if (p.includes('/internal/')) {
+    // 仅接受 127.0.0.1 + 正确 token 的请求
+    // 注意：Hono 不直接提供 remote addr 但可从 header X-Forwarded-For 判断；
+    // 这里更务实 — 用 token 作为主要防线（opencode 子进程是我们自己 spawn 的）
+    const expected = getAskUserToken()
+    const got = c.req.header('X-Internal-Token')
+    if (!expected || got !== expected) {
+      return c.json({ error: 'Unauthorized internal call' }, 401)
+    }
     return next()
   }
   // If using API key auth, verify it has 'acp' scope
@@ -794,6 +809,74 @@ acp.get('/runtimes', async (c) => {
   return c.json({
     default: defaultRuntime.name,
     runtimes: items,
+  })
+})
+
+/**
+ * POST /api/agent/internal/ask-user
+ *
+ * **只给 opencode 子进程的 question custom tool 调**。server 本地回环。
+ * 认证：X-Internal-Token header（ASK_USER_TOKEN env，runtime 启动时生成，同 env 注入子进程）
+ *
+ * 行为：
+ *   1. 验证 conversationId 对应的 agent 还活着
+ *   2. 通过 runtime.emit 发 ask_user AgentCallbackMessage → SSE 推给前端
+ *   3. 注册 PendingQuestion，挂起当前 HTTP response 不返回
+ *   4. 当用户答复（下一轮 prompt.askAnswers 到达）触发 resolvePendingQuestion
+ *      → 本 handler 的 res.json(answers) 返回给 opencode 子进程
+ *
+ * Timeout：默认 10 分钟（可由 ASK_USER_TIMEOUT_MS env 覆盖）
+ */
+acp.post('/internal/ask-user', async (c) => {
+  const body = await c.req.json<{
+    conversationId: string
+    toolCallId: string
+    questions: unknown[]
+  }>()
+  const { conversationId, toolCallId, questions } = body
+
+  if (!conversationId || !toolCallId || !Array.isArray(questions)) {
+    return c.json({ error: 'conversationId, toolCallId, questions required' }, 400)
+  }
+
+  const run = getAgentRun(conversationId)
+  if (!run || run.status !== 'running') {
+    return c.json({ error: 'no active agent for conversation' }, 409)
+  }
+
+  // emit ask_user 事件 → SSE 推给前端
+  try {
+    await emitForConversation(conversationId, {
+      type: 'ask_user',
+      id: toolCallId,
+      input: { questions },
+    })
+  } catch (e) {
+    console.error('[internal/ask-user] emit failed:', e)
+    return c.json({ error: 'emit failed' }, 500)
+  }
+
+  // 挂起：注册一个 pending question，等 runtime.chatStream(askAnswers) 来 resolve
+  const timeoutMs = Number(process.env.ASK_USER_TIMEOUT_MS || 10 * 60 * 1000)
+  return await new Promise<Response>((resolve) => {
+    const timer = setTimeout(() => {
+      resolve(c.json({ error: 'timeout waiting for user answer' }, 408))
+    }, timeoutMs)
+
+    registerPendingQuestion({
+      conversationId,
+      toolCallId,
+      questions,
+      createdAt: Date.now(),
+      resolve: (answers) => {
+        clearTimeout(timer)
+        resolve(c.json({ ok: true, answers }))
+      },
+      reject: (reason) => {
+        clearTimeout(timer)
+        resolve(c.json({ error: reason }, 500))
+      },
+    })
   })
 })
 
