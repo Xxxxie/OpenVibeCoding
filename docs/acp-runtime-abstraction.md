@@ -242,8 +242,8 @@ npx tsx scripts/test-tool-confirm-e2e.mts
 | ToolConfirmation resume 流程 | ✅ **已接入** — 见 §12 |
 | AskUserQuestion（询问用户） | ✅ **已接入** — 见 §13 |
 | askAnswers resume | ✅ **已接入** — 见 §13 |
+| 消息持久化 / 前端会话历史 | ✅ **已接入** — 见 §14 |
 | coding-mode 模板初始化 | ❌ 未集成 |
-| 消息持久化到 tasks | ⚠️ 只 stream events 落库 |
 | tool override 的版本升级 hash 匹配 | ✅ 已实现（hashFile 比较） |
 | 首次安装报告日志 | ✅ 已输出 |
 
@@ -251,7 +251,7 @@ npx tsx scripts/test-tool-confirm-e2e.mts
 
 1. ~~接 ToolConfirm UI~~ ✅ 完成
 2. ~~AskUserQuestion resume 流程~~ ✅ 完成
-3. **消息持久化对齐 Tencent 路线**（2-3 天）
+3. ~~消息持久化对齐 Tencent 路线~~ ✅ 完成
 4. **更多 ACP agent**（Claude Code / Gemini / Qwen Code；每个 1-2 天，runtime 骨架复用）
 5. **前端 Runtime 选择器**（0.5 天）
 
@@ -479,3 +479,133 @@ OVERALL: PASS
 - **超时 10 分钟**：可通过 `ASK_USER_TIMEOUT_MS` env 覆盖。超时后 opencode tool 拿到 `408` 响应，会把 "timeout" 告知 LLM，由 LLM 决定是否重试。
 - **token 静态**：runtime 首次 `getAskUserToken()` 调用时生成，此后不变。服务进程重启会重新生成。生产部署下应通过 env 显式注入稳定 token。
 - **多路 SSE 重连**：Round 1 SSE 断了后，用户重连 GET /observe/:sessionId 能继续收事件，但已经 emit 过的 ask_user 不会重放（它已落 stream events DB，由 observe 的 replay 逻辑带出）。
+
+---
+
+## 14. 消息持久化（已实现）
+
+### 14.1 目标
+
+让 OpenCode runtime 的会话历史与 Tencent SDK runtime **完全对齐**：
+- 同一个 `vibe_agent_messages` 集合
+- 同一个 `UnifiedMessageRecord` 结构
+- 前端 `GET /api/tasks/:taskId/messages` 零改动读取
+
+### 14.2 架构（对齐 Tencent 的三个时间点）
+
+```
+chatStream(prompt, options)
+    │
+    ├─ findLastRecordIds(convId, envId, userId)    ← 找上轮 record 做 replyTo 链
+    │
+    ├─ preSavePendingRecords({ prompt, prevRecordId, lastAssistantRecordId })
+    │       └─ DB: user(done) + assistant(pending, parts=[])
+    │       └─ 返回 { userRecordId, assistantRecordId }
+    │
+    ├─ turnId = assistantRecordId                  ← 与 Tencent 一致
+    │
+    ├─ launchAgent 后台执行:
+    │      ├─ new OpencodeMessageBuilder({ assistantRecordId })
+    │      ├─ 每个事件:
+    │      │    ├─ SSE 推送（前端实时）
+    │      │    ├─ stream_events 落库（observe 重连用）
+    │      │    └─ builder.pushEvent(msg)         ← 累积 parts
+    │      └─ tool_result 触发 builder.flushToDb() ← 里程碑快照
+    │
+    └─ finally:
+           └─ builder.finalize('done' | 'error' | 'cancel')
+                  ├─ setRecordParts(turnId, finalParts)
+                  └─ finalizePendingRecords(turnId, status)
+```
+
+### 14.3 AgentCallbackMessage → UnifiedMessagePart 映射
+
+| 事件 | contentType | content | metadata |
+|---|---|---|---|
+| `text` (多次 chunk) | 合并后 `'text'` | 完整文本 | `{id, type:'message', role:'assistant'}` |
+| `thinking` | `'reasoning'` | 思考内容 | - |
+| `tool_use` | `'tool_call'` | `JSON.stringify(input)` | `{toolCallName, toolName, input, status:'in_progress'}` + `toolCallId` |
+| `tool_input_update` | 原 tool_call 就地更新 | 更新 content 和 metadata.input | - |
+| `tool_result` | `'tool_result'` | 输出文本 | `{status, isError}` + `toolCallId` |
+| 其他 | 不进 parts | - | stream_events 已处理实时展示 |
+
+**顺序保持**：text chunks 累积到 `currentTextBuffer`，遇到 tool_use 时 flush 成一个 part，保持 `[text(P1), tool_call, tool_result, text(P2)]` 这种真实对话结构。
+
+### 14.4 Resume 场景
+
+第二轮 chatStream（带 toolConfirmation / askAnswers）**不重新 preSave**：
+
+```ts
+if (isAgentRunning(conversationId)) {
+  // 同一个 agent 还活着：resolve pending promise
+  // builder 还在上一轮的闭包里，继续累积事件
+  // turnId 沿用 run.turnId (即首轮的 assistantRecordId)
+  return { turnId: run.turnId, alreadyRunning: true }
+}
+// 非 resume 才 preSave
+```
+
+从同一个 assistantRecordId 继续写 parts，所有后续事件（tool_call/result/text）都追加在同一条 assistant record 上。
+
+### 14.5 核心代码
+
+**`opencode-message-builder.ts`**（新增）
+- class `OpencodeMessageBuilder` — 累积 parts + 落库
+- `pushEvent(msg)` — 把 AgentCallbackMessage 加入内部状态
+- `flushToDb()` — 写当前快照到 DB（tool_result 后触发）
+- `finalize(status)` — 关闭 builder + 改 record status
+- `findLastRecordIds(convId, envId, userId)` — 找上轮 record 维护 replyTo
+
+**`persistence.service.ts`**（改动）
+- 新增 public `setRecordParts(recordId, parts)` — 非 Claude SDK runtime 用来一次性替换 parts（JSONL 那套不走）
+
+**`opencode-acp-runtime.ts`**（改动）
+- `chatStream`: 非 resume 分支 `preSavePendingRecords` → turnId = assistantRecordId
+- `launchAgent`: 创建 `OpencodeMessageBuilder`；`makeEmitter` 接受 builder 参数并在每个事件后 `pushEvent` + tool_result 时 flush；finally 里 `finalize(status)`
+- 错误/cancel 映射到 `'error'` / `'cancel'` status
+
+### 14.6 e2e 验证
+
+`scripts/test-persistence-e2e.mts`：
+
+```
+records count: 2
+  - user      status=done  parts=1  [text]
+  - assistant status=done  parts=3  [tool_call, tool_result, text]
+
+frontend convert result: 2 TaskMessage
+  user parts:  text
+  agent parts: tool_call,tool_result,text
+
+assertions (10/10 PASS):
+  records >= 2:                       PASS
+  user record exists:                 PASS
+  user text part w/ prompt content:   PASS
+  assistant record exists:            PASS
+  assistant status='done':            PASS
+  assistant has text part:            PASS
+  assistant has tool_call part:       PASS
+  assistant has tool_result part:     PASS
+  assistant.replyTo == userRecordId:  PASS
+  frontend convert works:             PASS
+
+OVERALL: PASS
+```
+
+### 14.7 与 stream_events 的分工
+
+两条数据通道保持独立，**各司其职**：
+
+| 集合 | 用途 | 生命周期 |
+|---|---|---|
+| `vibe_agent_messages` | 永久会话历史；前端 `/api/tasks/:id/messages` 读 | 永久 |
+| `vibe_agent_stream_events` | 实时 SSE；observe 重连时 replay | turn 完成后清理（延迟 5s） |
+
+两者都在同个事件触发时一起写，**没有事务**（观察到一致性不严格也能接受 — stream_events 丢了最多影响重连丢几条事件，不影响最终历史）。
+
+### 14.8 已知边界
+
+- **无超时落库**：当前只在 tool_result 和 finalize 时落库。如果 LLM 长时间只发 text chunk 不调工具 + server 中途崩溃，会丢掉这段 text（但 stream_events 仍在，重启后可补偿）。如需更强保障可加"每 5 秒定时 flush"。
+- **丢 result 事件的兜底**：如果 opencode 异常退出没发 result，`finally` 里的 finalize 会调 setRecordParts，status 视错误路径设为 `error` / `cancel`。
+- **并发写保护**：setRecordParts 用 `where recordId update`（CloudBase 是原子的）。同一 conversation 串行 turn（isAgentRunning 保护），不会有并发冲突。
+- **Resume 场景 parts 保持完整**：同一 builder 闭包在 resume 期间继续累积，tool_call→tool_result→更多 text 都在同一 assistant record 上，结构一致。

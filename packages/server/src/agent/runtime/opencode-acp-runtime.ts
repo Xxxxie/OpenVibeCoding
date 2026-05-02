@@ -46,6 +46,7 @@ import { getAcpTransportFactory, type AcpTransport } from './acp-transport.js'
 import { ensureOpencodeToolsInstalled } from './opencode-installer.js'
 import { registerPending, resolvePending, rejectPendingForConversation } from './pending-permission-registry.js'
 import { resolvePendingQuestion, rejectPendingQuestionsForConversation } from './pending-question-registry.js'
+import { OpencodeMessageBuilder, findLastRecordIds } from './opencode-message-builder.js'
 import { scfSandboxManager, type SandboxInstance } from '../../sandbox/scf-sandbox-manager.js'
 import { spawn } from 'node:child_process'
 import os from 'node:os'
@@ -249,7 +250,34 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
       return { turnId: run.turnId, alreadyRunning: true }
     }
 
-    const turnId = uuidv4()
+    // 非 resume：preSave user + assistant(pending) 记录，取 assistantRecordId 作为 turnId
+    // (与 Tencent SDK runtime 一致：turnId == assistantMessageId)
+    let preSaved: { userRecordId: string; assistantRecordId: string } | null = null
+    if (options.envId) {
+      try {
+        // 找上一轮 record ids，维护 replyTo / parentId 链
+        const { prevRecordId, lastAssistantRecordId } = await findLastRecordIds(
+          conversationId,
+          options.envId,
+          options.userId || 'anonymous',
+        )
+        preSaved = await persistenceService.preSavePendingRecords({
+          conversationId,
+          envId: options.envId,
+          userId: options.userId || 'anonymous',
+          prompt,
+          prevRecordId,
+          lastAssistantRecordId,
+        })
+      } catch (e) {
+        console.warn(
+          '[OpencodeAcpRuntime] preSavePendingRecords failed (continuing without persistence):',
+          (e as Error).message,
+        )
+      }
+    }
+
+    const turnId = preSaved?.assistantRecordId ?? uuidv4()
     const abortController = new AbortController()
 
     registerAgent({
@@ -282,11 +310,26 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
     const userId = options.userId || 'anonymous'
     const modelId = options.model || DEFAULT_OPENCODE_MODEL
 
+    // 消息持久化 builder：累积事件 → UnifiedMessagePart[] → 落 messages 集合
+    // turnId 即是 preSave 返回的 assistantRecordId
+    const messageBuilder = envId
+      ? new OpencodeMessageBuilder({
+          conversationId,
+          assistantRecordId: turnId,
+          envId,
+          userId,
+        })
+      : null
+
     // emit 每次动态取 liveCallback（resume 时回调会被替换）
     // 第一轮由 chatStream 调用 registerLiveCallback 写入；第二轮（resume）由
     // chatStream 的 resume 分支更新。
-    const emit = makeEmitter({ envId, userId, conversationId, turnId })
+    // 同时把消息喂给 messageBuilder 做持久化
+    const emit = makeEmitter({ envId, userId, conversationId, turnId, messageBuilder })
     registerEmitter(conversationId, emit)
+
+    // 记录最终 record 状态；finally 里用它调 messageBuilder.finalize()
+    let finalRecordStatus: 'done' | 'error' | 'cancel' = 'error'
 
     let transport: AcpTransport | null = null
     let sandbox: SandboxInstance | null = null
@@ -441,6 +484,7 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
       })
 
       completeAgent(conversationId, 'completed')
+      finalRecordStatus = 'done'
     } catch (error: any) {
       const isAbort = abortController.signal.aborted || error?.name === 'AbortError'
       console.error('[OpencodeAcpRuntime] launchAgent error:', error)
@@ -467,6 +511,7 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
         /* noop */
       }
       completeAgent(conversationId, isAbort ? 'cancelled' : 'error', String(error?.message || error))
+      finalRecordStatus = isAbort ? 'cancel' : 'error'
     } finally {
       if (transport) {
         try {
@@ -481,6 +526,14 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
           fs.rmSync(sessionWorkingDir, { recursive: true, force: true })
         } catch {
           /* noop */
+        }
+      }
+      // 消息持久化 finalize：写入最终 parts + 更新 record status
+      if (messageBuilder) {
+        try {
+          await messageBuilder.finalize(finalRecordStatus)
+        } catch (e) {
+          console.error('[OpencodeAcpRuntime] messageBuilder.finalize error:', e)
         }
       }
       // 清掉 liveCallback + emitter 注册，避免 map 泄漏
@@ -565,15 +618,29 @@ function makeEmitter(ctx: {
   userId: string
   conversationId: string
   turnId: string
+  messageBuilder: OpencodeMessageBuilder | null
 }): (msg: AgentCallbackMessage) => Promise<void> {
-  const { envId, userId, conversationId, turnId } = ctx
+  const { envId, userId, conversationId, turnId, messageBuilder } = ctx
   return async (msg) => {
     const enriched: AgentCallbackMessage = {
       ...msg,
       sessionId: conversationId,
       assistantMessageId: turnId,
     }
-    // 动态取 liveCallback：resume 时第二轮 SSE 的 callback 会替换第一轮的
+
+    // 1. 喂给消息 builder（持久化）
+    if (messageBuilder) {
+      messageBuilder.pushEvent(enriched)
+      // tool_result 是一个里程碑 — 触发一次 flushToDb 让 DB 反映最新状态
+      // （即使 server 中途崩溃，最坏丢失最后一段 text，下次开会话仍有结构化历史）
+      if (msg.type === 'tool_result') {
+        messageBuilder.flushToDb().catch((e) => {
+          console.error('[OpencodeAcpRuntime] flushToDb error:', e)
+        })
+      }
+    }
+
+    // 2. 动态取 liveCallback：resume 时第二轮 SSE 的 callback 会替换第一轮的
     const liveCallback = getLiveCallback(conversationId)
     if (liveCallback) {
       try {

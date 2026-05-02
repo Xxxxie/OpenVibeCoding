@@ -507,6 +507,14 @@ export class PersistenceService {
     await collection.where({ recordId: _.eq(recordId) }).update({ parts, updateTime: Date.now() })
   }
 
+  /**
+   * Public: 完全替换指定 record 的 parts 数组（用于非 Claude SDK runtime，
+   * 它们不写 JSONL，需要直接在内存累积 parts 后一次性写入 DB）。
+   */
+  async setRecordParts(recordId: string, parts: UnifiedMessagePart[]): Promise<void> {
+    await this.replacePartsInRecord(recordId, parts)
+  }
+
   // ========== Message Grouping ==========
 
   private groupMessages(messages: CodeBuddyMessage[]): CodeBuddyMessage[][] {
