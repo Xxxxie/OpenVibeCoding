@@ -287,20 +287,32 @@ export async function findLastRecordIds(
  * 为什么需要：OpenCode 每次 chatStream 都 newSession（空白上下文）。如果不注入
  * 历史，LLM 无法回答"上一轮我说过什么"。
  *
- * 格式（人类可读、模型容易理解的 transcript）：
- *   Below is the prior conversation history. Please take it into account when
- *   responding to the new user message.
+ * 格式（Markdown 分层，模型自然理解）：
+ *   Below is the prior conversation history. Use it as context when responding.
  *
- *   [History]
- *   User: 你好，我叫王小明
- *   Assistant: 你好王小明，有什么我可以帮你的？
- *   Tool call: AskUserQuestion(...)
- *   Tool result: User answered: 1+1=2
+ *   ---
  *
- *   [Current user message]
+ *   ## Turn 1
+ *
+ *   **User:** 你好，我叫王小明
+ *
+ *   **Assistant:** 你好王小明，有什么我可以帮你的？
+ *
+ *   [Tool call] AskUserQuestion
+ *     params: question, header, options, multiSelect
+ *
+ *   [Tool result] AskUserQuestion — completed (28 bytes)
+ *
+ *   ---
+ *
+ *   ## Current user message
+ *
  *   <实际 prompt>
  *
- * 只截取文本 + 工具调用摘要，避免塞太长的 tool output 到 context。
+ * 安全截断策略：
+ *   - tool_call：只输出工具名 + 参数名列表，**不包含参数值**（避免 JSON 截断半截）
+ *   - tool_result：输出工具名 + status + 字节数，**不输出原始内容**（避免 context 爆表）
+ *   - reasoning：完全跳过（LLM 已消化，再放进去是噪声）
  */
 export async function buildHistoryContextPrompt(
   conversationId: string,
@@ -316,40 +328,62 @@ export async function buildHistoryContextPrompt(
     const records = await persistenceService.loadDBMessages(conversationId, envId, userId, maxHistoryRecords)
     if (records.length === 0) return newPrompt
 
-    const lines: string[] = []
-    for (const r of records) {
-      // 排除本轮刚 preSave 的 record（user 已 done 但不是历史；assistant 是空 pending）
-      if (excludeRecordIds?.has(r.recordId)) continue
-      // 跳过未完成的（pending/error/cancel）record，它们的 parts 不可靠
-      if (r.status !== 'done') continue
+    // 过滤掉被排除的 record 和非 done 状态
+    const usableRecords = records.filter((r) => {
+      if (excludeRecordIds?.has(r.recordId)) return false
+      if (r.status !== 'done') return false
+      return true
+    })
 
-      const roleLabel = r.role === 'user' ? 'User' : 'Assistant'
-      // 遍历 parts，把 text / tool_call / tool_result 都转为可读摘要
+    if (usableRecords.length === 0) return newPrompt
+
+    // 把 records 按"user + 其后的 assistant"分组成 turns
+    // 策略：遇到 user record 就开启新 turn（turn number 随之递增）
+    const sections: string[] = []
+    let turnNumber = 0
+    let currentTurnLines: string[] = []
+
+    const flushTurn = () => {
+      if (currentTurnLines.length === 0) return
+      sections.push(`## Turn ${turnNumber}\n\n${currentTurnLines.join('\n\n')}`)
+      currentTurnLines = []
+    }
+
+    for (const r of usableRecords) {
+      if (r.role === 'user') {
+        // 开新 turn
+        flushTurn()
+        turnNumber += 1
+        currentTurnLines = []
+      }
+
       for (const p of r.parts || []) {
         if (p.contentType === 'text' && p.content) {
-          lines.push(`${roleLabel}: ${p.content.trim()}`)
-        } else if (p.contentType === 'reasoning' && p.content) {
-          // thinking 段不放进 context（太长且 LLM 已经消化过了）
-          continue
+          const rolePrefix = r.role === 'user' ? '**User:**' : '**Assistant:**'
+          currentTurnLines.push(`${rolePrefix} ${p.content.trim()}`)
+        } else if (p.contentType === 'reasoning') {
+          // 不入 context
         } else if (p.contentType === 'tool_call') {
           const toolName = (p.metadata?.toolName as string) ?? (p.metadata?.toolCallName as string) ?? 'tool'
-          const inputPreview =
-            typeof p.content === 'string'
-              ? p.content.slice(0, 200)
-              : JSON.stringify(p.metadata?.input ?? {}).slice(0, 200)
-          lines.push(`(tool_call: ${toolName} ${inputPreview})`)
+          // 只输出参数名列表，不含参数值（安全截断，避免 JSON 断截）
+          const input = p.metadata?.input as Record<string, unknown> | undefined
+          const paramKeys = input ? Object.keys(input) : []
+          const paramLine = paramKeys.length > 0 ? `\n  params: ${paramKeys.join(', ')}` : ''
+          currentTurnLines.push(`[Tool call] ${toolName}${paramLine}`)
         } else if (p.contentType === 'tool_result') {
-          const outputPreview = typeof p.content === 'string' ? p.content.slice(0, 300) : ''
-          const status = (p.metadata?.status as string) ?? ''
-          lines.push(`(tool_result[${status}]: ${outputPreview})`)
+          const toolName = (p.metadata?.toolName as string) ?? 'tool'
+          const status = (p.metadata?.status as string) ?? 'unknown'
+          const byteCount = typeof p.content === 'string' ? p.content.length : 0
+          currentTurnLines.push(`[Tool result] ${toolName} — ${status} (${byteCount} bytes)`)
         }
       }
     }
+    flushTurn()
 
-    if (lines.length === 0) return newPrompt
+    if (sections.length === 0) return newPrompt
 
-    const header = 'Below is the prior conversation history for this session. Use it as context when responding.'
-    return `${header}\n\n[History]\n${lines.join('\n')}\n\n[Current user message]\n${newPrompt}`
+    const header = 'Below is the prior conversation history. Use it as context when responding.'
+    return `${header}\n\n---\n\n${sections.join('\n\n---\n\n')}\n\n---\n\n## Current user message\n\n${newPrompt}`
   } catch (e) {
     console.warn('[buildHistoryContextPrompt] failed, falling back to raw prompt:', (e as Error).message)
     return newPrompt

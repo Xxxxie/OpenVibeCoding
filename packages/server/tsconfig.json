@@ -12,5 +12,8 @@
     }
   },
   "include": ["src"],
-  "exclude": ["src/agent/runtime/opencode-tool-templates/**"]
+  "exclude": [
+    "src/agent/runtime/opencode-tool-templates/**",
+    "src/**/__tests__/**"
+  ]
 }

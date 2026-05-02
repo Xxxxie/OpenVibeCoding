@@ -11,7 +11,9 @@
   "scripts": {
     "dev": "tsup src/sandbox/tool-override.ts --format cjs --outDir dist/sandbox --no-splitting --silent && tsup src/util/skill-loader-override.ts --format cjs --outDir dist/util --no-splitting --silent && DOTENVX_PATH=.env tsx watch --env-file=.env src/index.ts",
     "build": "tsup src/sandbox/tool-override.ts --format cjs --outDir dist/sandbox --no-splitting && tsup src/util/skill-loader-override.ts --format cjs --outDir dist/util --no-splitting && tsup src/index.ts --format esm --target node22 && mkdir -p dist/agent/runtime/opencode-tool-templates && cp src/agent/runtime/opencode-tool-templates/*.ts dist/agent/runtime/opencode-tool-templates/",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.21.0",
@@ -47,6 +49,7 @@
     "@types/uuid": "^11.0.0",
     "tsup": "^8.0.0",
     "tsx": "^4.21.0",
-    "typescript": "~5.7.0"
+    "typescript": "~5.7.0",
+    "vitest": "^3.2.0"
   }
 }

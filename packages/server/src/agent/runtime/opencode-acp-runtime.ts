@@ -42,20 +42,20 @@ import {
 } from '../agent-registry.js'
 import { persistenceService } from '../persistence.service.js'
 import { CloudbaseAgentService } from '../cloudbase-agent.service.js'
-import { getAcpTransportFactory, type AcpTransport } from './acp-transport.js'
+import { getAcpTransportFactory, getResolvedBin, type AcpTransport } from './acp-transport.js'
 import { ensureOpencodeToolsInstalled } from './opencode-installer.js'
 import { registerPending, resolvePending, rejectPendingForConversation } from './pending-permission-registry.js'
 import { resolvePendingQuestion, rejectPendingQuestionsForConversation } from './pending-question-registry.js'
 import { OpencodeMessageBuilder, findLastRecordIds, buildHistoryContextPrompt } from './opencode-message-builder.js'
 import { scfSandboxManager, type SandboxInstance } from '../../sandbox/scf-sandbox-manager.js'
-import { spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
 
 // ─── Config ──────────────────────────────────────────────────────────────
 
-const OPENCODE_BIN = process.env.OPENCODE_BIN || 'opencode'
+// OPENCODE_BIN 常量已删除——统一使用 acp-transport.ts 的 getResolvedBin()
+// 好处：单一权威来源，isAvailable() 与 spawn 使用同一路径，支持 fallback 候选
 const DEFAULT_OPENCODE_MODEL = process.env.OPENCODE_DEFAULT_MODEL || 'moonshot/kimi-k2-0905-preview'
 
 /** 沙箱内工作目录（agent 看到的"当前目录"概念）。相对路径工具都会以此为根。 */
@@ -170,29 +170,9 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
   readonly name = 'opencode-acp'
 
   async isAvailable(): Promise<boolean> {
-    return new Promise((resolve) => {
-      try {
-        const child = spawn(OPENCODE_BIN, ['--version'], { stdio: 'ignore' })
-        const timer = setTimeout(() => {
-          try {
-            child.kill('SIGKILL')
-          } catch {
-            /* noop */
-          }
-          resolve(false)
-        }, 3000)
-        child.on('exit', (code) => {
-          clearTimeout(timer)
-          resolve(code === 0)
-        })
-        child.on('error', () => {
-          clearTimeout(timer)
-          resolve(false)
-        })
-      } catch {
-        resolve(false)
-      }
-    })
+    // getResolvedBin() 是纯同步 existsSync，不需要子进程 --version
+    // 优点：更快（无 spawn 开销）、更可靠（不受 PATH 环境变量/shell 变更影响）
+    return getResolvedBin() !== null
   }
 
   async getSupportedModels(): Promise<ModelInfo[]> {

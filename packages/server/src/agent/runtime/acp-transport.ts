@@ -16,7 +16,87 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { delimiter } from 'node:path'
+import path from 'node:path'
 import { ndJsonStream, type Stream } from '@agentclientprotocol/sdk'
+
+// ─── Bin resolution ─────────────────────────────────────────────────────────
+
+/**
+ * 在 PATH 各目录下查找指定 bin 名，返回第一个命中的**绝对路径**，找不到返回 null。
+ * 纯同步 fs 检查，无子进程。
+ */
+export function resolveOnPath(bin: string): string | null {
+  const dirs = (process.env.PATH ?? '').split(delimiter)
+  const exts = process.platform === 'win32' ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';') : ['']
+  for (const dir of dirs) {
+    if (!dir) continue
+    for (const ext of exts) {
+      const full = path.join(dir, bin + ext)
+      if (existsSync(full)) return full
+    }
+  }
+  return null
+}
+
+/**
+ * Fallback 候选列表（按优先级排列）。
+ *
+ *   1. OPENCODE_BIN env：允许完全覆盖（绝对路径或 bin 名均可）
+ *   2. 'opencode'：官方包名
+ *   3. 'opencode-ai'：npm 包名（`npm i -g opencode-ai` 安装后 bin 叫 opencode-ai）
+ */
+const OPENCODE_BIN_CANDIDATES = ['opencode', 'opencode-ai'] as const
+
+/**
+ * 模块级缓存。undefined = 未初始化；null = 找不到；string = 解析到的绝对路径。
+ * 第一次调用时扫 PATH，此后 O(1) 返回。
+ */
+let _resolvedBin: string | null | undefined = undefined
+
+/**
+ * 解析可用的 opencode 可执行路径。
+ *
+ * 优先级：
+ *   1. OPENCODE_BIN env（如果是绝对路径且存在，直接返回；否则当 bin 名走 resolveOnPath）
+ *   2. 按 OPENCODE_BIN_CANDIDATES 顺序在 PATH 里查找
+ *
+ * 结果被模块级缓存，进程内只扫一次。测试时通过 vi.resetModules() 清除缓存。
+ */
+export function getResolvedBin(): string | null {
+  if (_resolvedBin !== undefined) return _resolvedBin
+
+  const envOverride = process.env.OPENCODE_BIN
+  if (envOverride) {
+    // 如果是绝对路径，直接检查；否则当 bin 名走 resolveOnPath
+    if (path.isAbsolute(envOverride)) {
+      if (existsSync(envOverride)) {
+        _resolvedBin = envOverride
+        return _resolvedBin
+      }
+      // env 里的绝对路径不存在 → 降到 fallback 继续找
+    } else {
+      const resolved = resolveOnPath(envOverride)
+      if (resolved) {
+        _resolvedBin = resolved
+        return _resolvedBin
+      }
+    }
+  }
+
+  // Fallback 候选
+  for (const bin of OPENCODE_BIN_CANDIDATES) {
+    const resolved = resolveOnPath(bin)
+    if (resolved) {
+      _resolvedBin = resolved
+      return _resolvedBin
+    }
+  }
+
+  _resolvedBin = null
+  return null
+}
 
 // ─── Core Interfaces ────────────────────────────────────────────────────────
 
@@ -49,7 +129,6 @@ export type AcpTransportFactory = (ctx: AcpTransportFactoryContext) => Promise<A
 
 // ─── Local stdio transport ──────────────────────────────────────────────────
 
-const LOCAL_OPENCODE_BIN = process.env.OPENCODE_BIN || 'opencode'
 const LOCAL_SPAWN_TIMEOUT_MS = 15_000
 
 export const createLocalStdioTransport: AcpTransportFactory = async (ctx) => {
@@ -109,8 +188,17 @@ async function spawnLocalOpencode(
   debug: boolean,
   extraEnv?: Record<string, string>,
 ): Promise<ChildProcessWithoutNullStreams> {
+  // 用 getResolvedBin() 代替之前的硬编码常量，支持 fallback 候选
+  const bin = getResolvedBin()
+  if (!bin) {
+    throw new Error(
+      `opencode CLI not found. Install via: npm i -g opencode-ai\n` +
+        `Or set OPENCODE_BIN env to the absolute path.`,
+    )
+  }
+
   return new Promise((resolve, reject) => {
-    const child = spawn(LOCAL_OPENCODE_BIN, ['acp', '--cwd', cwd], {
+    const child = spawn(bin, ['acp', '--cwd', cwd], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, ...(extraEnv ?? {}) },
     })
