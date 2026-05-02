@@ -207,6 +207,9 @@ npx tsx --env-file=.env scripts/test-acp-chat-http.mts
 
 # ★ e2e#4 沙箱 (~180s, 需真实 SCF)
 npx tsx --env-file=.env scripts/test-opencode-sandbox-e2e.mts
+
+# ★ e2e#5 ToolConfirm 交互式权限确认 (~90s, 纯本地)
+npx tsx scripts/test-tool-confirm-e2e.mts
 ```
 
 ## 8. Env 变量
@@ -219,6 +222,7 @@ npx tsx --env-file=.env scripts/test-opencode-sandbox-e2e.mts
 | `SANDBOX_WORKSPACE_ROOT` | `.` | LLM 看到的沙箱工作目录 |
 | `OPENCODE_TOOLS_INSTALL_DIR` | `~/.config/opencode/tools` | 全局 tools 安装目录 |
 | `OPENCODE_TOOLS_FORCE_REINSTALL` | - | `=1` 强制重装（版本升级） |
+| `OPENCODE_SKIP_TOOLS_INSTALL` | - | `=1` 跳过安装（测试场景用） |
 | `OPENCODE_TOOL_TEMPLATE_DIR` | 自动推断 | 覆盖模板源路径 |
 | `OPENCODE_ACP_DEBUG` | - | `=1` 开启详细日志 |
 | `AGENT_RUNTIME` / `AGENT_RUNTIME_DEFAULT` | `tencent-sdk` | runtime 选择 |
@@ -234,8 +238,9 @@ npx tsx --env-file=.env scripts/test-opencode-sandbox-e2e.mts
 
 | 特性 | 状态 |
 |---|---|
-| askAnswers / toolConfirmation resume | ❌ 未接入 |
-| ToolConfirm UI 回调 | ⚠️ 默认 allow_once |
+| ToolConfirm UI 回调 | ✅ **已接入** — 见 §12 |
+| ToolConfirmation resume 流程 | ✅ **已接入** — 见 §12 |
+| askAnswers resume | ❌ 未接入 |
 | coding-mode 模板初始化 | ❌ 未集成 |
 | 消息持久化到 tasks | ⚠️ 只 stream events 落库 |
 | tool override 的版本升级 hash 匹配 | ✅ 已实现（hashFile 比较） |
@@ -243,8 +248,8 @@ npx tsx --env-file=.env scripts/test-opencode-sandbox-e2e.mts
 
 ## 10. 后续方向
 
-1. **接 ToolConfirm UI**（1-2 天）
-2. **askAnswers / resume 流程**（2-3 天）
+1. ~~接 ToolConfirm UI~~ ✅ 完成
+2. **askAnswers / AskUserQuestion resume 流程**（2-3 天）
 3. **消息持久化对齐 Tencent 路线**（2-3 天）
 4. **更多 ACP agent**（Claude Code / Gemini / Qwen Code；每个 1-2 天，runtime 骨架复用）
 5. **前端 Runtime 选择器**（0.5 天）
@@ -255,4 +260,101 @@ npx tsx --env-file=.env scripts/test-opencode-sandbox-e2e.mts
 - OpenCode Custom Tools: https://opencode.ai/docs/custom-tools/
 - OpenCode Agents: https://opencode.ai/docs/agents/
 - OpenCode ACP: https://opencode.ai/docs/acp/
+- OpenCode Permissions: https://opencode.ai/docs/permissions/
 - 源码调研备忘录: `/Users/yang/git/coding-agent-template/docs/opencode-acp-integration-memo.md`
+
+---
+
+## 12. ToolConfirm 交互式权限确认（已实现）
+
+### 12.1 问题
+
+OpenCode 的 ACP agent 在触发敏感工具（如 edit/write）时会调用 client 的 `session/request_permission`，这是 JSON-RPC **请求/响应**模式，agent 会一直 await client 返回 outcome。
+
+首版实现（allow_once）是自动放行，等价于"无权限系统"。目标：对接现有前端 ToolConfirmDialog，让用户决定。
+
+### 12.2 架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Round 1: chatStream(prompt)                                 │
+│                                                             │
+│   runtime.launchAgent                                       │
+│     ↓ spawn opencode                                        │
+│   opencode LLM 决定调用 write                               │
+│     ↓ session/request_permission                            │
+│   runtime requestPermission handler                         │
+│     ├─ emit tool_confirm (SSE push 给前端)                  │
+│     └─ registerPending(convId, interruptId, options)        │
+│         └─ await pending（handler suspended）               │
+│   [opencode 子进程挂起]                                     │
+│   [第一轮 SSE 流仍活跃但无新事件；前端展示确认卡片]           │
+└─────────────────────────────────────────────────────────────┘
+
+                        ↓ 用户点击"允许"
+
+┌─────────────────────────────────────────────────────────────┐
+│ Round 2: chatStream('', { toolConfirmation })              │
+│                                                             │
+│   runtime.chatStream                                        │
+│     ↓ 发现 isAgentRunning=true + toolConfirmation           │
+│     ↓ resolvePending(convId, interruptId, action)          │
+│         └─ pending Promise resolve                         │
+│     ↓ updateLiveCallback (新 SSE 流替换旧的)                │
+│   [opencode 收到 outcome，继续执行]                         │
+│   [session/update 流从卡住处继续，第二轮 SSE 推事件]         │
+│   [最终推 result 事件，agent 完成]                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 12.3 核心代码
+
+**`pending-permission-registry.ts`**：
+- `registerPending(convId, interruptId, options)` → 返回 pending Promise
+- `resolvePending(convId, interruptId, action)` → 查 options 映射 optionId，resolve Promise
+- `rejectPendingForConversation(convId)` → 错误/abort 时清理
+- PermissionAction → ACP optionId 映射（`allow` → `allow_once`，`deny` → `reject_once`, …）
+
+**`opencode-acp-runtime.ts`** 关键改动：
+- `requestPermission` handler：发 `tool_confirm` + `await registerPending(...)`
+- `chatStream` 入口：检测 resume 场景（isAgentRunning + toolConfirmation），调 `resolvePending`，不 spawn 新进程
+- `liveCallbacks` map：跨 SSE 流维护 callback，emit 时动态取（因为 resume 的 callback 来自新 HTTP 请求）
+- 错误路径：`catch` 里 `rejectPendingForConversation` 避免 opencode 子进程卡死
+
+### 12.4 前端集成（零改动）
+
+前端已有完整的 ToolConfirmDialog + `confirmTool(action)` 逻辑（原为 Tencent runtime 设计）。只要 SessionUpdate 的 tag 是 `'tool_confirm'`，前端就会弹卡片。
+
+我们的 runtime 通过 `CloudbaseAgentService.convertToSessionUpdate()` 转换 AgentCallbackMessage → ACP SessionUpdate，tool_confirm 类型已被正确映射，**前端完全不需要改**。
+
+### 12.5 e2e 验证
+
+`scripts/test-tool-confirm-e2e.mts` 完整验证：
+
+```
+Round 1 → 10295ms 时 LLM 触发 write → 11197ms 收到 tool_confirm
+                                 ↓
+      [agent 挂起 3 秒无响应]
+                                 ↓
+Round 2 → resolvePending('write:0', 'allow') → alreadyRunning=true
+     14304ms 后 tool_result 出现（表明 opencode 真的被唤醒继续执行）
+     15885ms 收到最终 result: end_turn
+     文件实际写入："hi from tc e2e" ✓
+
+断言：
+  tool_confirm received:        PASS
+  agent suspended after it:     PASS (no 'result' for 3s)
+  round2 took resume path:      PASS (alreadyRunning=true)
+  tool_result after resume:     PASS
+  final result event:           PASS
+  no error event:               PASS
+  file has expected content:    PASS
+OVERALL: PASS
+```
+
+### 12.6 已知边界
+
+- **触发机制依赖 opencode permission 配置**：只有 `opencode.json` 里配置 `permission.edit: 'ask'` 的工具才会发 `requestPermission`。未配置的工具默认 `allow`，直接放行，前端看不到确认卡片。
+- **Custom tool override 绕开 permission 系统**：`~/.config/opencode/tools/write.ts` 覆盖 builtin write 后，permission 检查是内置代码路径，custom tool 是独立路径，**不会触发 requestPermission**。沙箱场景里的 write 转发就无权限拦截（这是预期行为：沙箱本身就隔离，无需再加一层）。
+- **Resume 不超时**：runtime 目前没有"挂起超过 N 分钟自动 reject"机制。如果用户长时间不回应，opencode 子进程会一直占用。未来可加 `PENDING_TIMEOUT_MS`。
+- **多路径挂起**：同一 conversation 同时只能一个 pending（opencode 串行执行工具）。registry 内部已防重，但多路 SSE 断开重连场景未深度测试。

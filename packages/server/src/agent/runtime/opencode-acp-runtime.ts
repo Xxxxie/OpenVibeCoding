@@ -44,6 +44,7 @@ import { persistenceService } from '../persistence.service.js'
 import { CloudbaseAgentService } from '../cloudbase-agent.service.js'
 import { getAcpTransportFactory, type AcpTransport } from './acp-transport.js'
 import { ensureOpencodeToolsInstalled } from './opencode-installer.js'
+import { registerPending, resolvePending, rejectPendingForConversation } from './pending-permission-registry.js'
 import { scfSandboxManager, type SandboxInstance } from '../../sandbox/scf-sandbox-manager.js'
 import { spawn } from 'node:child_process'
 import os from 'node:os'
@@ -62,8 +63,41 @@ const SANDBOX_WORKSPACE_ROOT = process.env.SANDBOX_WORKSPACE_ROOT || '.'
 
 let toolsInstallPromise: Promise<void> | null = null
 
+/**
+ * 活跃 agent 的 liveCallback 注册表。
+ *
+ * 为什么需要？—— Resume 场景：第一轮 chatStream 的 SSE 流已结束（前端看到
+ * tool_confirm 后切 waiting_for_interaction），第二轮 chatStream 是**新的
+ * HTTP 请求**，带新的 callback。pending 恢复后，后续的 session/update 必须
+ * 用**新 callback** 推给新 SSE 流（而不是第一轮的 callback，那个 stream 已关）。
+ *
+ * 所以每次 chatStream（包括 resume 入口）都要更新这个 map，launchAgent 内部的
+ * emit 函数通过 getLiveCallback() 间接取最新值。
+ */
+const liveCallbacks = new Map<string, AgentCallback | null>()
+
+function registerLiveCallback(conversationId: string, cb: AgentCallback | null): void {
+  liveCallbacks.set(conversationId, cb)
+}
+
+function updateLiveCallback(conversationId: string, cb: AgentCallback | null): void {
+  liveCallbacks.set(conversationId, cb)
+}
+
+function getLiveCallback(conversationId: string): AgentCallback | null {
+  return liveCallbacks.get(conversationId) ?? null
+}
+
+function clearLiveCallback(conversationId: string): void {
+  liveCallbacks.delete(conversationId)
+}
+
 /** 惰性确保全局 tools 已安装；多次调用只执行一次。 */
 function ensureToolsInstalledOnce(): Promise<void> {
+  if (process.env.OPENCODE_SKIP_TOOLS_INSTALL === '1') {
+    // 测试场景可显式跳过（例如 ToolConfirm e2e 要测 builtin write 的 permission 流）
+    return Promise.resolve()
+  }
   if (!toolsInstallPromise) {
     toolsInstallPromise = ensureOpencodeToolsInstalled()
       .then((r) => {
@@ -124,8 +158,35 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
   async chatStream(prompt: string, callback: AgentCallback | null, options: AgentOptions): Promise<ChatStreamResult> {
     const conversationId = options.conversationId || uuidv4()
 
+    // Resume path：已有挂起的 agent + 携带 toolConfirmation
+    //   → 不 spawn 新进程，直接 resolve 挂起的 permission Promise
+    //   → opencode 收到 outcome 后继续执行，session/update 流从卡住处继续
     if (isAgentRunning(conversationId)) {
       const run = getAgentRun(conversationId)!
+      if (options.toolConfirmation) {
+        const resolved = resolvePending(
+          conversationId,
+          options.toolConfirmation.interruptId,
+          options.toolConfirmation.payload.action,
+        )
+        if (!resolved) {
+          console.warn(
+            `[OpencodeAcpRuntime] toolConfirmation arrived but no pending registration for interruptId=${options.toolConfirmation.interruptId}`,
+          )
+        }
+        // 记住本轮的 callback 给后续 session/update 转发：
+        // pending Promise 里关联的 emit 已经在 launchAgent 的闭包里了，
+        // 外部 callback 只有在本次 SSE 流里才能用。
+        // 最简单的做法：更新 registry 里记录的 liveCallback（下一条 AgentCallbackMessage 转发到此）
+        updateLiveCallback(conversationId, callback)
+      } else {
+        // 兜底：没有 toolConfirmation 却进来了——直接返回，让调用方走 observe
+        if (process.env.OPENCODE_ACP_DEBUG) {
+          console.log(
+            `[OpencodeAcpRuntime] chatStream re-entered without toolConfirmation (conv=${conversationId}); returning existing turn`,
+          )
+        }
+      }
       return { turnId: run.turnId, alreadyRunning: true }
     }
 
@@ -140,6 +201,9 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
       abortController,
     })
 
+    // 记录本轮的 liveCallback（resume 时可替换，因为 SSE 流可能已更新）
+    registerLiveCallback(conversationId, callback)
+
     this.launchAgent(prompt, callback, options, conversationId, turnId, abortController).catch((err) => {
       console.error('[OpencodeAcpRuntime] background agent error:', err)
     })
@@ -149,7 +213,7 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
 
   private async launchAgent(
     prompt: string,
-    liveCallback: AgentCallback | null,
+    _liveCallback: AgentCallback | null,
     options: AgentOptions,
     conversationId: string,
     turnId: string,
@@ -159,7 +223,10 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
     const userId = options.userId || 'anonymous'
     const modelId = options.model || DEFAULT_OPENCODE_MODEL
 
-    const emit = makeEmitter({ liveCallback, envId, userId, conversationId, turnId })
+    // emit 每次动态取 liveCallback（resume 时回调会被替换）
+    // 第一轮由 chatStream 调用 registerLiveCallback 写入；第二轮（resume）由
+    // chatStream 的 resume 分支更新。
+    const emit = makeEmitter({ envId, userId, conversationId, turnId })
 
     let transport: AcpTransport | null = null
     let sandbox: SandboxInstance | null = null
@@ -221,17 +288,41 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
             await this.handleSessionUpdate(params.update, emit)
           },
           requestPermission: async (params) => {
+            // ACP 权限请求 → 桥接到前端 ToolConfirm UI
+            //
+            // 流程：
+            //   1. 生成/取 interruptId（前端用来回传 toolConfirmation）
+            //   2. 发 AgentCallbackMessage(type='tool_confirm')：前端显示确认卡片
+            //   3. registerPending 注册一个挂起 Promise
+            //   4. await pending：handler 卡住 → opencode 也卡住
+            //   5. 前端用户选择 → 下一轮 chatStream 带 toolConfirmation
+            //   6. chatStream 调 resolvePending → 本 Promise resolve → handler 返回
+            //   7. opencode 收到 outcome 后继续
+            const interruptId = params.toolCall?.toolCallId || uuidv4()
+            const toolName = params.toolCall?.title || 'unknown'
+            const toolInput = (params.toolCall?.rawInput as Record<string, unknown>) || {}
+
             await emit({
               type: 'tool_confirm',
-              id: params.toolCall?.toolCallId || uuidv4(),
-              name: params.toolCall?.title || 'unknown',
-              input: (params.toolCall?.rawInput as Record<string, unknown>) || {},
+              id: interruptId,
+              name: toolName,
+              input: toolInput,
             })
-            const opt =
-              params.options.find((o: { kind: string }) => o.kind === 'allow_once') ??
-              params.options.find((o: { kind: string }) => o.kind === 'allow_always') ??
-              params.options[0]
-            return { outcome: { outcome: 'selected', optionId: opt!.optionId } }
+
+            try {
+              // 这里会长时间挂起 — 直到外部 resolvePending 或 rejectPendingForConversation
+              return await registerPending(conversationId, interruptId, params.options as any[])
+            } catch (e) {
+              // abort/reject 时 fallback：让 opencode 收到拒绝（避免它卡死）
+              const reject =
+                params.options.find((o: { kind: string }) => o.kind === 'reject_once') ??
+                params.options[params.options.length - 1]
+              console.warn(
+                `[OpencodeAcpRuntime] pending permission rejected (conv=${conversationId}, interrupt=${interruptId}):`,
+                (e as Error).message,
+              )
+              return { outcome: { outcome: 'selected', optionId: reject!.optionId } }
+            }
           },
         }),
         transport.stream,
@@ -284,6 +375,14 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
     } catch (error: any) {
       const isAbort = abortController.signal.aborted || error?.name === 'AbortError'
       console.error('[OpencodeAcpRuntime] launchAgent error:', error)
+      // 释放挂起的权限请求（否则 opencode 子进程卡住 + chatStream 永远不返回）
+      const rejectedCount = rejectPendingForConversation(
+        conversationId,
+        isAbort ? 'Aborted' : `runtime error: ${error?.message || error}`,
+      )
+      if (rejectedCount > 0 && process.env.OPENCODE_ACP_DEBUG) {
+        console.log(`[OpencodeAcpRuntime] rejected ${rejectedCount} pending permissions due to error`)
+      }
       try {
         await emit({
           type: 'error',
@@ -309,6 +408,8 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
           /* noop */
         }
       }
+      // 清掉 liveCallback 注册，避免 map 泄漏
+      clearLiveCallback(conversationId)
       setTimeout(() => removeAgent(conversationId, turnId), 5000)
     }
   }
@@ -384,19 +485,20 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
 function makeEmitter(ctx: {
-  liveCallback: AgentCallback | null
   envId: string
   userId: string
   conversationId: string
   turnId: string
 }): (msg: AgentCallbackMessage) => Promise<void> {
-  const { liveCallback, envId, userId, conversationId, turnId } = ctx
+  const { envId, userId, conversationId, turnId } = ctx
   return async (msg) => {
     const enriched: AgentCallbackMessage = {
       ...msg,
       sessionId: conversationId,
       assistantMessageId: turnId,
     }
+    // 动态取 liveCallback：resume 时第二轮 SSE 的 callback 会替换第一轮的
+    const liveCallback = getLiveCallback(conversationId)
     if (liveCallback) {
       try {
         const seq = getNextSeq(conversationId)
