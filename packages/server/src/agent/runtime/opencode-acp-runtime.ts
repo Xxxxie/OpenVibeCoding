@@ -533,6 +533,13 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
           console.error('[OpencodeAcpRuntime] messageBuilder.finalize error:', e)
         }
       }
+      // 清掉临时 SSE stream_events（turn 结束后已无用，持久化已在 messages 集合）
+      // 与 Tencent SDK runtime 的 finally 块对齐，避免 CloudBase 积累孤儿数据
+      if (envId) {
+        persistenceService.cleanupStreamEvents(conversationId, turnId).catch(() => {
+          /* Non-critical */
+        })
+      }
       // 清掉 liveCallback + emitter 注册，避免 map 泄漏
       clearLiveCallback(conversationId)
       clearEmitter(conversationId)
