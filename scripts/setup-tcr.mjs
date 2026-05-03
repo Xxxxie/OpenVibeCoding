@@ -36,6 +36,7 @@ const TCR_DOMAIN = 'ccr.ccs.tencentyun.com'
 const ENV_FILE = resolve(process.cwd(), '.env.local')
 const CLOUDBASE_AUTH_FILE = resolve(homedir(), '.config/.cloudbase/auth.json')
 const DEFAULT_NAMESPACE_PREFIX = 'cloudbase-vibecoding'
+const GHCR_IMAGE_URL = 'ghcr.io/yhsunshining/cloudbase-workspace:260503-1125aad6'
 
 // ===================== Helper Functions =====================
 
@@ -1074,7 +1075,7 @@ async function main() {
     namespace: '',
     namespacePrefix: DEFAULT_NAMESPACE_PREFIX,
     visibility: 'private',
-    localImage: 'ghcr.io/yhsunshining/cloudbase-workspace:isolate',
+    localImage: GHCR_IMAGE_URL,
     repoName: 'sandbox',
     tag: 'latest',
     // Password from env var (passed by init.mjs to avoid exposing in process list)
@@ -1127,7 +1128,7 @@ Options:
   --namespace <prefix>    TCR namespace prefix (default: ${DEFAULT_NAMESPACE_PREFIX})
                           A 4-char random suffix will be added automatically
   --visibility <type>     Namespace visibility: private (default) or public
-  --local-image <image>   Local Docker image to push (default: ghcr.io/yhsunshining/cloudbase-workspace:latest)
+  --local-image <image>   Local Docker image to push (default: ${GHCR_IMAGE_URL})
   --repo-name <name>      Repository name in TCR (default: sandbox)
   --tag <tag>             Image tag (default: latest)
   --password <pwd>        TCR login password
@@ -1146,7 +1147,7 @@ Credential Sources (in order of priority):
   3. cloudbase-cli login state (automatic installation and login if needed)
 
 Image Configuration from .env.local:
-  TCR_LOCAL_IMAGE    Local Docker image to push (default: ghcr.io/yhsunshining/cloudbase-workspace:latest)
+  TCR_LOCAL_IMAGE    Local Docker image to push (default: ${GHCR_IMAGE_URL})
   TCR_REPO_NAME      Repository name in TCR (default: sandbox)
   TCR_TAG            Image tag (default: latest)
 
@@ -1175,8 +1176,8 @@ Examples:
   }
 
   // Apply env defaults for image config (CLI args take priority)
-  if (config.localImage === 'ghcr.io/yhsunshining/cloudbase-workspace:latest') {
-    config.localImage = env['TCR_LOCAL_IMAGE'] || 'ghcr.io/yhsunshining/cloudbase-workspace:latest'
+  if (config.localImage === GHCR_IMAGE_URL) {
+    config.localImage = env['TCR_LOCAL_IMAGE'] || GHCR_IMAGE_URL
   }
   if (config.repoName === 'sandbox') {
     config.repoName = env['TCR_REPO_NAME'] || 'sandbox'
