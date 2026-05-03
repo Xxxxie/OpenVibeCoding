@@ -16,7 +16,18 @@ import { Label } from '../../components/ui/label'
 import { Input } from '../../components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select'
 import { toast } from 'sonner'
-import { UserPlus, ShieldCheck, ShieldOff, Ban, Check, LayoutDashboard, Trash2, Key, Copy, RefreshCw } from 'lucide-react'
+import {
+  UserPlus,
+  ShieldCheck,
+  ShieldOff,
+  Ban,
+  Check,
+  LayoutDashboard,
+  Trash2,
+  Key,
+  Copy,
+  RefreshCw,
+} from 'lucide-react'
 
 interface User {
   id: string

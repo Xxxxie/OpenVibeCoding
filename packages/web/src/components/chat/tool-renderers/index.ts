@@ -26,6 +26,7 @@ import { globRenderer } from './glob'
 import { webFetchRenderer, webSearchRenderer } from './web'
 import { todoWriteRenderer } from './todo'
 import { taskRenderer } from './task'
+import { imageGenRenderer } from './imagegen'
 
 /** 渲染器输入上下文 */
 export interface ToolRenderContext {
@@ -67,6 +68,8 @@ export const TOOL_RENDERERS: Record<string, ToolRenderer> = {
   TodoWrite: todoWriteRenderer,
   Task: taskRenderer,
   Agent: taskRenderer, // Anthropic SDK 的 Agent 工具等价 Task
+  ImageGen: imageGenRenderer,
+  ImageEdit: imageGenRenderer, // 复用 ImageGen 渲染器
 }
 
 /**

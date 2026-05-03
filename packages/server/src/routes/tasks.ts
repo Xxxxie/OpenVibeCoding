@@ -863,7 +863,6 @@ tasksRouter.get('/:taskId/files/list-dir', requireUserEnv, async (c) => {
     if (!task) return c.json({ success: false, error: 'Task not found' }, 404)
     if (!task.sandboxId) return c.json({ success: false, error: 'Sandbox is not running' }, 410)
 
-    
     const sandbox = await getScfSandbox(task, envId)
     if (!sandbox) return c.json({ success: false, error: 'Sandbox not found' }, 410)
 
@@ -2843,7 +2842,7 @@ tasksRouter.get('/:taskId/files/download', requireUserEnv, async (c) => {
     const sandbox = await getScfSandbox(task, envId)
     if (!sandbox) return c.json({ error: 'Sandbox not found' }, 410)
 
-    const basename = filePath === '.' ? 'workspace' : (filePath.split('/').pop() || 'download')
+    const basename = filePath === '.' ? 'workspace' : filePath.split('/').pop() || 'download'
 
     // Check if directory
     const statResult = await runCommandInScfSandbox(
@@ -2856,11 +2855,21 @@ tasksRouter.get('/:taskId/files/download', requireUserEnv, async (c) => {
       // Single file: fetch directly
       const ext = basename.split('.').pop()?.toLowerCase() || ''
       const mimeMap: Record<string, string> = {
-        png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
-        webp: 'image/webp', svg: 'image/svg+xml', pdf: 'application/pdf',
-        zip: 'application/zip', json: 'application/json', txt: 'text/plain',
-        md: 'text/markdown', html: 'text/html', css: 'text/css',
-        js: 'text/javascript', ts: 'text/typescript',
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        gif: 'image/gif',
+        webp: 'image/webp',
+        svg: 'image/svg+xml',
+        pdf: 'application/pdf',
+        zip: 'application/zip',
+        json: 'application/json',
+        txt: 'text/plain',
+        md: 'text/markdown',
+        html: 'text/html',
+        css: 'text/css',
+        js: 'text/javascript',
+        ts: 'text/typescript',
       }
       const fileResp = await sandbox.request(`/e2b-compatible/files?path=${encodeURIComponent(filePath)}`)
       if (!fileResp.ok) return c.json({ error: 'File not found' }, 404)
@@ -2908,6 +2917,5 @@ tasksRouter.get('/:taskId/files/download', requireUserEnv, async (c) => {
     return c.json({ error: 'Download failed' }, 500)
   }
 })
-
 
 export default tasksRouter

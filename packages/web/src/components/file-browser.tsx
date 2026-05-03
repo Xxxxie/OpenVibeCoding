@@ -794,15 +794,18 @@ export function FileBrowser({
     toast.success('File copied to clipboard')
   }, [])
 
-  const handleDownload = useCallback((filePath: string) => {
-    const url = `/api/tasks/${taskId}/files/download?path=${encodeURIComponent(filePath)}`
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filePath.split('/').pop() || filePath
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-  }, [taskId])
+  const handleDownload = useCallback(
+    (filePath: string) => {
+      const url = `/api/tasks/${taskId}/files/download?path=${encodeURIComponent(filePath)}`
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filePath.split('/').pop() || filePath
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+    },
+    [taskId],
+  )
 
   const handlePaste = useCallback(
     async (targetPath?: string) => {

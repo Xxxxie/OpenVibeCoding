@@ -849,10 +849,9 @@ export function overrideTools(toolMap: Map<string, any>): void {
 
         // 1. 向 server 请求预签名 PUT URL（用 session cookie 认证）
         const separator = hostingConfig.presignUrl.includes('?') ? '&' : '?'
-        const presignRes = await fetch(
-          `${hostingConfig.presignUrl}${separator}key=${encodeURIComponent(cloudKey)}`,
-          { headers: { Cookie: `nex_session=${hostingConfig.sessionCookie}` } },
-        )
+        const presignRes = await fetch(`${hostingConfig.presignUrl}${separator}key=${encodeURIComponent(cloudKey)}`, {
+          headers: { Cookie: `nex_session=${hostingConfig.sessionCookie}` },
+        })
         if (!presignRes.ok) {
           const text = await presignRes.text().catch(() => '')
           throw new Error(`ImageGen presign failed: ${presignRes.status} ${text}`)
@@ -893,6 +892,39 @@ export function overrideTools(toolMap: Map<string, any>): void {
       }
 
       return sandboxRelPath
+    }
+
+    // Override execute to correctly format the return value when saveImage
+    // returns a CDN URL instead of a local path.
+    // Original execute calls AnsiUtils.createFileHyperlink(path) which wraps
+    // the path as a file:// OSC 8 hyperlink — unusable for https:// URLs.
+    const originalExecute = imageGenTool.execute.bind(imageGenTool)
+    imageGenTool.execute = async (params: any, context: ToolContext, extra?: any) => {
+      const result = await originalExecute(params, context, extra)
+      // If result content contains a mangled file://...https:// hyperlink,
+      // replace it with a clean markdown image/link.
+      if (result?.content && typeof result.content === 'string') {
+        // Extract all https:// URLs from the content
+        const urlMatches = result.content.match(/https?:\/\/[^\s\x00-\x1f]+/g)
+        if (urlMatches && urlMatches.length > 0) {
+          const urls = urlMatches.filter((u: string) => u.endsWith('.png') || u.endsWith('.jpg') || u.endsWith('.webp') || u.endsWith('.gif'))
+          if (urls.length === 1) {
+            return {
+              title: 'Image generated successfully',
+              content: `Image URL: ${urls[0]}\n\n![generated image](${urls[0]})`,
+              renderer: { type: 'text' },
+            }
+          } else if (urls.length > 1) {
+            const list = urls.map((u: string, i: number) => `${i + 1}. ${u}`).join('\n')
+            return {
+              title: `${urls.length} images generated successfully`,
+              content: `Image URLs:\n${list}`,
+              renderer: { type: 'text' },
+            }
+          }
+        }
+      }
+      return result
     }
   })
 
