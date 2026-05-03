@@ -374,15 +374,49 @@ function buildAppendPrompt(
   conversationId?: string,
   envId?: string,
   sandboxMode?: 'shared' | 'isolated',
+  isCodingMode?: boolean,
 ): string {
-  const base = `<role>
-你是一个通用 AI 编程助手，同时具备腾讯云开发（CloudBase）能力，可通过工具操作云函数、数据库、存储、云托管等资源。
-优先使用工具完成任务；删除等破坏性操作需确认用户意图。
-默认使用中文与用户沟通。
-</role>
+  // Coding mode already has getCodingSystemPrompt() which strongly anchors the
+  // assistant as "a coder working in a React/Vite project". We should NOT
+  // inject the "task classification" guideline in that case — it would create
+  // ambiguity (user is in a code project, they want a page, not text).
+  //
+  // Default mode is the opposite: the assistant is generic and the user may
+  // want pure conversation (文案/翻译/聊天). Without the classification
+  // guideline, the assistant tends to escalate every request into
+  // "write files and deploy", which was the bug reported by the user.
+  const roleLine = isCodingMode
+    ? '你是一个通用 AI 编程助手，同时具备腾讯云开发（CloudBase）能力。'
+    : '你是一个通用 AI 助手，同时具备腾讯云开发（CloudBase）能力，可按需通过工具操作云函数、数据库、存储、云托管等资源。'
 
+  const taskClassificationSection = isCodingMode
+    ? ''
+    : `
+<guideline name="task-classification" priority="highest">
+收到任务后，先判断类型再决定是否使用工具：
+
+1) **对话/创作/咨询类**（写文案、写文章、翻译、起名、解释概念、讨论观点、情绪陪伴、海报/帖子**文本**、小红书/朋友圈文案、社交媒体内容等）
+   → 直接在对话中以**文本/Markdown**形式输出，**不要**写文件、不要部署、不要调用开发相关工具。
+   → 即使用户说"帮我做一个 XX 应援贴/海报/宣传文案"，默认先理解为"输出文案"，除非用户明确要求"做一个页面/网站/应用"。
+
+2) **编程/工程类**（修改代码、调试、构建应用、部署服务、配置云资源、运维操作）
+   → 使用工具完成任务：读文件、写文件、执行命令、部署、调用云开发 MCP 等。
+
+3) **自动化/定时类**（"每天…"、"每周…"、"定期…"）
+   → 使用 cronTask 工具管理定时任务（见下面 cron-task 章节）。
+
+**不确定时优先问用户**："你希望我直接写文案给你，还是做一个可访问的网页？"，不要擅自升级为 2)。
+</guideline>
+`
+
+  const base = `<role>
+${roleLine}
+默认使用中文与用户沟通；删除等破坏性操作需确认用户意图。
+</role>
+${taskClassificationSection}
 <guideline name="cloudbase">
-- 你正在操作云开发环境 ${envId || '(未指定)'}，可通过 cloudbase MCP 工具管理云函数、数据库、存储、静态托管等资源。
+- 当前云开发环境为 ${envId || '(未指定)'}，必要时可通过 cloudbase MCP 工具操作。
+- **仅当用户明确要求部署、开发应用、操作数据库、上传文件等**，才使用云开发工具。纯文案/咨询不涉及此。
 - 部署云函数使用 manageFunctions 工具；上传文件到静态托管使用 cloudbase_uploadFiles 工具。
 </guideline>
 
@@ -405,10 +439,17 @@ Cron 表达式格式：分 时 日 月 周，例如 "0 20 * * *" 表示每天 20
 
   if (sandboxCwd) {
     const homeDir = sandboxMode === 'isolated' ? sandboxCwd : sandboxCwd.substring(0, sandboxCwd.lastIndexOf('/'))
+    // In default mode, gate the sandbox section with a reminder so pure
+    // chat/creation tasks don't drift into file-writing behavior. In coding
+    // mode the getCodingSystemPrompt already establishes the context so no
+    // gating is needed.
+    const sandboxPreamble = isCodingMode
+      ? ''
+      : '（以下仅在你已判定任务属于"编程/工程类"、决定动手写文件或执行命令时适用；对话/创作类任务请忽略本节。）\n'
     return `${base}
 
 <guideline name="sandbox">
-工具默认在 Home: ${homeDir} 下执行
+${sandboxPreamble}工具默认在 Home: ${homeDir} 下执行
 为项目开辟工作目录为: ${sandboxCwd}
 使用的云开发环境为: ${envId}
 请注意：
@@ -1209,8 +1250,8 @@ export class CloudbaseAgentService {
             append: isCodingMode
               ? getCodingSystemPrompt(userContext.envId, publishableKey) +
                 '\n\n' +
-                buildAppendPrompt(actualCwd, conversationId, userContext.envId, sandboxMode)
-              : buildAppendPrompt(actualCwd, conversationId, userContext.envId, sandboxMode),
+                buildAppendPrompt(actualCwd, conversationId, userContext.envId, sandboxMode, true)
+              : buildAppendPrompt(actualCwd, conversationId, userContext.envId, sandboxMode, false),
           },
           mcpServers,
           abortController,

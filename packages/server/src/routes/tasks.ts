@@ -2150,6 +2150,179 @@ tasksRouter.get('/:taskId/sandbox-health', requireUserEnv, async (c) => {
 // ---------------------------------------------------------------------------
 // GET /:taskId/preview-health — 检查 dev server 是否实际响应（via /api/scope/info）
 // ---------------------------------------------------------------------------
+
+// TEMP: GET /:taskId/container-probe — diagnostic for multi-instance routing.
+// 调用 N 次 /health（SCF 直连）+ N 次 /preview/{port}/（公网 gateway），各自
+// 拿到 container 身份：
+//   - SCF 直连：通过 /health body 的 instance.id 或 X-Sandbox-Instance 响应头
+//   - 公网 gateway (502)：通过 problem body 的 sandbox_instance 或响应头
+// 比较两侧 container id 集合是否相同，判断 502 是否由跨 container 路由导致。
+tasksRouter.get('/:taskId/container-probe', requireUserEnv, async (c) => {
+  try {
+    const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
+    const { taskId } = c.req.param()
+    const task = await findActiveTask(taskId, session.user.id)
+    if (!task) return c.json({ error: 'not_found' }, 404)
+    if (!task.sandboxId) return c.json({ error: 'no_sandbox' }, 400)
+
+    const taskMode = (task as any).mode as string | null | undefined
+    const isCodingMode = taskMode === 'coding'
+    const sandboxConfig = resolveSandboxConfig({
+      sandboxMode: task.sandboxMode,
+      sandboxSessionId: task.sandboxSessionId,
+      sandboxCwd: task.sandboxCwd,
+      envId,
+      taskId,
+    })
+    const sandbox = await getScfSandbox(task, envId, {
+      sandboxMode: sandboxConfig.sandboxMode,
+      isCodingMode,
+    })
+    if (!sandbox) return c.json({ error: 'no_sandbox_instance' }, 400)
+
+    // Keep N small + add spacing to avoid SCF gateway rate-limiting (HTTP 430)
+    const N = 3
+    const SPACING_MS = 400
+    const resolvedSessionId = sandboxConfig.sandboxSessionId
+
+    type IdResult = {
+      ok: boolean
+      sandboxInstance?: string
+      sandboxPid?: number
+      sandboxBoot?: string
+      status?: number
+      requestId?: string
+      detail?: string
+      err?: string
+      // image version hints
+      hasSandboxInstanceHeader?: boolean
+      hasSandboxInstanceBody?: boolean
+    }
+
+    // 1) SCF 直连 /health
+    const directResults: IdResult[] = []
+    for (let i = 0; i < N; i++) {
+      try {
+        const r = await sandbox.request('/health', { signal: AbortSignal.timeout(8_000) })
+        const headerInstance = r.headers.get('x-sandbox-instance') || undefined
+        const headerPid = r.headers.get('x-sandbox-pid')
+        const headerBoot = r.headers.get('x-sandbox-boot') || undefined
+        if (r.ok) {
+          const j = (await r.json()) as {
+            instance?: { id?: string; pid?: number; bootTime?: string }
+          }
+          directResults.push({
+            ok: true,
+            sandboxInstance: j.instance?.id ?? headerInstance,
+            sandboxPid: j.instance?.pid ?? (headerPid ? Number(headerPid) : undefined),
+            sandboxBoot: j.instance?.bootTime ?? headerBoot,
+            status: r.status,
+            hasSandboxInstanceHeader: !!headerInstance,
+            hasSandboxInstanceBody: !!j.instance?.id,
+          })
+        } else {
+          directResults.push({
+            ok: false,
+            status: r.status,
+            sandboxInstance: headerInstance,
+            sandboxPid: headerPid ? Number(headerPid) : undefined,
+            sandboxBoot: headerBoot,
+            hasSandboxInstanceHeader: !!headerInstance,
+          })
+        }
+      } catch (e) {
+        directResults.push({ ok: false, err: (e as Error).message })
+      }
+      await new Promise((r) => setTimeout(r, SPACING_MS))
+    }
+
+    // 2) 公网 gateway /preview/{port}/ — 预期 502，从 problem body 提取 sandbox_instance
+    const sandboxEnvId = process.env.TCB_ENV_ID || ''
+    const publicResults: IdResult[] = []
+    for (let i = 0; i < N; i++) {
+      try {
+        let url = `https://${sandboxEnvId}.service.tcloudbase.com/preview/5173/?cloudbase_session_id=${resolvedSessionId}`
+        if (sandboxConfig.sandboxMode === 'shared') url += `&scope_id=${taskId}`
+        if (isCodingMode) url += `&scope_template=coding`
+        const r = await fetch(url, { signal: AbortSignal.timeout(8_000) })
+        const body = await r.text()
+        const headerInstance = r.headers.get('x-sandbox-instance') || undefined
+        const headerPid = r.headers.get('x-sandbox-pid')
+        const headerBoot = r.headers.get('x-sandbox-boot') || undefined
+        let bodyInstance: string | undefined
+        let bodyPid: number | undefined
+        let bodyBoot: string | undefined
+        let detail: string | undefined
+        try {
+          const parsed = JSON.parse(body) as {
+            sandbox_instance?: string
+            sandbox_pid?: number
+            sandbox_boot?: string
+            detail?: string
+          }
+          bodyInstance = parsed.sandbox_instance
+          bodyPid = parsed.sandbox_pid
+          bodyBoot = parsed.sandbox_boot
+          detail = parsed.detail
+        } catch {
+          /* non-json body */
+        }
+        publicResults.push({
+          ok: r.ok,
+          status: r.status,
+          sandboxInstance: bodyInstance ?? headerInstance,
+          sandboxPid: bodyPid ?? (headerPid ? Number(headerPid) : undefined),
+          sandboxBoot: bodyBoot ?? headerBoot,
+          requestId: r.headers.get('x-cloudbase-request-id') || undefined,
+          detail,
+          hasSandboxInstanceHeader: !!headerInstance,
+          hasSandboxInstanceBody: !!bodyInstance,
+        })
+      } catch (e) {
+        publicResults.push({ ok: false, status: 0, err: (e as Error).message })
+      }
+      await new Promise((r) => setTimeout(r, SPACING_MS))
+    }
+
+    const uniqueIds = (arr: IdResult[]) =>
+      Array.from(new Set(arr.map((r) => r.sandboxInstance).filter((x): x is string => !!x)))
+
+    const directIds = uniqueIds(directResults)
+    const publicIds = uniqueIds(publicResults)
+    const overlap = directIds.filter((id) => publicIds.includes(id))
+
+    let conclusion: string
+    if (directIds.length === 0 && publicIds.length === 0) {
+      conclusion =
+        'insufficient_data: neither side returned sandbox container id — sandbox image likely needs rebuild to include X-Sandbox-Instance headers'
+    } else if (directIds.length === 0 || publicIds.length === 0) {
+      conclusion = `insufficient_data: only one side returned container id (direct=${directIds.length}, public=${publicIds.length})`
+    } else if (overlap.length === 0) {
+      conclusion = 'cross_container_confirmed: SCF direct and public gateway land on disjoint sandbox containers'
+    } else if (directIds.length === 1 && publicIds.length === 1 && overlap.length === 1) {
+      conclusion = 'same_container: both paths hit the same container — 502 cause is NOT cross-container routing'
+    } else {
+      conclusion = 'partial_overlap: mixed routing — some requests share containers, some do not'
+    }
+
+    return c.json({
+      resolvedSessionId,
+      scopeId: taskId,
+      summary: {
+        directUniqueContainers: directIds,
+        publicUniqueContainers: publicIds,
+        overlap,
+        conclusion,
+      },
+      directResults,
+      publicResults,
+    })
+  } catch (error) {
+    return c.json({ error: (error as Error).message }, 500)
+  }
+})
+
 tasksRouter.get('/:taskId/preview-health', requireUserEnv, async (c) => {
   try {
     const session = c.get('session')!
@@ -2470,35 +2643,39 @@ tasksRouter.get('/:taskId/preview-url', requireUserEnv, async (c) => {
       // /api/scope/info with X-Scope-Template: coding triggers initialization on first call:
       //   - seedCodingTemplate (first time) or git restore (warm restart)
       //   - ensureViteDev: npm install + spawn vite + crash auto-restart
-      // We poll scope/info until vitePort is returned.
+      // We poll scope/info until vitePort is returned AND viteReady === true
+      // (避免 vite 已 spawn 但端口未 bind 导致网关 502 ECONNREFUSED)
       if (isCodingMode) {
-        // Inject credentials via session/init (fire-and-forget)
+        // 轻量凭证注入：用 PUT /api/session/env 而不是 POST /api/session/init。
+        // session/init 会额外触发 ensureWorkspace → ensureViteDev，与下面 scope/info
+        // 的初始化路径并发竞争 allocatePort(5173) + spawnVite，可能导致：
+        //   - 第二个 spawn 因 --strictPort 失败
+        //   - 计入 crash 计数并走 1-3s 指数退避
+        // session/env 只写 .session-config.json / secrets，无副作用。
         try {
           const { credentials: userCredentials } = c.get('userEnv')!
           await emit('progress', '正在初始化工作空间...')
           sandbox!
-            .request('/api/session/init', {
-              method: 'POST',
+            .request('/api/session/env', {
+              method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                env: {
-                  CLOUDBASE_ENV_ID: envId,
-                  ...(userCredentials?.secretId ? { TENCENTCLOUD_SECRETID: userCredentials.secretId } : {}),
-                  ...(userCredentials?.secretKey ? { TENCENTCLOUD_SECRETKEY: userCredentials.secretKey } : {}),
-                  ...(userCredentials?.sessionToken ? { TENCENTCLOUD_SESSIONTOKEN: userCredentials.sessionToken } : {}),
-                },
+                CLOUDBASE_ENV_ID: envId,
+                ...(userCredentials?.secretId ? { TENCENTCLOUD_SECRETID: userCredentials.secretId } : {}),
+                ...(userCredentials?.secretKey ? { TENCENTCLOUD_SECRETKEY: userCredentials.secretKey } : {}),
+                ...(userCredentials?.sessionToken ? { TENCENTCLOUD_SESSIONTOKEN: userCredentials.sessionToken } : {}),
               }),
-              signal: AbortSignal.timeout(60_000),
+              signal: AbortSignal.timeout(30_000),
             })
             .catch((err: Error) => {
-              console.warn('[preview-url] session/init failed:', err.message)
+              console.warn('[preview-url] session/env failed:', err.message)
             })
         } catch (err) {
-          console.warn('[preview-url] session/init setup failed:', (err as Error).message)
+          console.warn('[preview-url] session/env setup failed:', (err as Error).message)
         }
       }
 
-      // ── Poll /api/scope/info for vitePort ─────────────────────────────────
+      // ── Poll /api/scope/info for vitePort + viteReady ─────────────────────
       await emit('progress', '正在等待开发服务器就绪...')
       const maxWaitMs = 120_000
       const pollInterval = 2000
@@ -2515,10 +2692,32 @@ tasksRouter.get('/:taskId/preview-url', requireUserEnv, async (c) => {
               success?: boolean
               workspace?: string
               vitePort?: number | null
+              viteState?: 'stopped' | 'starting' | 'running' | 'restarting' | 'failed' | null
+              viteReady?: boolean
+              viteFailureReason?: string
             }
+            // 沙箱声明为 failed 的场景是不可自动恢复的（比如 npm install 因 ENOTEMPTY
+            // 失败 → 状态 failed → 下一次 ensureViteDev 重建仍然撞上同一个脏状态）。
+            // 此时继续轮询只会等到 120s 超时，不如立刻把错误抛给用户并让前端停止轮询。
+            if (info.viteState === 'failed') {
+              const reason = info.viteFailureReason || '开发服务器启动失败（未知原因）'
+              await emit('error', `开发服务器启动失败：${reason}`, {
+                viteState: 'failed',
+                viteFailureReason: info.viteFailureReason,
+              })
+              return
+            }
+            // 就绪判断：沙箱侧 viteReady=true 即 vite 已 bind 端口、可接请求。
+            // 早期我们还要求对公网 gateway 做 HEAD 二次探测以防跨 container，但
+            // 实测（container-probe）证明 `service.tcloudbase.com/preview/` 与
+            // SCF 直连命中同一个 warm container（sandbox_instance 一致），所以
+            // 去掉这次额外探测以减少 QPS 压力（避免 CloudBase 430 限流）。
             if (info.success && info.vitePort) {
-              port = info.vitePort
-              break
+              const sandboxReady = info.viteReady === undefined ? true : info.viteReady
+              if (sandboxReady) {
+                port = info.vitePort
+                break
+              }
             }
           }
         } catch {

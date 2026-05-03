@@ -445,7 +445,7 @@ export class ScfSandboxManager {
           },
         },
         MemorySize: this.config.memory,
-        DiskSize: 1024,
+        DiskSize: 2048,
         Timeout: this.config.timeout,
         InitTimeout: 90,
         InstanceConcurrencyConfig: {

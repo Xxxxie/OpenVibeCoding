@@ -38,6 +38,21 @@ type OriginalParseSkillFile = (filePath: string, baseDir: string, source: string
 
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
+/** Run async tasks in batches to avoid overwhelming the sandbox with too many concurrent requests. */
+async function batchedMap<T, R>(
+  items: T[],
+  batchSize: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = []
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize)
+    const batchResults = await Promise.all(batch.map(fn))
+    results.push(...batchResults)
+  }
+  return results
+}
+
 function parseListField(value: unknown): string[] {
   if (!value) return []
   if (Array.isArray(value)) return value.map(String)
@@ -175,7 +190,7 @@ function getSandboxConfig(): SandboxConfig | null {
 
 async function sandboxReadFile(sandbox: SandboxConfig, filePath: string): Promise<string | null> {
   try {
-    const res = await fetch(`${sandbox.url}/api/tools/read`, {
+    const res = await fetch(`${sandbox.url}/api/tools/read?from=skill`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...sandbox.headers },
       body: JSON.stringify({ path: filePath }),
@@ -189,51 +204,33 @@ async function sandboxReadFile(sandbox: SandboxConfig, filePath: string): Promis
   }
 }
 
-async function sandboxReaddir(sandbox: SandboxConfig, dirPath: string): Promise<string[]> {
+/**
+ * List a directory via /e2b-compatible/filesystem.Filesystem/ListDir.
+ * Returns entries with their type via entry.type field.
+ * Returns null if the path doesn't exist or is not a directory.
+ */
+async function sandboxReadDir(
+  sandbox: SandboxConfig,
+  dirPath: string,
+): Promise<Array<{ name: string; isDirectory: boolean }> | null> {
   try {
-    const res = await fetch(`${sandbox.url}/api/tools/bash`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...sandbox.headers },
-      body: JSON.stringify({ command: `ls -1 ${dirPath} 2>/dev/null`, timeout: 5000 }),
-    })
-    if (!res.ok) return []
-    const data = (await res.json()) as any
-    if (!data.success) return []
-    const output = (data.result?.output ?? '').trim()
-    if (!output) return []
-    return output.split('\n').filter(Boolean)
+    const res = await fetch(
+      `${sandbox.url}/e2b-compatible/filesystem.Filesystem/ListDir`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...sandbox.headers },
+        body: JSON.stringify({ path: dirPath, depth: 1 }),
+      },
+    )
+    if (!res.ok) return null
+    const data = (await res.json()) as { entries?: Array<{ name: string; type: string }> }
+    if (!data.entries) return null
+    return data.entries.map((e) => ({
+      name: e.name,
+      isDirectory: e.type === 'FILE_TYPE_DIRECTORY',
+    }))
   } catch {
-    return []
-  }
-}
-
-async function sandboxIsDirectory(sandbox: SandboxConfig, path: string): Promise<boolean> {
-  try {
-    const res = await fetch(`${sandbox.url}/api/tools/bash`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...sandbox.headers },
-      body: JSON.stringify({ command: `test -d '${path}' && echo 1 || echo 0`, timeout: 5000 }),
-    })
-    if (!res.ok) return false
-    const data = (await res.json()) as any
-    return (data.result?.output ?? '').trim() === '1'
-  } catch {
-    return false
-  }
-}
-
-async function sandboxExists(sandbox: SandboxConfig, path: string): Promise<boolean> {
-  try {
-    const res = await fetch(`${sandbox.url}/api/tools/bash`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...sandbox.headers },
-      body: JSON.stringify({ command: `test -e '${path}' && echo 1 || echo 0`, timeout: 5000 }),
-    })
-    if (!res.ok) return false
-    const data = (await res.json()) as any
-    return (data.result?.output ?? '').trim() === '1'
-  } catch {
-    return false
+    return null
   }
 }
 
@@ -242,30 +239,30 @@ async function scanSandboxSkillsDirectory(
   dir: string,
   source: 'project' | 'user',
 ): Promise<SkillDefinition[]> {
-  const skills: SkillDefinition[] = []
+  // 1 request: list the directory with type info
+  const entries = await sandboxReadDir(sandbox, dir)
+  if (!entries) return []
 
-  const entries = await sandboxReaddir(sandbox, dir)
+  // Collect all SKILL.md paths to read (from subdirs and bare files)
+  const skillFilePaths: string[] = []
   for (const entry of entries) {
-    const fullPath = `${dir}/${entry}`
-    const isDir = await sandboxIsDirectory(sandbox, fullPath)
-
-    if (isDir) {
-      const skillFile = `${fullPath}/SKILL.md`
-      const raw = await sandboxReadFile(sandbox, skillFile)
-      if (raw) {
-        const skill = parseSkillFromRaw(raw, skillFile, dir, source)
-        if (skill) skills.push(skill)
-      }
-    } else if (entry === 'SKILL.md') {
-      const raw = await sandboxReadFile(sandbox, fullPath)
-      if (raw) {
-        const skill = parseSkillFromRaw(raw, fullPath, dir, source)
-        if (skill) skills.push(skill)
-      }
+    const fullPath = `${dir}/${entry.name}`
+    if (entry.isDirectory) {
+      skillFilePaths.push(`${fullPath}/SKILL.md`)
+    } else if (entry.name === 'SKILL.md') {
+      skillFilePaths.push(fullPath)
     }
   }
 
-  return skills
+  // Fetch all SKILL.md files in batches of 30, concurrent within each batch
+  const SKILL_READ_BATCH = 30
+  const results = await batchedMap(skillFilePaths, SKILL_READ_BATCH, async (skillFile) => {
+    const raw = await sandboxReadFile(sandbox, skillFile)
+    if (!raw) return null
+    return parseSkillFromRaw(raw, skillFile, dir, source)
+  })
+
+  return results.filter((s): s is SkillDefinition => s !== null)
 }
 
 // ─── 三个核心导出方法 ────────────────────────────────────────────────────────
@@ -311,36 +308,25 @@ export async function loadSkills(originalFn: OriginalLoadSkills): Promise<SkillD
   if (sandbox && sandbox.url) {
     const sandboxCwd = process.env.CODEBUDDY_SANDBOX_CWD || '/home/user'
 
-    // 沙箱 skills/
-    const remoteSandboxSkillsDir = `${sandboxCwd}/skills`
-    if (await sandboxExists(sandbox, remoteSandboxSkillsDir)) {
-      try {
-        const remoteSkills = await scanSandboxSkillsDirectory(sandbox, remoteSandboxSkillsDir, 'project')
-        skills.push(...remoteSkills)
-        if (remoteSkills.length > 0) {
-          console.error(
-            `[SkillLoaderOverride] Loaded ${remoteSkills.length} skill(s) from sandbox ${remoteSandboxSkillsDir}`,
-          )
-        }
-      } catch (e) {
-        console.error('[SkillLoaderOverride] Failed to scan sandbox skills:', (e as Error).message)
-      }
-    }
+    // Scan both sandbox skill directories concurrently (2 ListDir + N reads in parallel)
+    const [remoteSkills, remoteCbSkills] = await Promise.all([
+      scanSandboxSkillsDirectory(sandbox, `${sandboxCwd}/skills`, 'project').catch(() => []),
+      scanSandboxSkillsDirectory(sandbox, `${sandboxCwd}/.codebuddy/skills`, 'project').catch(
+        () => [],
+      ),
+    ])
 
-    // 沙箱 .codebuddy/skills/
-    const remoteCbSkillsDir = `${sandboxCwd}/.codebuddy/skills`
-    if (await sandboxExists(sandbox, remoteCbSkillsDir)) {
-      try {
-        const remoteCbSkills = await scanSandboxSkillsDirectory(sandbox, remoteCbSkillsDir, 'project')
-        skills.push(...remoteCbSkills)
-        if (remoteCbSkills.length > 0) {
-          console.error(
-            `[SkillLoaderOverride] Loaded ${remoteCbSkills.length} skill(s) from sandbox ${remoteCbSkillsDir}`,
-          )
-        }
-      } catch {
-        // remote unavailable
-      }
+    if (remoteSkills.length > 0) {
+      skills.push(...remoteSkills)
+      console.error(
+        `[SkillLoaderOverride] Loaded ${remoteSkills.length} skill(s) from sandbox ${sandboxCwd}/skills`,
+      )
+    }
+    if (remoteCbSkills.length > 0) {
+      skills.push(...remoteCbSkills)
+      console.error(
+        `[SkillLoaderOverride] Loaded ${remoteCbSkills.length} skill(s) from sandbox ${sandboxCwd}/.codebuddy/skills`,
+      )
     }
   }
 
