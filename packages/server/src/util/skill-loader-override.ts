@@ -39,11 +39,7 @@ type OriginalParseSkillFile = (filePath: string, baseDir: string, source: string
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
 /** Run async tasks in batches to avoid overwhelming the sandbox with too many concurrent requests. */
-async function batchedMap<T, R>(
-  items: T[],
-  batchSize: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
+async function batchedMap<T, R>(items: T[], batchSize: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = []
   for (let i = 0; i < items.length; i += batchSize) {
     const batch = items.slice(i, i + batchSize)
@@ -214,14 +210,11 @@ async function sandboxReadDir(
   dirPath: string,
 ): Promise<Array<{ name: string; isDirectory: boolean }> | null> {
   try {
-    const res = await fetch(
-      `${sandbox.url}/e2b-compatible/filesystem.Filesystem/ListDir`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...sandbox.headers },
-        body: JSON.stringify({ path: dirPath, depth: 1 }),
-      },
-    )
+    const res = await fetch(`${sandbox.url}/e2b-compatible/filesystem.Filesystem/ListDir`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...sandbox.headers },
+      body: JSON.stringify({ path: dirPath, depth: 1 }),
+    })
     if (!res.ok) return null
     const data = (await res.json()) as { entries?: Array<{ name: string; type: string }> }
     if (!data.entries) return null
@@ -311,16 +304,12 @@ export async function loadSkills(originalFn: OriginalLoadSkills): Promise<SkillD
     // Scan both sandbox skill directories concurrently (2 ListDir + N reads in parallel)
     const [remoteSkills, remoteCbSkills] = await Promise.all([
       scanSandboxSkillsDirectory(sandbox, `${sandboxCwd}/skills`, 'project').catch(() => []),
-      scanSandboxSkillsDirectory(sandbox, `${sandboxCwd}/.codebuddy/skills`, 'project').catch(
-        () => [],
-      ),
+      scanSandboxSkillsDirectory(sandbox, `${sandboxCwd}/.codebuddy/skills`, 'project').catch(() => []),
     ])
 
     if (remoteSkills.length > 0) {
       skills.push(...remoteSkills)
-      console.error(
-        `[SkillLoaderOverride] Loaded ${remoteSkills.length} skill(s) from sandbox ${sandboxCwd}/skills`,
-      )
+      console.error(`[SkillLoaderOverride] Loaded ${remoteSkills.length} skill(s) from sandbox ${sandboxCwd}/skills`)
     }
     if (remoteCbSkills.length > 0) {
       skills.push(...remoteCbSkills)
