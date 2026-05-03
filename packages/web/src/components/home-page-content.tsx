@@ -433,6 +433,7 @@ export function HomePageContent({
     selectedAgent: string
     selectedModel: string
     selectedModels?: string[]
+    selectedRuntime?: string
     installDependencies: boolean
     maxDuration: number
     keepAlive: boolean
@@ -492,6 +493,7 @@ export function HomePageContent({
           repoUrl: repo.clone_url,
           selectedAgent: data.selectedAgent,
           selectedModel: data.selectedModel,
+          selectedRuntime: data.selectedRuntime,
           installDependencies: data.installDependencies,
           maxDuration: data.maxDuration,
           keepAlive: data.keepAlive,
@@ -566,6 +568,7 @@ export function HomePageContent({
           repoUrl: data.repoUrl,
           selectedAgent: agent,
           selectedModel: model,
+          selectedRuntime: data.selectedRuntime,
           installDependencies: data.installDependencies,
           maxDuration: data.maxDuration,
           keepAlive: data.keepAlive,

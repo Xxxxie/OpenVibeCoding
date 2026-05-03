@@ -408,11 +408,16 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
 
   const effectivePrompt = prompt.trim() ? prompt : hasResumePayload ? '继续未完成的任务' : prompt
 
-  // Read task's selectedModel
+  // Read task metadata once: selectedModel + mode + selectedRuntime
   let selectedModel: string | undefined
+  let taskMode: 'default' | 'coding' | undefined
+  let taskRuntime: string | undefined
   try {
     const task = await getDb().tasks.findById(sessionId)
     selectedModel = task?.selectedModel || undefined
+    if (task?.mode === 'coding') taskMode = 'coding'
+    // task.selectedRuntime 是创建任务时用户选择的 runtime（如 'opencode-acp'）
+    taskRuntime = task?.selectedRuntime || undefined
   } catch {
     // read failure doesn't affect main flow
   }
@@ -424,18 +429,9 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
     // write failure doesn't affect main flow
   }
 
-  // Resolve task mode
-  let taskMode: 'default' | 'coding' | undefined
-  try {
-    const task = await getDb().tasks.findById(sessionId)
-    if (task?.mode === 'coding') taskMode = 'coding'
-  } catch {
-    // ignore
-  }
-
-  // Resolve runtime: explicit param > env var > default
+  // Resolve runtime: 优先级 request param > task's selectedRuntime > AGENT_RUNTIME env > default
   const runtime = agentRuntimeRegistry.resolve({
-    explicitRuntime: params.runtime,
+    explicitRuntime: params.runtime || taskRuntime,
     conversationId: sessionId,
   })
 

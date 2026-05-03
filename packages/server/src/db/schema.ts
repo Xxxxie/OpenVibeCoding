@@ -64,6 +64,7 @@ export const tasks = sqliteTable(
     repoUrl: text('repo_url'),
     selectedAgent: text('selected_agent').default('claude'),
     selectedModel: text('selected_model'),
+    selectedRuntime: text('selected_runtime'), // 'tencent-sdk' | 'opencode-acp' | null (null = registry default)
     mode: text('mode').notNull().default('default'), // 'default' | 'coding'
     installDependencies: integer('install_dependencies', { mode: 'boolean' }).default(false),
     maxDuration: integer('max_duration').default(parseInt(process.env.MAX_SANDBOX_DURATION || '300', 10)),

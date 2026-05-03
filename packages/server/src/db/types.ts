@@ -37,6 +37,7 @@ export interface Task {
   repoUrl: string | null
   selectedAgent: string | null
   selectedModel: string | null
+  selectedRuntime: string | null
   mode: string
   installDependencies: boolean | null
   maxDuration: number | null
@@ -216,6 +217,7 @@ type TaskNullableFields =
   | 'repoUrl'
   | 'selectedAgent'
   | 'selectedModel'
+  | 'selectedRuntime'
   | 'installDependencies'
   | 'maxDuration'
   | 'keepAlive'

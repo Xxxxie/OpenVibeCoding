@@ -192,8 +192,7 @@ async function spawnLocalOpencode(
   const bin = getResolvedBin()
   if (!bin) {
     throw new Error(
-      `opencode CLI not found. Install via: npm i -g opencode-ai\n` +
-        `Or set OPENCODE_BIN env to the absolute path.`,
+      `opencode CLI not found. Install via: npm i -g opencode-ai\n` + `Or set OPENCODE_BIN env to the absolute path.`,
     )
   }
 

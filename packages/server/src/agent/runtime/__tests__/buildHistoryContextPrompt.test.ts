@@ -35,11 +35,7 @@ function reasoningPart(content: string) {
   return { contentType: 'reasoning', content }
 }
 
-function toolCallPart(
-  toolName: string,
-  input: Record<string, unknown>,
-  toolCallId = 'tc-1',
-) {
+function toolCallPart(toolName: string, input: Record<string, unknown>, toolCallId = 'tc-1') {
   return {
     contentType: 'tool_call',
     content: JSON.stringify(input),
@@ -205,10 +201,7 @@ describe('buildHistoryContextPrompt', () => {
 
   it('reasoning part is NOT included in context', async () => {
     vi.mocked(persistenceService.loadDBMessages).mockResolvedValueOnce([
-      makeRecord('r1', 'assistant', 'done', [
-        reasoningPart('my secret thinking process'),
-        textPart('final answer'),
-      ]),
+      makeRecord('r1', 'assistant', 'done', [reasoningPart('my secret thinking process'), textPart('final answer')]),
     ])
     const result = await buildHistoryContextPrompt(CONV, ENV, USER, PROMPT)
     expect(result).not.toContain('my secret thinking process')
