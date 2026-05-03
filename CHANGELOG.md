@@ -20,6 +20,14 @@
   - session 云凭证（SecretId/SecretKey/SessionToken）从明文 `.session-env.json` 改为 AES-256-GCM 加密存储（`src/session-env.ts`）
   - Git remote URL 不再嵌入 token，改用内存 credential helper 在 push/fetch 时动态注入，`git remote -v` 不再泄露凭证
 
+- **ImageGen 图片生成**（Default 模式可用）: 生成的图片自动上传到 CloudBase 静态托管并返回 CDN 公开链接，Agent 在聊天中直接展示图片。前端 `ImageGen` / `ImageEdit` 工具卡片支持 Markdown 渲染，CDN 图片内联显示。（`GET /api/storage/presign?bucketType=static&key=xxx` 生成 COS 预签名 PUT URL，tool-override 直接 PUT 到 COS，不经过 server）
+
+- **文件浏览器下载**: 右键菜单新增文件下载（直接流式返回）和文件夹下载（沙箱内 `zip -r` 打包后流式返回）。临时 zip 存放在 `.tmp/`（已 gitignore），传输完成后删除。
+
+- **管理员用户管理 — API Key 列**: 用户列表新增 API Key 一列，支持复制和重置；管理员可为任意用户生成新 key（`POST /api/admin/users/:id/api-key/reset`）。新注册用户自动生成 API key。
+
+- **CloudBase 数据库集合权限加固**: 所有系统集合（users/tasks/keys 等）在首次访问时自动通过 `ModifySafeRule(AclTag=ADMINONLY)` 设为管理员专用，阻止前端 Web SDK 直接读写。
+
 ### Fixed
 
 - **Agent 响应消失** (`routes/acp.ts`): `removeAgent` 的 30s 延迟定时器可能误删新一轮同 conversationId 的注册条目，导致 SSE 轮询立即退出。改为携带 `turnId` 比对，stale 定时器跳过删除；poll loop 增加 3×500ms grace tick 让 eventBuffer 排空。
@@ -39,6 +47,8 @@
 - **Server 进程因沙箱连接中断崩溃**: `uncaughtException` 增加对 `EPIPE`/`ECONNRESET`/`ECONNREFUSED` 的静默处理；`unhandledRejection` 对 "Session not found" 静默降级。
 
 - **scope/info 首次响应阻塞 ~59s**: `spawnVite` 将 tar 解压 + npm install 包裹在 `setImmediate` 中异步执行，HTTP handler 立即返回 `viteState: "starting"`，不再阻塞。
+
+- **API Key 认证失效** (`middleware/auth.ts`): AES-CBC 每次加密产生不同密文，`findByApiKey(encrypt(plain))` 永远查不到用户。改为 API key 存储明文（`sak_xxx`，可吊销，DB 层已有 ADMINONLY 权限保护），`findByApiKey(plain)` 直接精确匹配。
 
 ### Changed
 

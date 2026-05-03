@@ -907,7 +907,9 @@ export function overrideTools(toolMap: Map<string, any>): void {
         // Extract all https:// URLs from the content
         const urlMatches = result.content.match(/https?:\/\/[^\s\x00-\x1f]+/g)
         if (urlMatches && urlMatches.length > 0) {
-          const urls = urlMatches.filter((u: string) => u.endsWith('.png') || u.endsWith('.jpg') || u.endsWith('.webp') || u.endsWith('.gif'))
+          const urls = urlMatches.filter(
+            (u: string) => u.endsWith('.png') || u.endsWith('.jpg') || u.endsWith('.webp') || u.endsWith('.gif'),
+          )
           if (urls.length === 1) {
             return {
               title: 'Image generated successfully',
