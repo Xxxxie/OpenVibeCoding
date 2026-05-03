@@ -1,4 +1,5 @@
 import CloudBase from '@cloudbase/node-sdk'
+import CloudBaseManager from '@cloudbase/manager-node'
 
 const COLLECTION_PREFIX = process.env.DB_COLLECTION_PREFIX || 'vibe_agent_'
 
@@ -17,7 +18,15 @@ const COLLECTION_NAMES = [
   'admin_logs',
 ] as const
 
+/**
+ * Admin-only collection security rule.
+ * Web SDK with publishable key cannot read/write these collections — only
+ * server-side calls with admin secret pass through.
+ */
+const ADMIN_ONLY_ACL_TAG = 'ADMINONLY'
+
 let app: ReturnType<typeof CloudBase.init> | null = null
+let managerApp: CloudBaseManager | null = null
 
 function getApp(): ReturnType<typeof CloudBase.init> {
   if (app) return app
@@ -41,6 +50,50 @@ function getApp(): ReturnType<typeof CloudBase.init> {
   })
 
   return app
+}
+
+function getManager(): CloudBaseManager {
+  if (managerApp) return managerApp
+  const envId = process.env.TCB_ENV_ID!
+  const secretId = process.env.TCB_SECRET_ID!
+  const secretKey = process.env.TCB_SECRET_KEY!
+  const token = process.env.TCB_TOKEN || ''
+  managerApp = new CloudBaseManager({
+    envId,
+    secretId,
+    secretKey,
+    ...(token ? { token } : {}),
+  })
+  return managerApp
+}
+
+/**
+ * Set admin-only security rule on a collection via TCB ModifySafeRule API.
+ * AclTag=ADMINONLY blocks Web SDK (publishable key) reads/writes while
+ * server-side calls with admin secret still pass through.
+ * Called once per collection on first access. Non-fatal on failure.
+ */
+async function ensureAdminOnlyRule(collectionName: string): Promise<void> {
+  try {
+    const envId = process.env.TCB_ENV_ID!
+    const manager = getManager()
+    const commonService = manager.commonService('tcb', '2018-06-08')
+    await commonService.call({
+      Action: 'ModifySafeRule',
+      Param: {
+        EnvId: envId,
+        CollectionName: collectionName,
+        AclTag: ADMIN_ONLY_ACL_TAG,
+      },
+    })
+  } catch (err) {
+    // Non-fatal: server-side SDK uses admin creds and bypasses rules.
+    console.error(
+      '[cloudbase] Failed to set admin-only rule on',
+      collectionName,
+      err instanceof Error ? err.message : err,
+    )
+  }
 }
 
 export function getDatabase(): any {
@@ -67,6 +120,9 @@ export async function getCollection(name: (typeof COLLECTION_NAMES)[number]): Pr
     } catch {
       // Collection already exists, ignore error
     }
+    // Ensure admin-only rule (idempotent at TCB side, runs even if collection
+    // already existed — covers upgrades from older deployments without rules)
+    await ensureAdminOnlyRule(fullName)
     ensuredCollections.add(fullName)
   }
 

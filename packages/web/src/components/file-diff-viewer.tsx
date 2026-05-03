@@ -5,6 +5,8 @@ import { generateDiffFile } from '@git-diff-view/file'
 import '@git-diff-view/react/styles/diff-view-pure.css'
 import { FileEditor } from '@/components/file-editor'
 import { toast } from 'sonner'
+import { Download } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 
 interface DiffData {
   filename: string
@@ -340,6 +342,13 @@ export function FileDiffViewer({
       ? `data:${mimeType};base64,${diffData.newContent}`
       : `data:${mimeType};base64,${btoa(diffData.newContent)}`
 
+    const handleDownload = () => {
+      const a = document.createElement('a')
+      a.href = imageData
+      a.download = diffData.filename.split('/').pop() || diffData.filename
+      a.click()
+    }
+
     return (
       <div className="flex items-center justify-center h-full p-4 bg-muted/30">
         <div className="text-center max-w-full">
@@ -358,7 +367,11 @@ export function FileDiffViewer({
               }}
             />
           </div>
-          <p className="text-xs md:text-sm text-muted-foreground">{diffData.filename}</p>
+          <p className="text-xs md:text-sm text-muted-foreground mb-3">{diffData.filename}</p>
+          <Button variant="outline" size="sm" onClick={handleDownload}>
+            <Download className="h-3.5 w-3.5 mr-1.5" />
+            Download
+          </Button>
         </div>
       </div>
     )

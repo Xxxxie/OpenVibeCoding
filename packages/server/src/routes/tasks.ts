@@ -126,11 +126,17 @@ async function detectPackageManager(sandbox: SandboxInstance): Promise<PackageMa
 async function readFileFromSandbox(
   sandbox: SandboxInstance,
   filePath: string,
-): Promise<{ content: string; found: boolean }> {
+  options?: { isImage?: boolean },
+): Promise<{ content: string; found: boolean; isBase64?: boolean }> {
   try {
     // Use e2b-compatible file read endpoint — returns raw content without line numbers
     const response = await sandbox.request(`/e2b-compatible/files?path=${encodeURIComponent(filePath)}`)
     if (!response.ok) return { content: '', found: false }
+    if (options?.isImage) {
+      const buffer = await response.arrayBuffer()
+      const content = Buffer.from(buffer).toString('base64')
+      return { content, found: true, isBase64: true }
+    }
     const content = await response.text()
     return { content, found: true }
   } catch {
@@ -857,6 +863,7 @@ tasksRouter.get('/:taskId/files/list-dir', requireUserEnv, async (c) => {
     if (!task) return c.json({ success: false, error: 'Task not found' }, 404)
     if (!task.sandboxId) return c.json({ success: false, error: 'Sandbox is not running' }, 410)
 
+    
     const sandbox = await getScfSandbox(task, envId)
     if (!sandbox) return c.json({ success: false, error: 'Sandbox not found' }, 410)
 
@@ -930,7 +937,14 @@ tasksRouter.get('/:taskId/file-content', requireUserEnv, async (c) => {
       const sandbox = await getScfSandbox(task, envId)
       if (!sandbox) return c.json({ error: 'Sandbox not found' }, 410)
       const normalizedPath = filename.startsWith('/') ? filename.substring(1) : filename
-      const result = await readFileFromSandbox(sandbox, normalizedPath)
+      const isImage = isImageFile(filename)
+      const isBinary = isBinaryFile(filename)
+      if (isBinary && !isImage)
+        return c.json({
+          success: true,
+          data: { filename, oldContent: '', newContent: '', language: 'text', isBinary: true, isImage: false },
+        })
+      const result = await readFileFromSandbox(sandbox, normalizedPath, { isImage })
       if (!result.found) return c.json({ error: 'File not found in sandbox' }, 404)
       const ext = filename.split('.').pop()?.toLowerCase() || ''
       const langMap: Record<string, string> = {
@@ -957,7 +971,8 @@ tasksRouter.get('/:taskId/file-content', requireUserEnv, async (c) => {
           newContent: result.content,
           language: langMap[ext] || 'text',
           isBinary: false,
-          isImage: false,
+          isImage,
+          isBase64: result.isBase64 ?? false,
         },
       })
     }
@@ -994,9 +1009,10 @@ tasksRouter.get('/:taskId/file-content', requireUserEnv, async (c) => {
           const sandbox = await getScfSandbox(task, envId)
           if (sandbox) {
             const normalizedPath = filename.startsWith('/') ? filename.substring(1) : filename
-            const result = await readFileFromSandbox(sandbox, normalizedPath)
+            const result = await readFileFromSandbox(sandbox, normalizedPath, { isImage })
             if (result.found) {
               newContent = result.content
+              if (result.isBase64) isBase64 = true
               fileFound = true
             }
           }
@@ -1012,9 +1028,10 @@ tasksRouter.get('/:taskId/file-content', requireUserEnv, async (c) => {
           const sandbox = await getScfSandbox(task, envId)
           if (sandbox) {
             const normalizedPath = filename.startsWith('/') ? filename.substring(1) : filename
-            const result = await readFileFromSandbox(sandbox, normalizedPath)
+            const result = await readFileFromSandbox(sandbox, normalizedPath, { isImage })
             if (result.found) {
               content = result.content
+              if (result.isBase64) isBase64 = true
               fileFound = true
             }
           }
@@ -1032,9 +1049,10 @@ tasksRouter.get('/:taskId/file-content', requireUserEnv, async (c) => {
           const sandbox = await getScfSandbox(task, envId)
           if (sandbox) {
             const normalizedPath = filename.startsWith('/') ? filename.substring(1) : filename
-            const result = await readFileFromSandbox(sandbox, normalizedPath)
+            const result = await readFileFromSandbox(sandbox, normalizedPath, { isImage })
             if (result.found) {
               content = result.content
+              if (result.isBase64) isBase64 = true
               fileFound = true
             }
           }
@@ -2805,5 +2823,91 @@ tasksRouter.get('/:taskId/preview-errors', requireUserEnv, async (c) => {
     return c.json({ hasErrors: false, errors: '' })
   }
 })
+
+// ---------------------------------------------------------------------------
+// GET /:taskId/files/download — Download file or folder (as zip) from sandbox
+// ---------------------------------------------------------------------------
+tasksRouter.get('/:taskId/files/download', requireUserEnv, async (c) => {
+  try {
+    const session = c.get('session')!
+    const { envId } = c.get('userEnv')!
+    const { taskId } = c.req.param()
+    const rawPath = c.req.query('path')
+    if (!rawPath) return c.json({ error: 'path is required' }, 400)
+    const filePath = decodeURIComponent(rawPath).replace(/\.\./g, '').replace(/^\/+/, '') || '.'
+
+    const task = await findActiveTask(taskId, session.user.id)
+    if (!task) return c.json({ error: 'Task not found' }, 404)
+    if (!task.sandboxId) return c.json({ error: 'Sandbox is not running' }, 410)
+
+    const sandbox = await getScfSandbox(task, envId)
+    if (!sandbox) return c.json({ error: 'Sandbox not found' }, 410)
+
+    const basename = filePath === '.' ? 'workspace' : (filePath.split('/').pop() || 'download')
+
+    // Check if directory
+    const statResult = await runCommandInScfSandbox(
+      sandbox,
+      `test -d '${filePath.replace(/'/g, "'\\''")}' && echo dir || echo file`,
+    )
+    const isDir = statResult.output?.trim() === 'dir'
+
+    if (!isDir) {
+      // Single file: fetch directly
+      const ext = basename.split('.').pop()?.toLowerCase() || ''
+      const mimeMap: Record<string, string> = {
+        png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+        webp: 'image/webp', svg: 'image/svg+xml', pdf: 'application/pdf',
+        zip: 'application/zip', json: 'application/json', txt: 'text/plain',
+        md: 'text/markdown', html: 'text/html', css: 'text/css',
+        js: 'text/javascript', ts: 'text/typescript',
+      }
+      const fileResp = await sandbox.request(`/e2b-compatible/files?path=${encodeURIComponent(filePath)}`)
+      if (!fileResp.ok) return c.json({ error: 'File not found' }, 404)
+      const buffer = await fileResp.arrayBuffer()
+      return new Response(buffer, {
+        headers: {
+          'Content-Type': mimeMap[ext] || 'application/octet-stream',
+          'Content-Disposition': `attachment; filename="${basename}"`,
+          'Content-Length': String(buffer.byteLength),
+        },
+      })
+    }
+
+    // Directory: zip in sandbox → fetch the zip file → stream to browser
+    const tmpZip = `.tmp/__dl_${Date.now()}.zip`
+    const quoted = filePath.replace(/'/g, "'\\''")
+    const cleanup = () => runCommandInScfSandbox(sandbox!, `rm -f '${tmpZip}'`).catch(() => {})
+
+    try {
+      const zipResult = await runCommandInScfSandbox(
+        sandbox,
+        `mkdir -p .tmp && cd '${quoted}' && zip -r '${tmpZip}' . && echo ok`,
+        60000,
+      )
+      if (!zipResult.success || zipResult.output?.trim() !== 'ok') {
+        return c.json({ error: 'Failed to create zip in sandbox' }, 500)
+      }
+
+      const zipResp = await sandbox.request(`/e2b-compatible/files?path=${encodeURIComponent(tmpZip)}`)
+      if (!zipResp.ok) return c.json({ error: 'Failed to fetch zip from sandbox' }, 500)
+
+      const buffer = await zipResp.arrayBuffer()
+      return new Response(buffer, {
+        headers: {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="${basename}.zip"`,
+          'Content-Length': String(buffer.byteLength),
+        },
+      })
+    } finally {
+      cleanup()
+    }
+  } catch (err) {
+    console.error('[files/download] error:', err)
+    return c.json({ error: 'Download failed' }, 500)
+  }
+})
+
 
 export default tasksRouter

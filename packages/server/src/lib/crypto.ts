@@ -61,3 +61,18 @@ export const decrypt = (encryptedText: string): string => {
     throw new Error('Failed to decrypt: ' + (error instanceof Error ? error.message : 'unknown error'))
   }
 }
+
+/**
+ * Deterministic hash for lookup of API-key-like tokens.
+ * Unlike `encrypt`, this is stable across calls so we can look up the row by
+ * `hashToken(plain)` in the DB.
+ * Uses HMAC-SHA256 keyed with ENCRYPTION_KEY to prevent rainbow-table attacks.
+ */
+export const hashToken = (plain: string): string => {
+  if (!plain) return plain
+  const ENCRYPTION_KEY = getEncryptionKey()
+  if (!ENCRYPTION_KEY) {
+    throw new Error('ENCRYPTION_KEY environment variable is required')
+  }
+  return crypto.createHmac('sha256', ENCRYPTION_KEY).update(plain).digest('hex')
+}

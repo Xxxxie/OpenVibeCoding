@@ -16,6 +16,7 @@ import {
   FilePlus,
   FolderPlus,
   Trash2,
+  Download,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useAtom } from 'jotai'
@@ -793,6 +794,16 @@ export function FileBrowser({
     toast.success('File copied to clipboard')
   }, [])
 
+  const handleDownload = useCallback((filePath: string) => {
+    const url = `/api/tasks/${taskId}/files/download?path=${encodeURIComponent(filePath)}`
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filePath.split('/').pop() || filePath
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+  }, [taskId])
+
   const handlePaste = useCallback(
     async (targetPath?: string) => {
       if (!clipboardFile) {
@@ -1078,6 +1089,10 @@ export function FileBrowser({
                           <Clipboard className="w-4 h-4 mr-2" />
                           Paste<DropdownMenuShortcut>{isMac ? '⌘V' : 'Ctrl+V'}</DropdownMenuShortcut>
                         </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleDownload(fullPath)}>
+                          <Download className="w-4 h-4 mr-2" />
+                          Download as zip
+                        </DropdownMenuItem>
                       </>
                     )}
                   </DropdownMenuContent>
@@ -1194,6 +1209,10 @@ export function FileBrowser({
                           <DropdownMenuItem onClick={() => handlePaste()} disabled={!clipboardFile}>
                             <Clipboard className="w-4 h-4 mr-2" />
                             Paste<DropdownMenuShortcut>{isMac ? '⌘V' : 'Ctrl+V'}</DropdownMenuShortcut>
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handleDownload(node.filename!)}>
+                            <Download className="w-4 h-4 mr-2" />
+                            Download
                           </DropdownMenuItem>
                           <DropdownMenuItem
                             onClick={() => {

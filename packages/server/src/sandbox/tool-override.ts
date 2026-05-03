@@ -36,6 +36,19 @@ export interface ToolOverrideConfig {
   url: string
   /** 自定义请求头 */
   headers?: Record<string, string>
+  /**
+   * 静态托管上传配置（可选）。
+   * 提供后 ImageGen 生成的图片会上传到静态托管并返回 CDN 地址。
+   */
+  hosting?: {
+    /** GET presign 端点，返回 { presignedUrl, cdnUrl }
+     *  使用 sessionCookie 作为认证（nex_session cookie） */
+    presignUrl: string
+    /** Session JWE cookie 值（nex_session），用于请求 presign 端点 */
+    sessionCookie: string
+    /** 会话 ID，用于图片路径隔离 generated-images/{sessionId}/xxx.png */
+    sessionId: string
+  }
 }
 
 export interface ToolResult {
@@ -578,6 +591,7 @@ export function overrideTools(toolMap: Map<string, any>): void {
   const baseUrl = config.url.replace(/\/mcp\/?$/, '').replace(/\/api\/?$/, '')
 
   const headers = config.headers || {}
+  const hostingConfig = config.hosting ?? null
   const normalizers = makeNormalizers()
   let overriddenCount = 0
 
@@ -793,6 +807,92 @@ export function overrideTools(toolMap: Map<string, any>): void {
       if (!task) return originalTaskStopExecute.call(taskStopTool, params, context, extra)
 
       return killPtyTask(baseUrl, headers, task, taskId)
+    }
+  })
+
+  // ── ImageGen：patch imageService.saveImage，直接将图片上传，不落本地磁盘 ──
+  //
+  // 原始 saveImage(imageData, prompt, index) 输入：
+  //   imageData.b64_json  — base64 字符串
+  //   imageData.url       — 临时 CDN URL（有效期 24h）
+  //
+  // patch 后：decode/下载 → Blob
+  //   - 有 hostingConfig → POST hosting-upload 端点 → 返回静态托管 CDN URL
+  //   - 无 hostingConfig → POST 沙箱 /e2b-compatible/files → 返回沙箱内相对路径
+  overrideTool('ImageGen', (imageGenTool) => {
+    const imageService = imageGenTool.imageService
+    if (!imageService?.saveImage) return
+
+    imageService.saveImage = async (imageData: any, prompt: string, index: number): Promise<string> => {
+      // 生成与原始实现相同的文件名
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+      const slug = prompt.slice(0, 30).replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '_')
+      const suffix = index > 0 ? `_${index + 1}` : ''
+      const filename = `${slug}_${ts}${suffix}.png`
+
+      // 获取图片二进制
+      let bytes: Uint8Array
+      if (imageData.b64_json) {
+        bytes = Buffer.from(imageData.b64_json, 'base64')
+      } else if (imageData.url) {
+        const res = await fetch(imageData.url)
+        bytes = new Uint8Array(await res.arrayBuffer())
+      } else {
+        throw new Error('saveImage: imageData has neither b64_json nor url')
+      }
+
+      const blob = new Blob([bytes as any], { type: 'image/png' })
+
+      // ── 上传到静态托管（有 hostingConfig 时）──
+      if (hostingConfig) {
+        const cloudKey = `generated-images/${hostingConfig.sessionId}/${filename}`
+
+        // 1. 向 server 请求预签名 PUT URL（用 session cookie 认证）
+        const separator = hostingConfig.presignUrl.includes('?') ? '&' : '?'
+        const presignRes = await fetch(
+          `${hostingConfig.presignUrl}${separator}key=${encodeURIComponent(cloudKey)}`,
+          { headers: { Cookie: `nex_session=${hostingConfig.sessionCookie}` } },
+        )
+        if (!presignRes.ok) {
+          const text = await presignRes.text().catch(() => '')
+          throw new Error(`ImageGen presign failed: ${presignRes.status} ${text}`)
+        }
+        const { presignedUrl, cdnUrl } = (await presignRes.json()) as {
+          presignedUrl: string
+          cdnUrl: string
+        }
+
+        // 2. 直接 PUT 到 COS（不经过 server）
+        const putRes = await fetch(presignedUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'image/png' },
+          body: blob,
+        })
+        if (!putRes.ok) {
+          const text = await putRes.text().catch(() => '')
+          throw new Error(`ImageGen COS PUT failed: ${putRes.status} ${text}`)
+        }
+
+        return cdnUrl
+      }
+
+      // ── fallback：上传到沙箱 /e2b-compatible/files ──
+      const sandboxRelPath = `generated-images/${filename}`
+      const form = new FormData()
+      form.append('file', blob, filename)
+
+      const uploadRes = await fetch(`${baseUrl}/e2b-compatible/files?path=${encodeURIComponent(sandboxRelPath)}`, {
+        method: 'POST',
+        headers: { ...headers },
+        body: form,
+      })
+
+      if (!uploadRes.ok) {
+        const text = await uploadRes.text().catch(() => '')
+        throw new Error(`ImageGen upload to sandbox failed: ${uploadRes.status} ${text}`)
+      }
+
+      return sandboxRelPath
     }
   })
 

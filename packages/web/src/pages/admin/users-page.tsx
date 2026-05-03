@@ -16,7 +16,7 @@ import { Label } from '../../components/ui/label'
 import { Input } from '../../components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select'
 import { toast } from 'sonner'
-import { UserPlus, ShieldCheck, ShieldOff, Ban, Check, LayoutDashboard, Trash2 } from 'lucide-react'
+import { UserPlus, ShieldCheck, ShieldOff, Ban, Check, LayoutDashboard, Trash2, Key, Copy, RefreshCw } from 'lucide-react'
 
 interface User {
   id: string
@@ -32,6 +32,7 @@ interface User {
   envId: string | null
   envStatus: string | null
   credentialType: 'permanent' | 'temp' | null
+  apiKey: string | null
 }
 
 function formatDate(ts: number) {
@@ -142,6 +143,24 @@ export function AdminUsersPage() {
     }
   }
 
+  async function handleCopyApiKey(apiKey: string | null) {
+    if (!apiKey) return
+    await navigator.clipboard.writeText(apiKey)
+    toast.success('已复制到剪贴板')
+  }
+
+  async function handleResetApiKey(user: User) {
+    if (!confirm(`确定要重置 ${user.username} 的 API Key 吗？旧 key 将立即失效。`)) return
+    try {
+      const res = (await api.post(`/api/admin/users/${user.id}/api-key/reset`)) as { apiKey: string }
+      await navigator.clipboard.writeText(res.apiKey)
+      toast.success('新 API Key 已生成并复制到剪贴板')
+      loadUsers()
+    } catch {
+      toast.error('重置失败')
+    }
+  }
+
   async function handleDeleteUser() {
     if (!selectedUser) return
     setIsSubmitting(true)
@@ -218,6 +237,7 @@ export function AdminUsersPage() {
                 <TableHead className="w-[70px]">状态</TableHead>
                 <TableHead className="w-[160px]">环境 ID</TableHead>
                 <TableHead className="w-[90px]">凭证类型</TableHead>
+                <TableHead className="w-[140px]">API Key</TableHead>
                 <TableHead className="w-[80px]">来源</TableHead>
                 <TableHead className="w-[110px]">注册时间</TableHead>
                 <TableHead className="text-right">操作</TableHead>
@@ -271,6 +291,43 @@ export function AdminUsersPage() {
                       </Badge>
                     ) : (
                       <span className="text-xs text-muted-foreground">-</span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {user.apiKey ? (
+                      <div className="flex items-center gap-1">
+                        <code className="text-[11px] font-mono text-muted-foreground bg-muted px-1.5 py-0.5 rounded truncate max-w-[90px]">
+                          {user.apiKey.slice(0, 10)}…
+                        </code>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-6 w-6"
+                          title="复制 API Key"
+                          onClick={() => handleCopyApiKey(user.apiKey)}
+                        >
+                          <Copy className="h-3 w-3" />
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-6 w-6"
+                          title="重置 API Key"
+                          onClick={() => handleResetApiKey(user)}
+                        >
+                          <RefreshCw className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 text-xs text-muted-foreground"
+                        onClick={() => handleResetApiKey(user)}
+                      >
+                        <Key className="h-3 w-3 mr-1" />
+                        生成
+                      </Button>
                     )}
                   </TableCell>
                   <TableCell className="text-muted-foreground text-sm">

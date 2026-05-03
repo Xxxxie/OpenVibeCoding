@@ -2,7 +2,6 @@ import { Context, Next } from 'hono'
 import { getCookie } from 'hono/cookie'
 import { decryptJWE } from '../lib/session'
 import { getDb } from '../db/index.js'
-import { encrypt } from '../lib/crypto.js'
 import CloudBaseManager from '@cloudbase/manager-node'
 import { buildUserEnvPolicyStatements } from '../cloudbase/provision.js'
 
@@ -51,9 +50,9 @@ export async function authMiddleware(c: Context<AppEnv>, next: Next) {
   if (authHeader?.startsWith('Bearer sak_')) {
     try {
       const plainKey = authHeader.slice(7) // Remove "Bearer "
-      const encryptedKey = encrypt(plainKey)
+      // apiKey stored as plaintext (rotatable, admin-visible).
       const db = getDb()
-      const user = await db.users.findByApiKey(encryptedKey)
+      const user = await db.users.findByApiKey(plainKey)
       if (user) {
         c.set('session', {
           created: Date.now(),

@@ -107,6 +107,7 @@ admin.get('/users', async (c) => {
         envId: res?.envId || null,
         envStatus: res?.status || null,
         credentialType: res?.camSecretId && res?.camSecretKey ? 'permanent' : res?.envId ? 'temp' : null,
+        apiKey: u.apiKey || null,
       }
     }),
     pagination: {
@@ -228,6 +229,19 @@ admin.post('/users/:userId/enable', async (c) => {
   })
 
   return c.json({ success: true })
+})
+
+// Reset user's API key (admin only)
+admin.post('/users/:userId/api-key/reset', async (c) => {
+  const userId = c.req.param('userId')
+  const db = getDb()
+
+  const user = await db.users.findById(userId)
+  if (!user) return c.json({ error: 'User not found' }, 404)
+
+  const plainKey = `sak_${nanoid(40)}`
+  await db.users.update(userId, { apiKey: plainKey })
+  return c.json({ apiKey: plainKey })
 })
 
 // Delete user

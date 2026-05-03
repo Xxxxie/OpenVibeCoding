@@ -4,7 +4,6 @@ import { getDb } from '../db/index.js'
 import bcrypt from 'bcryptjs'
 import { nanoid } from 'nanoid'
 import { encryptJWE } from '../lib/session'
-import { encrypt } from '../lib/crypto'
 import { requireAuth, type AppEnv, type AppSession } from '../middleware/auth'
 import { provisionUserResources, rollbackProvisionedResources } from '../cloudbase/provision.js'
 
@@ -50,7 +49,7 @@ auth.post('/register', async (c) => {
       username: trimmedUsername,
       role: 'user',
       status: 'active',
-      apiKey: encrypt(`sak_${nanoid(40)}`),
+      apiKey: `sak_${nanoid(40)}`,
     })
 
     await getDb().localCredentials.create({
@@ -412,37 +411,24 @@ auth.get('/auth-config', (c) => {
 
 // ─── API Key (view / reset) ────────────────────────────────────────────────
 
-// Get current user's API key
+// Get current user's API key (plaintext).
 auth.get('/api-key', async (c) => {
   const authErr = requireAuth(c)
   if (authErr) return authErr
   const session = c.get('session')!
   const user = await getDb().users.findById(session.user.id)
   if (!user) return c.json({ error: 'User not found' }, 404)
-
-  if (!user.apiKey) {
-    return c.json({ apiKey: null })
-  }
-
-  try {
-    const { decrypt } = await import('../lib/crypto.js')
-    return c.json({ apiKey: decrypt(user.apiKey) })
-  } catch {
-    return c.json({ apiKey: null })
-  }
+  return c.json({ apiKey: user.apiKey || null })
 })
 
-// Reset (regenerate) current user's API key
+// Reset (regenerate) current user's API key.
 auth.post('/api-key/reset', async (c) => {
   const authErr = requireAuth(c)
   if (authErr) return authErr
   const session = c.get('session')!
 
   const plainKey = `sak_${nanoid(40)}`
-  const encryptedKey = encrypt(plainKey)
-
-  await getDb().users.update(session.user.id, { apiKey: encryptedKey })
-
+  await getDb().users.update(session.user.id, { apiKey: plainKey })
   return c.json({ apiKey: plainKey })
 })
 

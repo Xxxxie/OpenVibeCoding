@@ -292,8 +292,7 @@ export class ScfSandboxManager {
     const scfSessionId = options?.sandboxSessionId || (isolation === 'shared' ? envId : conversationId)
     const isCodingMode = options?.isCodingMode || false
 
-    const functionKey = mode === 'shared' ? 'shared' : conversationId
-    const functionName = this.generateFunctionName(functionKey)
+    const functionName = this.generateFunctionName('shared')
 
     // Check if function exists
     const { exists: functionExists } = await this.checkFunctionExists(functionName)
@@ -337,9 +336,8 @@ export class ScfSandboxManager {
     scfSessionId: string,
     options?: { sandboxMode?: 'shared' | 'isolated' | string; isCodingMode?: boolean },
   ): Promise<SandboxInstance | null> {
-    const mode = options?.sandboxMode || 'shared'
-    const functionKey = mode === 'shared' ? 'shared' : conversationId
-    const functionName = this.generateFunctionName(functionKey)
+    const mode = options?.sandboxMode || 'isolated'
+    const functionName = this.generateFunctionName('shared')
 
     const { exists } = await this.checkFunctionExists(functionName)
     if (!exists) return null
@@ -351,7 +349,7 @@ export class ScfSandboxManager {
       envId: scfSessionId,
       status: 'ready',
       mode: 'shared',
-      sandboxMode: (options?.sandboxMode || 'isolated') as any,
+      sandboxMode: mode as any,
       isCodingMode: options?.isCodingMode || false,
     })
   }
