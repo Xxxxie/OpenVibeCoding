@@ -11,5 +11,9 @@
       "@coder/shared": ["../shared/src/index.ts"]
     }
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": [
+    "src/agent/runtime/opencode-tool-templates/**",
+    "src/**/__tests__/**"
+  ]
 }

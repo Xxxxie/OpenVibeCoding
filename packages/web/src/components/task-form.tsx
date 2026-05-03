@@ -42,6 +42,7 @@ interface TaskFormProps {
     selectedAgent: string
     selectedModel: string
     selectedModels?: string[]
+    selectedRuntime?: string
     mode: 'default' | 'coding'
     installDependencies: boolean
     maxDuration: number
@@ -56,6 +57,12 @@ interface TaskFormProps {
   initialKeepAlive?: boolean
   initialEnableBrowser?: boolean
   maxSandboxDuration?: number
+}
+
+/** Human-readable labels for runtime names returned by GET /api/agent/runtimes */
+const RUNTIME_LABELS: Record<string, string> = {
+  'tencent-sdk': 'CodeBuddy (Default)',
+  'opencode-acp': 'OpenCode ACP',
 }
 
 const CODING_AGENTS = [
@@ -137,6 +144,27 @@ export function TaskForm({
   const [codebuddyModels, setCodebuddyModels] = useState<ModelInfo[]>([{ id: 'glm-5.1', name: 'GLM 5.1' }])
   const [repos, setRepos] = useAtom(githubReposAtomFamily(selectedOwner))
   const [, setLoadingRepos] = useState(false)
+
+  // Runtime selector: loaded from /api/agent/runtimes
+  const [selectedRuntime, setSelectedRuntime] = useState<string>('')
+  const [runtimeOptions, setRuntimeOptions] = useState<Array<{ name: string; label: string }>>([])
+  useEffect(() => {
+    fetch('/api/agent/runtimes')
+      .then((r) => r.json())
+      .then((data: { default: string; runtimes: Array<{ name: string; available: boolean }> }) => {
+        const available = data.runtimes.filter((r) => r.available)
+        if (available.length <= 1) return // 只有一个 runtime 时不显示选择器
+        const options = available.map((r) => ({
+          name: r.name,
+          label: RUNTIME_LABELS[r.name] ?? r.name,
+        }))
+        setRuntimeOptions(options)
+        setSelectedRuntime(data.default ?? '')
+      })
+      .catch(() => {
+        /* silently ignore — runtimes endpoint optional */
+      })
+  }, [])
 
   // Options state - initialize with server values
   const [installDependencies, setInstallDependenciesState] = useState(initialInstallDependencies)
@@ -305,6 +333,7 @@ export function TaskForm({
         repoUrl: '',
         selectedAgent,
         selectedModel,
+        selectedRuntime: selectedRuntime || undefined,
         mode: taskMode,
         installDependencies,
         maxDuration,
@@ -353,6 +382,7 @@ export function TaskForm({
       repoUrl: selectedRepoData?.clone_url || '',
       selectedAgent,
       selectedModel,
+      selectedRuntime: selectedRuntime || undefined,
       mode: taskMode,
       installDependencies,
       maxDuration,
@@ -452,6 +482,27 @@ export function TaskForm({
                       })}
                     </SelectContent>
                   </Select>
+
+                  {/* Runtime selector — only shown when multiple runtimes available */}
+                  {runtimeOptions.length > 1 && (
+                    <>
+                      <span className="text-muted-foreground/50">·</span>
+                      <Select value={selectedRuntime} onValueChange={setSelectedRuntime}>
+                        <SelectTrigger className="h-7 border-0 shadow-none px-1 py-0 text-sm text-muted-foreground hover:text-foreground bg-transparent focus:ring-0 gap-1 w-auto min-w-[110px]">
+                          <span className="truncate">
+                            {RUNTIME_LABELS[selectedRuntime] ?? (selectedRuntime || 'Runtime')}
+                          </span>
+                        </SelectTrigger>
+                        <SelectContent>
+                          {runtimeOptions.map((r) => (
+                            <SelectItem key={r.name} value={r.name}>
+                              {r.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </>
+                  )}
                 </div>
 
                 {/* Option Chips - Only visible on desktop */}

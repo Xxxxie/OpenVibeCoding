@@ -196,6 +196,17 @@ export interface SessionPromptParams {
    * - 用户主动开启 Plan 模式时传 `permissionMode: 'plan'`
    */
   permissionMode?: AgentPermissionMode
+  /**
+   * Agent runtime 选择（多 runtime 抽象层新增）
+   *
+   * 取值由 server 注册的 runtime 名决定，目前内置：
+   *   - `tencent-sdk` (默认): 基于 patch 过的 @tencent-ai/agent-sdk
+   *   - `opencode-acp`: spawn `opencode acp` 子进程，走 ACP NDJSON
+   *
+   * 不传 → server 按 `agentRuntimeRegistry.resolve()` 默认策略选取
+   * （AGENT_RUNTIME env 或 tencent-sdk）
+   */
+  runtime?: string
 }
 
 /**
