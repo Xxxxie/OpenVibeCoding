@@ -1,19 +1,14 @@
 /**
- * 全局 opencode tool override：read
+ * Global opencode tool override: read
+ * 覆盖 opencode builtin read tool，沙箱模式下通过 HTTP 路由到 SCF 沙箱。
  *
- * 安装位置：~/.config/opencode/tools/read.ts
- * OpenCode 的 tool 注册规则（实测）：同名 custom tool 覆盖 builtin
+ * Schema 与 opencode builtin 完全对齐（v1.14.33 src/tool/read.ts）。
+ * 如果 opencode 版本升级导致 builtin schema 变更，需同步更新本文件。
+ * 检查命令：opencode --version
  *
  * 运行时行为：
- *   - 若 env.SANDBOX_MODE === '1' → 转发到 env.SANDBOX_BASE_URL + /api/tools/read
- *   - 否则                         → 使用本地 fs.readFileSync（本地开发兜底）
- *
- * 沙箱凭证通过 server 进程 spawn opencode 时的 env 传递：
- *   SANDBOX_MODE=1
- *   SANDBOX_BASE_URL=https://xxx.api.tcloudbasegateway.com/v1/functions/sandbox-shared
- *   SANDBOX_AUTH_HEADERS_JSON={"Authorization":"Bearer ...","X-Cloudbase-Session-Id":"...","X-Tcb-Webfn":"true","X-Scope-Id":"..."}
- *
- * 凭证不写入文件，只在进程 env 里，session 结束即清理。
+ *   SANDBOX_MODE=1 → fetch SANDBOX_BASE_URL/api/tools/read
+ *   否则          → 读本地文件系统（使用 context.directory 解析相对路径）
  */
 import { z } from 'zod'
 import fs from 'node:fs'
@@ -21,25 +16,51 @@ import path from 'node:path'
 
 export default {
   description:
-    'Read a text file. When running in a sandboxed session, reads from the sandbox workspace via HTTP. Otherwise reads the local file system.',
+    'Read a file or directory from the filesystem. Returns file contents with line numbers prefixed as `<line>: <content>`.\n\n' +
+    'Usage:\n' +
+    '- The filePath parameter should be an absolute path.\n' +
+    '- By default, returns up to 2000 lines from the start of the file.\n' +
+    '- The offset parameter is the line number to start from (1-indexed).\n' +
+    '- In sandbox mode, use relative paths (no leading /); they resolve against the session working directory.',
   args: {
-    path: z.string().describe('Relative path from session cwd. Use relative paths (no leading /) in sandbox mode.'),
-    offset: z.number().optional().describe('Optional start line offset (0-based).'),
-    limit: z.number().optional().describe('Optional max lines to read.'),
+    filePath: z.string().describe('The absolute path to the file or directory to read'),
+    offset: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe('The line number to start reading from (1-indexed)'),
+    limit: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe('The maximum number of lines to read (defaults to 2000)'),
   },
-  async execute(args: { path: string; offset?: number; limit?: number }, context: { directory?: string }) {
+  async execute(
+    args: { filePath: string; offset?: number; limit?: number },
+    context: { directory?: string },
+  ) {
     if (process.env.SANDBOX_MODE === '1') {
-      return await sandboxCall('read', { path: args.path, offset: args.offset, limit: args.limit })
+      return await sandboxCall('read', {
+        path: args.filePath,
+        // builtin offset is 1-indexed; sandbox API expects 0-based offset
+        offset: args.offset !== undefined ? args.offset - 1 : undefined,
+        limit: args.limit,
+      })
     }
-    // Local fallback: resolve relative paths against opencode's session directory
-    const resolvedPath = path.isAbsolute(args.path)
-      ? args.path
-      : path.resolve(context?.directory ?? process.cwd(), args.path)
-    const content = fs.readFileSync(resolvedPath, 'utf8')
-    const lines = content.split('\n')
-    const offset = args.offset ?? 0
-    const limit = args.limit ?? lines.length - offset
-    return lines.slice(offset, offset + limit).join('\n')
+    // Local fallback: resolve relative paths against opencode session directory
+    const resolved = path.isAbsolute(args.filePath)
+      ? args.filePath
+      : path.resolve(context?.directory ?? process.cwd(), args.filePath)
+    const content = fs.readFileSync(resolved, 'utf8')
+    const allLines = content.split('\n')
+    // offset is 1-indexed in the builtin interface
+    const startIdx = args.offset !== undefined ? args.offset - 1 : 0
+    const count = args.limit ?? 2000
+    const slice = allLines.slice(startIdx, startIdx + count)
+    // Prefix each line with its 1-indexed line number, matching builtin output format
+    return slice.map((line, i) => `${startIdx + i + 1}: ${line}`).join('\n')
   },
 }
 

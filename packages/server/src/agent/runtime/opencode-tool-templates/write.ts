@@ -1,7 +1,13 @@
 /**
- * 全局 opencode tool override：write
- * 覆盖 builtin write。沙箱模式下通过 HTTP 转发；本地模式直接写 fs。
- * 运行时配置见 read.ts 同级注释。
+ * Global opencode tool override: write
+ * 覆盖 opencode builtin write tool，沙箱模式下通过 HTTP 路由到 SCF 沙箱。
+ *
+ * Schema 与 opencode builtin 完全对齐（v1.14.33 src/tool/write.ts）。
+ * 如果 opencode 版本升级导致 builtin schema 变更，需同步更新本文件。
+ *
+ * 运行时行为：
+ *   SANDBOX_MODE=1 → fetch SANDBOX_BASE_URL/api/tools/write
+ *   否则          → 写本地文件系统
  */
 import { z } from 'zod'
 import fs from 'node:fs'
@@ -9,18 +15,26 @@ import path from 'node:path'
 
 export default {
   description:
-    'Write a text file, creating parent directories as needed. Overwrites existing files. In sandbox mode, writes happen in the SCF container; in local mode, writes use the host file system.',
+    'Writes a file to the filesystem. Overwrites existing files.\n\n' +
+    'Usage:\n' +
+    '- This tool will overwrite the existing file if there is one at the provided path.\n' +
+    '- If this is an existing file, you MUST use the Read tool first to read the file\'s contents.\n' +
+    '- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\n' +
+    '- In sandbox mode, use relative paths (no leading /); they resolve against the session working directory.',
   args: {
-    path: z.string().describe('Relative path from session cwd. Use relative paths in sandbox mode.'),
-    content: z.string().describe('File content (as utf-8 text).'),
+    filePath: z.string().describe('The absolute path to the file to write (must be absolute, not relative)'),
+    content: z.string().describe('The content to write to the file'),
   },
-  async execute(args: { path: string; content: string }, context: { directory?: string }) {
+  async execute(
+    args: { filePath: string; content: string },
+    context: { directory?: string },
+  ) {
     if (process.env.SANDBOX_MODE === '1') {
-      return await sandboxCall('write', { path: args.path, content: args.content })
+      return await sandboxCall('write', { path: args.filePath, content: args.content })
     }
-    const resolved = path.isAbsolute(args.path)
-      ? args.path
-      : path.resolve(context?.directory ?? process.cwd(), args.path)
+    const resolved = path.isAbsolute(args.filePath)
+      ? args.filePath
+      : path.resolve(context?.directory ?? process.cwd(), args.filePath)
     fs.mkdirSync(path.dirname(resolved), { recursive: true })
     fs.writeFileSync(resolved, args.content)
     return { output: `Wrote ${args.content.length} bytes to ${resolved}` }

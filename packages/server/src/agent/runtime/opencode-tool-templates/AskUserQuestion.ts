@@ -1,7 +1,14 @@
 /**
  * AskUserQuestion custom tool — 对齐 Tencent AskUserQuestion 契约
  *
- * 为什么名字/schema 要严格对齐 Tencent：
+ * 这不是 opencode builtin tool 的 override，而是我们新增的 custom tool。
+ * opencode 原生的 question tool 在 ACP 模式默认禁用且无 ACP 路由，
+ * 因此我们自行实现。工具名和 schema 对齐 Tencent SDK 的 AskUserQuestion。
+ *
+ * 版本声明（用于 check:tool-schemas 脚本识别）：
+ *   custom tool, not synced from opencode v1.14.33 src/tool/
+ *
+ * Schema 来源：packages/web/src/types/task-chat.ts:AskUserQuestionData
  *   - 前端 `task-chat.tsx` 按 `part.toolName === 'AskUserQuestion'` 匹配渲染
  *     AskUserForm；用其他名字前端识别不到
  *   - 前端从 `part.input.questions` 取字段，结构必须是

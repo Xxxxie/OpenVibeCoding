@@ -1,20 +1,39 @@
 /**
- * 全局 opencode tool override：glob
+ * Global opencode tool override: glob
+ * 覆盖 opencode builtin glob tool，沙箱模式下通过 HTTP 路由到 SCF 沙箱。
+ *
+ * Schema 与 opencode builtin 完全对齐（v1.14.33 src/tool/glob.ts）。
+ * 如果 opencode 版本升级导致 builtin schema 变更，需同步更新本文件。
+ *
+ * 运行时行为：
+ *   SANDBOX_MODE=1 → fetch SANDBOX_BASE_URL/api/tools/glob
+ *   否则          → find（本地文件系统）
  */
 import { z } from 'zod'
 import { execSync } from 'node:child_process'
 
 export default {
-  description: 'Find files by glob pattern. Local mode uses find; sandbox mode delegates to sandbox.',
+  description:
+    'Fast file pattern matching tool that works with any codebase size.\n' +
+    '- Supports glob patterns like "**/*.js" or "src/**/*.ts".\n' +
+    '- Returns matching file paths sorted by modification time.\n' +
+    '- Use this tool when you need to find files by name patterns.',
   args: {
-    pattern: z.string(),
-    path: z.string().optional(),
+    pattern: z.string().describe('The glob pattern to match files against'),
+    path: z
+      .string()
+      .optional()
+      .describe(
+        'The directory to search in. If not specified, the current working directory will be used. ' +
+          'IMPORTANT: Omit this field to use the default directory. DO NOT enter "undefined" or "null". ' +
+          'Must be a valid directory path if provided.',
+      ),
   },
   async execute(args: { pattern: string; path?: string }, context: { directory?: string }) {
     if (process.env.SANDBOX_MODE === '1') {
-      return await sandboxCall('glob', args)
+      return await sandboxCall('glob', { pattern: args.pattern, path: args.path })
     }
-    const base = args.path || context?.directory || '.'
+    const base = args.path ?? context?.directory ?? '.'
     try {
       const out = execSync(`find ${JSON.stringify(base)} -name ${JSON.stringify(args.pattern)} -type f`, {
         encoding: 'utf8',
