@@ -530,4 +530,6 @@ export interface AgentOptions {
    * - `default` | undefined: 普通模式（沿用原行为）
    */
   permissionMode?: AgentPermissionMode
+  /** 图片附件（多模态输入），转换后传给 SDK query() 的 ContentBlock[] */
+  imageBlocks?: AcpImageBlock[]
 }

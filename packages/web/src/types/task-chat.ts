@@ -17,6 +17,7 @@ export interface TaskMessage {
 export type MessagePart =
   | { type: 'text'; text: string }
   | { type: 'thinking'; text: string }
+  | { type: 'image'; data: string; mimeType: string }
   | {
       type: 'tool_call'
       toolCallId: string

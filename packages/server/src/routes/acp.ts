@@ -313,7 +313,7 @@ async function handleInitialize(c: any, id: number | string) {
     agentCapabilities: {
       loadSession: true,
       promptCapabilities: {
-        image: false,
+        image: true,
         audio: false,
         embeddedContext: false,
       },
@@ -393,16 +393,18 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
     return c.json(rpcErr(id, JSON_RPC_ERRORS.INVALID_REQUEST, 'A prompt turn is already in progress'))
   }
 
-  // Extract prompt text
-  const prompt: string = (params?.prompt ?? [])
+  // Extract prompt text and image blocks
+  const promptBlocks: any[] = params?.prompt ?? []
+  const prompt: string = promptBlocks
     .filter((b) => b.type === 'text')
     .map((b) => b.text)
     .join('')
+  const imageBlocks = promptBlocks.filter((b) => b.type === 'image')
 
   const hasResumePayload =
     (params?.askAnswers && Object.keys(params.askAnswers).length > 0) || !!params?.toolConfirmation
 
-  if (!prompt.trim() && !hasResumePayload) {
+  if (!prompt.trim() && !hasResumePayload && imageBlocks.length === 0) {
     return c.json(rpcErr(id, JSON_RPC_ERRORS.INVALID_PARAMS, 'prompt must contain at least one text block'))
   }
 
@@ -445,10 +447,9 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
       model: selectedModel,
       askAnswers: params.askAnswers,
       toolConfirmation: params.toolConfirmation,
-      // P2: 透传 Plan 模式开关。当前端在开启 Plan 模式下发起 prompt 时传 'plan'，
-      // 或 ExitPlanMode 用户选择 reject_and_exit_plan 后下一轮传 'default' 恢复普通模式。
       permissionMode: params.permissionMode,
       mode: taskMode,
+      imageBlocks: imageBlocks.length > 0 ? imageBlocks : undefined,
     })
   })
 }

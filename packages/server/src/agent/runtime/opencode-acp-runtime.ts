@@ -1,9 +1,10 @@
 /**
  * OpencodeAcpRuntime
  *
- * 基于 ACP 协议的 OpenCode agent runtime，严格遵守 agent/sandbox 分离原则。
+ * 基于 ACP 协议的 OpenCode agent runtime。
+ * 继承 BaseAgentRuntime 获取沙箱、MCP、系统提示等公共基础设施。
  *
- * 架构（"项目级 tool override + env 注入"）：
+ * 架构（"项目级 tool override + env 注入 + 共享沙箱"）：
  *
  *   server 启动时：
  *     ensureOpencodeToolsInstalled()
@@ -11,27 +12,22 @@
  *          （同名 custom tool 覆盖 builtin — 实测已验证）
  *
  *   每次 chatStream：
- *     1. 如果有 envId：scfSandboxManager.getOrCreate()
+ *     1. BaseAgentRuntime.setupSandbox() 创建/获取 SCF 沙箱（共享实例）
  *     2. spawn opencode acp，通过 child env 注入：
  *          OPENCODE_CONFIG_DIR=<projectRoot>/.opencode  （隔离用户全局配置）
  *          SANDBOX_MODE=1
- *          SANDBOX_BASE_URL=<沙箱 HTTPS>
+ *          SANDBOX_BASE_URL=<沙箱 HTTPS>（来自基类 sandbox）
  *          SANDBOX_AUTH_HEADERS_JSON=<凭证 JSON>
- *     3. opencode 父进程的 env 会继承给所有子进程（MCP 服务等）
- *     4. 工具文件里读 process.env.SANDBOX_* 决定：本地执行 vs HTTP 转发到沙箱
+ *     3. 基类构建的 MCP endpoint 传给 opencode newSession，opencode 可直接调用
+ *        CloudBase MCP 工具（数据库、云函数、存储等）
+ *     4. 基类 systemPrompt 拼到 history context 前面，确保任务分类 + 沙箱上下文生效
  *     5. ACP 握手 → newSession → prompt → 收 session/update 流 → 翻译为 AgentCallbackMessage
- *
- * 相比旧方案（per-session 写 .opencode/opencode.json + MCP bridge 子进程）：
- *   - 不再写 per-session 配置文件（只写一次全局 tools/*.js）
- *   - 不再启 MCP 子进程（少一层进程 + 少一层 JSON-RPC 序列化）
- *   - 工具名就是 `read`/`write`/... 与 LLM 训练期望一致
- *   - 凭证只在进程 env 里，session 结束随进程退出清理
  */
 
 import { v4 as uuidv4 } from 'uuid'
 import { ClientSideConnection } from '@agentclientprotocol/sdk'
 import type { AgentCallback, AgentCallbackMessage, AgentOptions } from '@coder/shared'
-import type { ChatStreamResult, IAgentRuntime } from './types.js'
+import type { ChatStreamResult } from './types.js'
 import type { ModelInfo } from '../cloudbase-agent.service.js'
 import {
   registerAgent,
@@ -48,7 +44,8 @@ import { ensureOpencodeToolsInstalled, getOpencodeConfigDir } from './opencode-i
 import { registerPending, resolvePending, rejectPendingForConversation } from './pending-permission-registry.js'
 import { resolvePendingQuestion, rejectPendingQuestionsForConversation } from './pending-question-registry.js'
 import { OpencodeMessageBuilder, findLastRecordIds, buildHistoryContextPrompt } from './opencode-message-builder.js'
-import { scfSandboxManager, type SandboxInstance } from '../../sandbox/scf-sandbox-manager.js'
+import { BaseAgentRuntime } from './base-runtime.js'
+import type { SandboxInstance } from '../../sandbox/scf-sandbox-manager.js'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
@@ -167,7 +164,7 @@ function ensureToolsInstalledOnce(): Promise<void> {
 
 // ─── Runtime ─────────────────────────────────────────────────────────────
 
-export class OpencodeAcpRuntime implements IAgentRuntime {
+export class OpencodeAcpRuntime extends BaseAgentRuntime {
   readonly name = 'opencode-acp'
 
   async isAvailable(): Promise<boolean> {
@@ -331,20 +328,42 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
       // 0. 确保全局 opencode tools 已安装
       await ensureToolsInstalledOnce()
 
-      // 1. 如果有 envId，获取沙箱
+      // 1. 使用基类共享设施初始化沙箱 + MCP + 系统提示
+      const isCodingMode = options.mode === 'coding'
+      let sandboxResult: Awaited<ReturnType<typeof this.setupSandbox>> | null = null
+
       if (envId) {
-        try {
-          sandbox = await scfSandboxManager.getOrCreate(conversationId, envId, {
-            mode: 'shared',
-            workspaceIsolation: 'shared',
-          })
-        } catch (e) {
-          console.warn('[OpencodeAcpRuntime] sandbox getOrCreate failed:', (e as Error).message)
-          throw new Error(`Sandbox unavailable: ${(e as Error).message}`)
+        await emit({ type: 'agent_phase', phase: 'preparing' })
+        sandboxResult = await this.setupSandbox({
+          conversationId,
+          envId,
+          userId,
+          userCredentials: options.userCredentials,
+          isCodingMode,
+          callback: getLiveCallback(conversationId),
+          model: modelId,
+        })
+        sandbox = sandboxResult.sandbox
+
+        // Coding mode: auto-allow all write tools + mark preview ready
+        if (isCodingMode && conversationId) {
+          this.allowAllWriteToolsForCodingMode(conversationId)
+          await this.markCodingPreviewReady(conversationId, sandbox)
         }
       }
 
-      await emit({ type: 'agent_phase', phase: 'preparing' })
+      // 构建系统提示
+      let systemPrompt = ''
+      if (envId) {
+        const promptResult = await this.buildSystemPrompt({
+          envId,
+          isCodingMode,
+          sandboxCwd: sandboxResult?.sandboxCwd || null,
+          sandboxMode: sandboxResult?.sandboxMode || 'shared',
+          conversationId,
+        })
+        systemPrompt = promptResult.systemPrompt
+      }
 
       // 2. 工作目录
       //    - 沙箱模式：opencode cwd 用临时占位目录（opencode 需要一个本地目录启动，
@@ -444,10 +463,20 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
         },
       })
 
-      // 7. 创建 session
+      // 7. 创建 session — 注入 MCP server（来自基类 sandbox MCP proxy）
+      const mcpServers: Array<{ url: string; headers?: Record<string, string> }> = []
+      if (sandbox && sandboxResult?.mcpClient) {
+        // sandbox 内有 MCP endpoint，opencode 可以通过 HTTP transport 直接调用
+        // CloudBase 工具（数据库、云函数、存储等）
+        const authHeaders = await sandbox.getAuthHeaders()
+        mcpServers.push({
+          url: `${sandbox.baseUrl}/mcp`,
+          headers: authHeaders,
+        })
+      }
       const newRes = await conn.newSession({
         cwd: sessionWorkingDir,
-        mcpServers: [],
+        mcpServers,
       })
       const opencodeSessionId = newRes.sessionId
 
@@ -465,14 +494,20 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
       //
       // OpenCode 每次新 session 是空白上下文，如果之前 conversation 有历史消息，
       // 把它们作为 context prefix 拼到本轮 prompt 前面，让 LLM 能做多轮记忆。
+      // 同时注入基类构建的 systemPrompt（任务分类 + 沙箱上下文 + CloudBase 指引）。
       //
       // 注意：Resume 场景（toolConfirmation/askAnswers）不会走到这里（早 return 了），
       // 所以 resume 时用的是原 opencode session 自带的上下文，不需要重新注入。
-      const contextPrompt = envId
-        ? await buildHistoryContextPrompt(conversationId, envId, userId, prompt, {
-            excludeRecordIds: excludeHistoryRecordIds,
-          })
-        : prompt
+      let contextPrompt: string
+      if (envId) {
+        const historyPrompt = await buildHistoryContextPrompt(conversationId, envId, userId, prompt, {
+          excludeRecordIds: excludeHistoryRecordIds,
+        })
+        // Prepend system prompt before history+user prompt
+        contextPrompt = systemPrompt ? `${systemPrompt}\n\n${historyPrompt}` : historyPrompt
+      } else {
+        contextPrompt = prompt
+      }
       const promptRes = await conn.prompt({
         sessionId: opencodeSessionId,
         prompt: [{ type: 'text', text: contextPrompt }],

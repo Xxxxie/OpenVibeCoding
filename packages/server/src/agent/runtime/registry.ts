@@ -8,22 +8,25 @@
  *   2. 环境变量 AGENT_RUNTIME（部署级 override）
  *   3. registry 默认 runtime（本地开发期）
  *
- * 注册：默认包含 tencent-sdk + opencode-acp，可通过 register() 扩展（如未来加 claude-code-acp）。
+ * 注册：默认包含 codebuddy + opencode-acp，可通过 register() 扩展。
+ * 向后兼容：'tencent-sdk' 作为 'codebuddy' 的别名。
  */
 
 import type { IAgentRuntime, RuntimeSelectorOptions } from './types.js'
-import { tencentSdkRuntime } from './tencent-sdk-runtime.js'
+import { codebuddyRuntime } from './codebuddy-runtime.js'
 import { opencodeAcpRuntime } from './opencode-acp-runtime.js'
 
-const DEFAULT_RUNTIME = process.env.AGENT_RUNTIME_DEFAULT || 'tencent-sdk'
+const DEFAULT_RUNTIME = process.env.AGENT_RUNTIME_DEFAULT || 'codebuddy'
 
 class AgentRuntimeRegistry {
   private runtimes = new Map<string, IAgentRuntime>()
 
   constructor() {
     // 默认注册的 runtime
-    this.register(tencentSdkRuntime)
+    this.register(codebuddyRuntime)
     this.register(opencodeAcpRuntime)
+    // 向后兼容别名：DB 中已存的 'tencent-sdk' 能正确 resolve
+    this.runtimes.set('tencent-sdk', codebuddyRuntime)
   }
 
   register(runtime: IAgentRuntime): void {
@@ -35,7 +38,12 @@ class AgentRuntimeRegistry {
   }
 
   list(): IAgentRuntime[] {
-    return Array.from(this.runtimes.values())
+    // 去重：别名不重复列出
+    const seen = new Set<IAgentRuntime>()
+    for (const r of this.runtimes.values()) {
+      seen.add(r)
+    }
+    return Array.from(seen)
   }
 
   /**
@@ -51,7 +59,7 @@ class AgentRuntimeRegistry {
     }
 
     // 兜底：返回任何已注册的 runtime
-    const fallback = this.runtimes.get('tencent-sdk') ?? this.runtimes.values().next().value
+    const fallback = this.runtimes.get('codebuddy') ?? this.runtimes.values().next().value
     if (!fallback) throw new Error('No agent runtime registered')
     return fallback
   }
@@ -62,9 +70,9 @@ class AgentRuntimeRegistry {
   async resolveWithAvailability(options: RuntimeSelectorOptions = {}): Promise<IAgentRuntime> {
     const r = this.resolve(options)
     const available = await r.isAvailable()
-    if (!available && r.name !== 'tencent-sdk') {
-      // 不可用 → 退回默认 tencent-sdk
-      const fallback = this.runtimes.get('tencent-sdk')
+    if (!available && r.name !== 'codebuddy') {
+      // 不可用 → 退回默认 codebuddy
+      const fallback = this.runtimes.get('codebuddy')
       if (fallback) return fallback
     }
     return r

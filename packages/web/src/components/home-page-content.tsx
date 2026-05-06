@@ -439,6 +439,7 @@ export function HomePageContent({
     keepAlive: boolean
     enableBrowser: boolean
     mode: 'default' | 'coding'
+    imageBlocks?: Array<{ data: string; mimeType: string }>
   }) => {
     console.log(
       '[TaskSubmit] called, isSubmitting:',
@@ -671,6 +672,10 @@ export function HomePageContent({
         // 全部成功，重置状态后再跳转
         console.log('[TaskSubmit] all success, navigating to /tasks/' + id)
         setIsSubmitting(false)
+        // Save image blocks to sessionStorage so task-page-client can pick them up
+        if (data.imageBlocks && data.imageBlocks.length > 0) {
+          sessionStorage.setItem(`task-images-${id}`, JSON.stringify(data.imageBlocks))
+        }
         navigate(`/tasks/${id}?prompt=${encodeURIComponent(data.prompt)}`)
         await refreshTasks()
       } catch (error) {

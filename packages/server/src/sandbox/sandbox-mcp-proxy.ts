@@ -17,6 +17,7 @@ import { nanoid } from 'nanoid'
 import cron from 'node-cron'
 import { getDb } from '../db/index.js'
 import { scheduleTask, unscheduleTask } from '../services/cron-scheduler.js'
+import { extractDeployUrl } from '../agent/runtime/base-runtime.js'
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -236,31 +237,6 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
     return /\.[a-zA-Z0-9]+$/.test(basename)
   }
 
-  function extractDeployUrl(rawText: string, isFile = false, depth = 0): string | null {
-    if (depth > 5) return null
-    try {
-      const parsed = JSON.parse(rawText)
-      if (Array.isArray(parsed)) {
-        const firstText = parsed[0]?.text
-        if (typeof firstText === 'string') return extractDeployUrl(firstText, isFile, depth + 1)
-        return null
-      }
-      if (typeof parsed !== 'object' || parsed === null) return null
-      if (parsed.accessUrl) {
-        const url = new URL(parsed.accessUrl)
-        if (!isFile && url.pathname !== '/' && !url.pathname.endsWith('/')) url.pathname += '/'
-        if (!url.searchParams.get('t')) url.searchParams.set('t', String(Date.now()))
-        return url.toString()
-      }
-      if (parsed.staticDomain) return `https://${parsed.staticDomain}/?t=${Date.now()}`
-      const innerText = parsed?.res?.content?.[0]?.text || parsed?.content?.[0]?.text
-      if (typeof innerText === 'string') return extractDeployUrl(innerText, isFile, depth + 1)
-    } catch {
-      // JSON parse 失败，忽略
-    }
-    return null
-  }
-
   function isCredentialError(output: string): boolean {
     return (
       output.includes('AUTH_REQUIRED') ||
@@ -395,142 +371,164 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
     }))
   }
 
-  // ── publishMiniprogram tool ───────────────────────────────────
-  server.tool(
-    'publishMiniprogram',
-    '小程序发布/预览工具。支持预览（preview）和上传（upload）两种操作。预览会生成二维码供扫码体验，上传会将代码提交到微信后台。部署可能耗时较长，若超过 60s 未完成会返回 async=true 和 jobId，请使用 getDeployJobStatus 工具查询结果。',
-    {
-      action: z.enum(['preview', 'upload']).describe('操作类型：preview=预览, upload=上传'),
-      projectPath: z.string().describe('小程序项目路径（沙箱内的绝对路径）'),
-      appId: z.string().describe('微信小程序 AppId'),
-      version: z.string().optional().describe('版本号（upload 时建议提供，如 "1.0.0"）'),
-      description: z.string().optional().describe('版本描述'),
-      robot: z.number().optional().describe('CI 机器人编号（1-30），默认 1'),
-    },
-    async (args: Record<string, unknown>) => {
-      try {
-        let privateKey: string | undefined
-        const appId = args.appId as string
+  // ── publishMiniprogram / getDeployJobStatus 共享 handler ─────
+  // 两个 tool 需要同时注册到标准 MCP Server 和 SDK-wrapped Server，
+  // 但 handler 逻辑只保留一份。
 
-        if (getMpDeployCredentials) {
-          const creds = await getMpDeployCredentials(appId)
-          if (creds) {
-            privateKey = creds.privateKey
-          }
-        }
+  const PUBLISH_MP_DESC =
+    '小程序发布/预览工具。支持预览（preview）和上传（upload）两种操作。预览会生成二维码供扫码体验，上传会将代码提交到微信后台。部署可能耗时较长，若超过 60s 未完成会返回 async=true 和 jobId，请使用 getDeployJobStatus 工具查询结果。'
+  const PUBLISH_MP_SCHEMA = {
+    action: z.enum(['preview', 'upload']).describe('操作类型：preview=预览, upload=上传'),
+    projectPath: z.string().describe('小程序项目路径（沙箱内的绝对路径）'),
+    appId: z.string().describe('微信小程序 AppId'),
+    version: z.string().optional().describe('版本号（upload 时建议提供，如 "1.0.0"）'),
+    description: z.string().optional().describe('版本描述'),
+    robot: z.number().optional().describe('CI 机器人编号（1-30），默认 1'),
+  }
 
-        if (!privateKey) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: JSON.stringify({
-                  error: true,
-                  message: `未找到 appId ${appId} 的部署密钥，请先在小程序管理中关联该 appId`,
-                }),
-              },
-            ],
-            isError: true,
-          }
-        }
+  async function handlePublishMiniprogram(args: Record<string, unknown>) {
+    try {
+      let privateKey: string | undefined
+      const appId = args.appId as string
 
-        const res = await sandbox.request('/api/miniprogram/deploy', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            appid: appId,
-            privateKey,
-            action: args.action,
-            projectPath: args.projectPath,
-            version: args.version,
-            description: args.description,
-            robot: args.robot,
-          }),
-          signal: AbortSignal.timeout(120_000),
-        })
+      if (getMpDeployCredentials) {
+        const creds = await getMpDeployCredentials(appId)
+        if (creds) privateKey = creds.privateKey
+      }
 
-        const body = (await res.json().catch(() => null)) as any
-
-        if (!res.ok || !body) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: JSON.stringify({
-                  error: true,
-                  status: res.status,
-                  message: body?.error || body?.message || `HTTP ${res.status}`,
-                }),
-              },
-            ],
-            isError: true,
-          }
-        }
-
-        if (body.async) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: JSON.stringify({
-                  async: true,
-                  jobId: body.jobId,
-                  message: '部署仍在进行中，请稍后使用 getDeployJobStatus 工具查询结果',
-                }),
-              },
-            ],
-          }
-        }
-
-        if (!body.success) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: JSON.stringify({
-                  error: true,
-                  message: body.error || body.result?.errMsg || 'Deploy failed',
-                  result: body.result,
-                }),
-              },
-            ],
-            isError: true,
-          }
-        }
-
-        return { content: [{ type: 'text' as const, text: JSON.stringify(body) }] }
-      } catch (e: any) {
+      if (!privateKey) {
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: true, message: e.message }) }],
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                error: true,
+                message: `未找到 appId ${appId} 的部署密钥，请先在小程序管理中关联该 appId`,
+              }),
+            },
+          ],
           isError: true,
         }
       }
-    },
-  )
 
-  // ── getDeployJobStatus tool ───────────────────────────────────
-  server.tool(
-    'getDeployJobStatus',
-    '查询小程序发布/预览任务的状态。当 publishMiniprogram 返回 async=true 时使用此工具轮询结果。',
-    { jobId: z.string().describe('publishMiniprogram 返回的 jobId') },
-    async (args: Record<string, unknown>) => {
-      try {
-        const res = await sandbox.request(
-          `/api/miniprogram/deploy/status?jobId=${encodeURIComponent(args.jobId as string)}`,
-          { signal: AbortSignal.timeout(30_000) },
-        )
-        const body = (await res.json().catch(() => null)) as any
+      const res = await sandbox.request('/api/miniprogram/deploy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          appid: appId,
+          privateKey,
+          action: args.action,
+          projectPath: args.projectPath,
+          version: args.version,
+          description: args.description,
+          robot: args.robot,
+        }),
+        signal: AbortSignal.timeout(120_000),
+      })
+
+      const body = (await res.json().catch(() => null)) as any
+
+      if (!res.ok || !body) {
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify(body ?? { error: true, status: res.status }) }],
-        }
-      } catch (e: any) {
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: true, message: e.message }) }],
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                error: true,
+                status: res.status,
+                message: body?.error || body?.message || `HTTP ${res.status}`,
+              }),
+            },
+          ],
           isError: true,
         }
       }
-    },
-  )
+
+      if (body.async) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                async: true,
+                jobId: body.jobId,
+                message: '部署仍在进行中，请稍后使用 getDeployJobStatus 工具查询结果',
+              }),
+            },
+          ],
+        }
+      }
+
+      if (!body.success) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                error: true,
+                message: body.error || body.result?.errMsg || 'Deploy failed',
+                result: body.result,
+              }),
+            },
+          ],
+          isError: true,
+        }
+      }
+
+      // 触发 artifact：提取预览二维码或上传成功状态
+      if (onArtifact && body) {
+        if (body.result?.qrcode) {
+          const qrcode = `data:${body.result.qrcode.mimeType || 'image/png'};base64,${body.result.qrcode.base64}`
+          onArtifact({
+            title: '小程序预览二维码',
+            contentType: 'image',
+            data: qrcode,
+            metadata: { deploymentType: 'miniprogram', ...body },
+          })
+        } else if (body.success && args.action === 'upload') {
+          onArtifact({
+            title: '小程序上传成功',
+            contentType: 'json',
+            data: JSON.stringify(body),
+            metadata: { deploymentType: 'miniprogram', appId: args.appId as string },
+          })
+        }
+      }
+
+      return { content: [{ type: 'text' as const, text: JSON.stringify(body) }] }
+    } catch (e: any) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: true, message: e.message }) }],
+        isError: true,
+      }
+    }
+  }
+
+  const DEPLOY_STATUS_DESC =
+    '查询小程序发布/预览任务的状态。当 publishMiniprogram 返回 async=true 时使用此工具轮询结果。'
+  const DEPLOY_STATUS_SCHEMA = { jobId: z.string().describe('publishMiniprogram 返回的 jobId') }
+
+  async function handleGetDeployJobStatus(args: Record<string, unknown>) {
+    try {
+      const res = await sandbox.request(
+        `/api/miniprogram/deploy/status?jobId=${encodeURIComponent(args.jobId as string)}`,
+        { signal: AbortSignal.timeout(30_000) },
+      )
+      const body = (await res.json().catch(() => null)) as any
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(body ?? { error: true, status: res.status }) }],
+      }
+    } catch (e: any) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: true, message: e.message }) }],
+        isError: true,
+      }
+    }
+  }
+
+  // 注册到标准 MCP Server
+  server.tool('publishMiniprogram', PUBLISH_MP_DESC, PUBLISH_MP_SCHEMA, handlePublishMiniprogram)
+  server.tool('getDeployJobStatus', DEPLOY_STATUS_DESC, DEPLOY_STATUS_SCHEMA, handleGetDeployJobStatus)
 
   // ── Wire InMemoryTransport pair ───────────────────────────────
 
@@ -563,7 +561,6 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
               try {
                 const deployUrl = extractDeployUrl(output, isFilePath(String(args.localPath || '')))
                 if (deployUrl) {
-                  log(`[sandbox-mcp] deploy artifact detected\n`)
                   onArtifact({
                     title: 'Web 应用已部署',
                     contentType: 'link',
@@ -584,92 +581,10 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
       )
     })
 
-  // SDK-wrapped publishMiniprogram tool
+  // SDK-wrapped publishMiniprogram + getDeployJobStatus（复用上面的 handler）
+  sdkTools.push(sdkTool('publishMiniprogram', PUBLISH_MP_DESC, PUBLISH_MP_SCHEMA as any, handlePublishMiniprogram))
   sdkTools.push(
-    sdkTool(
-      'publishMiniprogram',
-      '小程序发布/预览工具。支持预览（preview）和上传（upload）两种操作。',
-      {
-        action: z.enum(['preview', 'upload']).describe('操作类型'),
-        projectPath: z.string().describe('小程序项目路径'),
-        appId: z.string().describe('微信小程序 AppId'),
-        version: z.string().optional().describe('版本号'),
-        description: z.string().optional().describe('版本描述'),
-        robot: z.number().optional().describe('CI 机器人编号'),
-      },
-      async (args: Record<string, unknown>) => {
-        try {
-          let privateKey: string | undefined
-          const appId = args.appId as string
-
-          if (getMpDeployCredentials) {
-            const creds = await getMpDeployCredentials(appId)
-            if (creds) privateKey = creds.privateKey
-          }
-
-          if (!privateKey) {
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: JSON.stringify({ error: true, message: `未找到 appId ${appId} 的部署密钥` }),
-                },
-              ],
-              isError: true,
-            }
-          }
-
-          const res = await sandbox.request('/api/miniprogram/deploy', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              appid: appId,
-              privateKey,
-              action: args.action,
-              projectPath: args.projectPath,
-              version: args.version,
-              description: args.description,
-              robot: args.robot,
-            }),
-            signal: AbortSignal.timeout(120_000),
-          })
-
-          const body = (await res.json().catch(() => null)) as any
-          if (!res.ok || !body) {
-            return {
-              content: [{ type: 'text' as const, text: JSON.stringify({ error: true, status: res.status }) }],
-              isError: true,
-            }
-          }
-          return { content: [{ type: 'text' as const, text: JSON.stringify(body) }] }
-        } catch (e: any) {
-          return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }
-        }
-      },
-    ),
-  )
-
-  // SDK-wrapped getDeployJobStatus tool
-  sdkTools.push(
-    sdkTool(
-      'getDeployJobStatus',
-      '查询小程序发布/预览任务的状态。',
-      { jobId: z.string().describe('publishMiniprogram 返回的 jobId') },
-      async (args: Record<string, unknown>) => {
-        try {
-          const res = await sandbox.request(
-            `/api/miniprogram/deploy/status?jobId=${encodeURIComponent(args.jobId as string)}`,
-            { signal: AbortSignal.timeout(30_000) },
-          )
-          const body = (await res.json().catch(() => null)) as any
-          return {
-            content: [{ type: 'text' as const, text: JSON.stringify(body ?? { error: true, status: res.status }) }],
-          }
-        } catch (e: any) {
-          return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }
-        }
-      },
-    ),
+    sdkTool('getDeployJobStatus', DEPLOY_STATUS_DESC, DEPLOY_STATUS_SCHEMA as any, handleGetDeployJobStatus),
   )
 
   // ── cronTask tool (CRUD) ──────────────────────────────────────

@@ -9,5 +9,15 @@
 
 export type { IAgentRuntime, ChatStreamResult, RuntimeSelectorOptions, EmitFn } from './types.js'
 export { agentRuntimeRegistry } from './registry.js'
-export { tencentSdkRuntime, TencentSdkRuntime } from './tencent-sdk-runtime.js'
+export { codebuddyRuntime, CodeBuddyRuntime, tencentSdkRuntime, type TencentSdkRuntime } from './codebuddy-runtime.js'
 export { opencodeAcpRuntime, OpencodeAcpRuntime } from './opencode-acp-runtime.js'
+export { BaseAgentRuntime, type RuntimeContext } from './base-runtime.js'
+export {
+  WRITE_TOOLS,
+  waitForSandboxHealth,
+  initSandboxWorkspace,
+  buildAppendPrompt,
+  getPublishableKey,
+  persistDeploymentFromArtifact,
+  extractDeployUrl,
+} from './base-runtime.js'

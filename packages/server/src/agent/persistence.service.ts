@@ -850,26 +850,32 @@ export class PersistenceService {
     assistantRecordId?: string
     /** 上一条 assistant record 的 recordId，用于写入 user message metadata 的 parentId */
     lastAssistantRecordId?: string | null
+    /** 图片附件 — 保存到 user record parts，用于历史恢复和消息展示 */
+    imageBlocks?: Array<{ data: string; mimeType: string }>
   }): Promise<{ userRecordId: string; assistantRecordId: string }> {
-    const { conversationId, envId, userId, prompt, prevRecordId } = params
+    const { conversationId, envId, userId, prompt, prevRecordId, imageBlocks } = params
     const assistantRecordId = params.assistantRecordId || uuidv4()
     const userRecordId = uuidv4()
+
+    // Pre-save: only store the text prompt as a pending placeholder.
+    // If images are present, we intentionally skip them here — syncMessages()
+    // will call replacePartsInRecord() with the real SDK JSONL data (which
+    // includes proper image_blob_ref blocks) once the agent completes.
+    const baseMetadata: Record<string, unknown> = {
+      id: userRecordId,
+      type: 'message',
+      role: 'user',
+      sessionId: conversationId,
+      timestamp: Date.now(),
+      ...(params.lastAssistantRecordId ? { parentId: params.lastAssistantRecordId } : {}),
+    }
 
     const userParts: UnifiedMessagePart[] = [
       {
         partId: uuidv4(),
         contentType: 'text',
         content: prompt,
-        metadata: {
-          id: userRecordId,
-          type: 'message',
-          role: 'user',
-          sessionId: conversationId,
-          timestamp: Date.now(),
-          // parentId: 指向上一条 assistant 消息，确保 JSONL 树的连续性
-          // 即使 cancel 导致 SDK 没写真正的 JSONL，树也不会断裂
-          ...(params.lastAssistantRecordId ? { parentId: params.lastAssistantRecordId } : {}),
-        },
+        metadata: baseMetadata,
       },
     ]
 

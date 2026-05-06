@@ -229,14 +229,17 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
 
   /** Send the initial prompt (from URL param). Only called once. */
   const sendInitialPrompt = useCallback(
-    async (text: string) => {
+    async (text: string, imageBlocks?: Array<{ data: string; mimeType: string }>) => {
       acpSessionReady.current = true
       const userMsg: TaskMessage = {
         id: `user-${Date.now()}`,
         taskId,
         role: 'user',
         content: text,
-        parts: [{ type: 'text', text }],
+        parts: [
+          ...(imageBlocks?.map((img) => ({ type: 'image' as const, data: img.data, mimeType: img.mimeType })) ?? []),
+          { type: 'text', text },
+        ],
         createdAt: Date.now(),
       }
       const assistantMsgId = `stream-${Date.now()}`
@@ -253,7 +256,10 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
       try {
         await runPromptStream(assistantMsgId, {
           sessionId: taskId,
-          prompt: [{ type: 'text', text }],
+          prompt: [
+            ...(imageBlocks?.map((img) => ({ type: 'image' as const, data: img.data, mimeType: img.mimeType })) ?? []),
+            { type: 'text', text },
+          ],
           // P2: Plan 模式激活时让 Agent 以 permissionMode='plan' 启动
           ...(planMode.active ? { permissionMode: 'plan' as const } : {}),
         })
@@ -266,14 +272,25 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
 
   /** Send a follow-up message in an existing conversation. */
   const sendMessage = useCallback(
-    async (text: string, onRestoreDraft: (text: string) => void) => {
+    async (
+      text: string,
+      onRestoreDraft: (text: string) => void,
+      imageBlocks?: Array<{ data: string; mimeType: string }>,
+    ) => {
       const userMsgId = `local-${Date.now()}`
       const userMsg: TaskMessage = {
         id: userMsgId,
         taskId,
         role: 'user',
         content: text,
-        parts: [{ type: 'text', text }],
+        parts: [
+          ...(imageBlocks?.map((img) => ({
+            type: 'image' as const,
+            data: img.data,
+            mimeType: img.mimeType,
+          })) ?? []),
+          { type: 'text', text },
+        ],
         createdAt: Date.now(),
       }
       setMessages((prev) => [...prev, userMsg])
@@ -304,7 +321,10 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
         enterStreaming()
         await runPromptStream(assistantMsgId, {
           sessionId: taskId,
-          prompt: [{ type: 'text', text }],
+          prompt: [
+            ...(imageBlocks?.map((img) => ({ type: 'image' as const, data: img.data, mimeType: img.mimeType })) ?? []),
+            { type: 'text', text },
+          ],
           ...(planMode.active ? { permissionMode: 'plan' as const } : {}),
         })
       } catch (err) {

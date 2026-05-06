@@ -17,7 +17,6 @@ import { archiveToGit } from '../sandbox/git-archive.js'
 import { getCodingSystemPrompt } from './coding-mode.js'
 import { getDb } from '../db/index.js'
 import { resolveSandboxConfig, backfillSandboxConfig } from '../lib/sandbox-config.js'
-import { nanoid } from 'nanoid'
 import { decrypt } from '../lib/crypto.js'
 import { encryptJWE } from '../lib/session.js'
 import type { AgentCallbackMessage, AgentOptions, CodeBuddyMessage, ExtendedSessionUpdate } from '@coder/shared'
@@ -31,8 +30,6 @@ const DEFAULT_MODEL = 'glm-5.1'
 const OAUTH_TOKEN_ENDPOINT = 'https://copilot.tencent.com/oauth2/token'
 const CONNECT_TIMEOUT_MS = 60_000
 const ITERATION_TIMEOUT_MS = 2 * 60 * 1000
-const HEALTH_MAX_RETRIES = 20
-const HEALTH_INTERVAL_MS = 2000
 
 // ─── Supported Models Cache ───────────────────────────────────────────────
 
@@ -89,133 +86,16 @@ export async function getSupportedModels(): Promise<ModelInfo[]> {
   return cachedModels
 }
 
-// ─── Sandbox Helpers ──────────────────────────────────────────────────────
-
-/**
- * 等待沙箱健康检查就绪（轮询 /health）
- */
-async function waitForSandboxHealth(
-  sandbox: SandboxInstance,
-  _callback: AgentCallback,
-  onProgress?: SandboxProgressCallback,
-): Promise<boolean> {
-  onProgress?.({ phase: 'wait_ready', message: '等待沙箱就绪...\n' })
-  for (let i = 0; i < HEALTH_MAX_RETRIES; i++) {
-    try {
-      const res = await sandbox.request('/health', {
-        signal: AbortSignal.timeout(4000),
-      })
-      if (res.ok) {
-        console.log('[Agent] Sandbox health check passed')
-        return true
-      }
-    } catch {
-      // 继续轮询
-    }
-    await new Promise((r) => setTimeout(r, HEALTH_INTERVAL_MS))
-  }
-  return false
-}
-
-/**
- * 初始化沙箱工作空间：POST /api/session/init 注入凭证和环境变量
- * 然后创建会话工作目录
- * 返回容器内的工作目录路径（可能为 undefined）
- */
-async function initSandboxWorkspace(
-  sandbox: SandboxInstance,
-  secret: { envId: string; secretId: string; secretKey: string; token?: string },
-  conversationId: string,
-  preferredCwd?: string,
-  onProgress?: SandboxProgressCallback,
-): Promise<{ workspace: string; vitePort?: number }> {
-  const fallbackWorkspace = preferredCwd || `/tmp/workspace/${secret.envId}/${conversationId}`
-
-  onProgress?.({ phase: 'init_mcp', message: '初始化工作空间...\n' })
-
-  // Fire session/init in background — injects credentials into the sandbox session.
-  // The actual workspace + vite initialisation is triggered lazily by /api/scope/info
-  // with X-Scope-Template: coding, but we still need credential injection first.
-  sandbox
-    .request('/api/session/init', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        env: {
-          CLOUDBASE_ENV_ID: secret.envId,
-          TENCENTCLOUD_SECRETID: secret.secretId,
-          TENCENTCLOUD_SECRETKEY: secret.secretKey,
-          ...(secret.token ? { TENCENTCLOUD_SESSIONTOKEN: secret.token } : {}),
-        },
-      }),
-      signal: AbortSignal.timeout(300_000),
-    })
-    .then((res) => {
-      if (res.ok) {
-        console.log('[Agent] session/init completed successfully')
-      } else {
-        console.warn('[Agent] session/init returned status:', res.status)
-      }
-    })
-    .catch((e) => {
-      console.warn('[Agent] session/init background error:', (e as Error).message)
-    })
-
-  // Poll /api/scope/info to get the workspace path (and vitePort if coding mode).
-  // Scope headers (X-Scope-Id, X-Scope-Template) are injected automatically by sandbox.request().
-  // The first request with X-Scope-Template: coding triggers template init + vite dev server.
-  const maxWaitMs = 120_000
-  const pollInterval = 2000
-  const startTime = Date.now()
-
-  while (Date.now() - startTime < maxWaitMs) {
-    try {
-      const res = await sandbox.request('/api/scope/info', {
-        signal: AbortSignal.timeout(10_000),
-      })
-      if (res.ok) {
-        const data = (await res.json()) as {
-          success?: boolean
-          workspace?: string
-          vitePort?: number | null
-        }
-        if (data.success && data.workspace) {
-          console.log(
-            `[Agent] initSandboxWorkspace ready via scope/info, workspace: ${data.workspace}, vitePort: ${data.vitePort}`,
-          )
-          onProgress?.({ phase: 'ready', message: '沙箱已就绪\n' })
-          return { workspace: data.workspace, vitePort: data.vitePort ?? undefined }
-        }
-      }
-    } catch {
-      // scope/info not available yet, sandbox may still be starting
-    }
-    await new Promise((r) => setTimeout(r, pollInterval))
-  }
-
-  // Timeout fallback: return the computed workspace path so the agent can continue
-  console.warn(`[Agent] initSandboxWorkspace timeout after ${maxWaitMs / 1000}s, returning fallback workspace`)
-  return { workspace: fallbackWorkspace }
-}
-
-/**
- * 需要用户确认的写操作 MCP 工具集合。
- * canUseTool 中对这些工具发起 interrupt，等待客户端确认后再执行。
- * 可通过 bypassToolConfirmation=true 跳过确认。
- */
-const WRITE_TOOLS = new Set([
-  // 数据库写操作（4 个）
-  'writeNoSqlDatabaseStructure', // 修改 NoSQL 数据库结构
-  'writeNoSqlDatabaseContent', // 修改 NoSQL 数据库内容
-  'executeWriteSQL', // 执行写入 SQL
-  'modifyDataModel', // 修改数据模型
-
-  // 云函数写操作（4 个）
-  'createFunction', // 创建云函数
-  'updateFunctionCode', // 更新云函数代码
-  'updateFunctionConfig', // 更新云函数配置
-  'invokeFunction', // 调用云函数
-])
+// ─── Sandbox & Prompt Helpers (imported from base-runtime) ───────────────
+// 集中在 base-runtime.ts 维护，所有 runtime 共用。
+import {
+  waitForSandboxHealth,
+  initSandboxWorkspace,
+  WRITE_TOOLS,
+  buildAppendPrompt,
+  getPublishableKey,
+  persistDeploymentFromArtifact,
+} from './runtime/base-runtime.js'
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -328,145 +208,6 @@ function getBundledSkillsDir(): string {
   const devPath = path.resolve(__dirname, '../../skills')
   const prodPath = path.resolve(__dirname, '../skills')
   return existsSync(prodPath) ? prodPath : devPath
-}
-
-// ─── System Prompt Builder ─────────────────────────────────────────────────
-
-/**
- * 获取 CloudBase 前端 SDK 的 publishableKey（公开密钥）
- * 使用系统大密钥（TCB_SECRET_ID/TCB_SECRET_KEY）调用 tcb:CreateApiKey 获取
- * KeyType=publish_key 会返回已存在的 key 或创建新的
- * 结果按 envId 缓存，避免重复调用
- */
-const publishableKeyCache = new Map<string, string>()
-
-async function getPublishableKey(envId: string): Promise<string> {
-  if (publishableKeyCache.has(envId)) return publishableKeyCache.get(envId)!
-
-  const secretId = process.env.TCB_SECRET_ID
-  const secretKey = process.env.TCB_SECRET_KEY
-  if (!secretId || !secretKey || !envId) return ''
-  try {
-    const CloudBase = (await import('@cloudbase/manager-node')).default
-    const manager = new CloudBase({
-      secretId,
-      secretKey,
-      envId,
-      proxy: process.env.http_proxy,
-    })
-    const result = await manager.commonService('tcb', '2018-06-08').call({
-      Action: 'CreateApiKey',
-      Param: { EnvId: envId, KeyType: 'publish_key' },
-    })
-    const apiKey = result?.ApiKey || result?.Response?.ApiKey || ''
-    if (apiKey) {
-      publishableKeyCache.set(envId, apiKey)
-      console.log('[Agent] Got publishableKey for env:', envId)
-    }
-    return apiKey
-  } catch (e) {
-    console.warn('[Agent] Failed to get publishableKey:', (e as Error).message)
-    return ''
-  }
-}
-
-function buildAppendPrompt(
-  sandboxCwd?: string,
-  conversationId?: string,
-  envId?: string,
-  sandboxMode?: 'shared' | 'isolated',
-  isCodingMode?: boolean,
-): string {
-  // Coding mode already has getCodingSystemPrompt() which strongly anchors the
-  // assistant as "a coder working in a React/Vite project". We should NOT
-  // inject the "task classification" guideline in that case — it would create
-  // ambiguity (user is in a code project, they want a page, not text).
-  //
-  // Default mode is the opposite: the assistant is generic and the user may
-  // want pure conversation (文案/翻译/聊天). Without the classification
-  // guideline, the assistant tends to escalate every request into
-  // "write files and deploy", which was the bug reported by the user.
-  const roleLine = isCodingMode
-    ? '你是一个通用 AI 编程助手，同时具备腾讯云开发（CloudBase）能力。'
-    : '你是一个通用 AI 助手，同时具备腾讯云开发（CloudBase）能力，可按需通过工具操作云函数、数据库、存储、云托管等资源。'
-
-  const taskClassificationSection = isCodingMode
-    ? ''
-    : `
-<task-classification priority="highest">
-收到任务后，先判断类型再决定是否使用工具：
-
-1) **对话/创作/咨询类**（写文案、写文章、翻译、起名、解释概念、讨论观点、情绪陪伴、海报/帖子**文本**、小红书/朋友圈文案、社交媒体内容等）
-   → 直接在对话中以**文本/Markdown**形式输出，**不要**写文件、不要部署、不要调用开发相关工具。
-   → 即使用户说"帮我做一个 XX 应援贴/海报/宣传文案"，默认先理解为"输出文案"，除非用户明确要求"做一个页面/网站/应用"。
-   → **例外**：如果用户明确说"生成一张图""帮我画一张 XX 图片""做一张海报图片"，使用 ImageGen 工具生成图片。
-
-2) **编程/工程类**（修改代码、调试、构建应用、部署服务、配置云资源、运维操作）
-   → 使用工具完成任务：读文件、写文件、执行命令、部署、调用云开发 MCP 等。
-
-3) **自动化/定时类**（"每天…"、"每周…"、"定期…"）
-   → 使用 cronTask 工具管理定时任务（见下面 cron-task 章节）。
-
-**不确定时优先问用户**："你希望我直接写文案给你，还是做一个可访问的网页？"，不要擅自升级为 2)。
-</task-classification>
-`
-
-  const base = `<role>
-${roleLine}
-默认使用中文与用户沟通；删除等破坏性操作需确认用户意图。
-</role>
-${taskClassificationSection}
-<cloudbase-guideline>
-- 当前云开发环境为 ${envId || '(未指定)'}，必要时可通过 cloudbase MCP 工具操作。
-- **仅当用户明确要求部署、开发应用、操作数据库、上传文件等**，才使用云开发工具。纯文案/咨询不涉及此。
-- 部署云函数使用 manageFunctions 工具；上传文件到静态托管使用 cloudbase_uploadFiles 工具。
-</cloudbase-guideline>
-
-<bash-usage>
-对于耗时较长的命令（如 npm install、yarn install、大型项目构建等），如果执行超时：
-1. 改为后台执行, 添加 run_in_background，可以获取 pid
-2. 定期检查进程状态：ps aux | grep '<关键词>' | grep -v grep
-3. 通过 BashOutput 结合 pid 查看输出结果
-4. 也可以通过 KillShell 关闭后台执行的任务
-</bash-usage>
-
-<cron-task-usage>
-当用户提到定时执行、定期运行、每天/每周/每小时执行某操作等需求时，必须使用 cronTask 工具来管理定时任务。
-- 创建：action="create"，需要 name、prompt、cronExpression
-- 查询：action="list"，查看当前所有定时任务
-- 更新：action="update"，通过 id 修改已有任务（可改 prompt、cronExpression、enabled 等）
-- 删除：action="delete"，通过 id 删除任务
-Cron 表达式格式：分 时 日 月 周，例如 "0 20 * * *" 表示每天 20:00。
-</cron-task-usage>
-
-<tools-extra-info>
-- **ImageGen** — AI 图片生成。Usage: 用户明确要求生成/绘制图片时（"帮我画一张…""生成一张…的图""做一张海报图片"）。生成的图片会同时保存到工作区和静态托管，返回可公开访问的 CDN 链接。
-- **ImageEdit** — AI 图片编辑。Usage: 用户提供一张已有图片，要求修改风格、添加元素、局部重绘等。
-</tools-extra-info>`
-
-  if (sandboxCwd) {
-    const homeDir = sandboxMode === 'isolated' ? sandboxCwd : sandboxCwd.substring(0, sandboxCwd.lastIndexOf('/'))
-    // In default mode, gate the sandbox section with a reminder so pure
-    // chat/creation tasks don't drift into file-writing behavior. In coding
-    // mode the getCodingSystemPrompt already establishes the context so no
-    // gating is needed.
-    const sandboxPreamble = isCodingMode
-      ? ''
-      : '（以下仅在你已判定任务属于"编程/工程类"、决定动手写文件或执行命令时适用；对话/创作类任务请忽略本节。）\n'
-    return `${base}
-
-<sandbox-context>
-${sandboxPreamble}工具默认在 Home: ${homeDir} 下执行
-为项目开辟工作目录为: ${sandboxCwd}
-使用的云开发环境为: ${envId}
-请注意：
-- 所有文件读写、终端命令都应在工作目录中执行，注意 cd 到工作目录操作。
-- 使用 cloudbase_uploadFiles 部署文件时，localPath 必须是容器内的**绝对路径**（即当前工作目录 ${sandboxCwd} 下的路径），例如 ${sandboxCwd}/index.html
-- 如用户没有特别要求，cloudPath 需要为 ${conversationId}，即在当前会话路径下
-- 不要使用相对路径给 cloudbase_uploadFiles
-</sandbox-context>`
-  }
-  return base
 }
 
 // ─── CloudbaseAgentService ─────────────────────────────────────────────────
@@ -652,6 +393,7 @@ export class CloudbaseAgentService {
       model,
       mode,
       permissionMode: requestedPermissionMode,
+      imageBlocks,
     } = options
     const modelId = model || DEFAULT_MODEL
     const isCodingMode = mode === 'coding'
@@ -837,7 +579,7 @@ export class CloudbaseAgentService {
 
       // 2. Persist deployment records (side-effect, fire-and-forget)
       if (msg.type === 'artifact' && msg.artifact) {
-        this.persistDeploymentFromArtifact(conversationId, msg.artifact).catch((err) => {
+        persistDeploymentFromArtifact(conversationId, msg.artifact).catch((err) => {
           console.error('Failed to persist deployment:', err)
         })
       }
@@ -929,7 +671,7 @@ export class CloudbaseAgentService {
         }
 
         // ── 健康检查：等待沙箱就绪 ──────────────────────────────────
-        const sandboxReady = await waitForSandboxHealth(sandboxInstance, wrappedCallback, sandboxProgressBridge)
+        const sandboxReady = await waitForSandboxHealth(sandboxInstance, sandboxProgressBridge)
         if (!sandboxReady) {
           wrappedCallback({ type: 'text', content: '沙箱启动超时，将使用受限模式继续对话。\n\n' })
           sandboxInstance = null
@@ -1191,6 +933,7 @@ export class CloudbaseAgentService {
         prevRecordId: lastRecordId,
         assistantRecordId: assistantMessageId,
         lastAssistantRecordId,
+        imageBlocks: imageBlocks?.length ? imageBlocks : undefined,
       })
       preSavedUserRecordId = preSaved.userRecordId
     }
@@ -1275,8 +1018,38 @@ export class CloudbaseAgentService {
 
       // 构建 query 参数 - 和 tcb-headless-service buildQueryOptions 一致
       // 注意: cwd 必须是本地路径, 即使沙箱启用. 沙箱只提供 MCP 工具, agent 进程在本地运行.
+
+      // 多模态 prompt：有图片时构建 ContentBlock[] 作为 UserMessage，否则直接用字符串
+      let queryPrompt: string | any
+      if (imageBlocks && imageBlocks.length > 0) {
+        // SDK ImageContentBlock 格式: { type:'image', source:{ type:'base64', media_type, data } }
+        const contentBlocks: any[] = imageBlocks.map((img) => ({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: img.mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+            data: img.data,
+          },
+        }))
+        if (prompt.trim()) {
+          contentBlocks.push({ type: 'text', text: prompt })
+        }
+        // Wrap as AsyncIterable<UserMessage>
+        const userMsg = {
+          type: 'user' as const,
+          session_id: conversationId,
+          message: { role: 'user' as const, content: contentBlocks },
+          parent_tool_use_id: null,
+        }
+        queryPrompt = (async function* () {
+          yield userMsg
+        })()
+      } else {
+        queryPrompt = prompt
+      }
+
       const queryArgs = {
-        prompt,
+        prompt: queryPrompt,
         options: {
           model: modelId,
           permissionMode: sdkPermissionMode,
@@ -1802,114 +1575,6 @@ export class CloudbaseAgentService {
     }
   }
 
-  // ─── Deployment Persistence ────────────────────────────────────────
-
-  private async persistDeploymentFromArtifact(
-    taskId: string,
-    artifact: NonNullable<AgentCallbackMessage['artifact']>,
-  ): Promise<void> {
-    const now = Date.now()
-    const meta = artifact.metadata || {}
-    const deploymentType = (meta.deploymentType as string) || (artifact.contentType === 'link' ? 'web' : 'miniprogram')
-    const metadataJson = Object.keys(meta).length > 0 ? JSON.stringify(meta) : null
-
-    if (deploymentType === 'miniprogram') {
-      const qrCodeUrl = artifact.contentType === 'image' ? artifact.data : (meta.qrCodeUrl as string) || null
-      const pagePath = (meta.pagePath as string) || null
-      const appId = (meta.appId as string) || null
-      const label = artifact.title || null
-
-      const existing = await getDb().deployments.findByTaskIdAndTypePath(taskId, 'miniprogram', null)
-
-      if (existing) {
-        await getDb().deployments.update(existing.id, {
-          qrCodeUrl: qrCodeUrl || existing.qrCodeUrl,
-          pagePath: pagePath || existing.pagePath,
-          appId: appId || existing.appId,
-          label: label || existing.label,
-          metadata: metadataJson || existing.metadata,
-          updatedAt: now,
-        })
-      } else {
-        await getDb().deployments.create({
-          id: nanoid(12),
-          taskId,
-          type: 'miniprogram',
-          url: null,
-          path: null,
-          qrCodeUrl,
-          pagePath,
-          appId,
-          label,
-          metadata: metadataJson,
-          createdAt: now,
-          updatedAt: now,
-        })
-      }
-    } else if (artifact.contentType === 'link' && artifact.data) {
-      const url = artifact.data
-      let urlPath: string | null = null
-      try {
-        const urlObj = new URL(url)
-        // Normalize path: strip trailing index.html and trailing slash for dedup
-        urlPath = urlObj.pathname.replace(/\/index\.html$/, '/').replace(/\/+$/, '') || '/'
-      } catch {
-        /* ignore */
-      }
-
-      if (urlPath) {
-        const existing = await getDb().deployments.findByTaskIdAndTypePath(taskId, 'web', urlPath)
-
-        if (existing) {
-          await getDb().deployments.update(existing.id, {
-            url,
-            label: artifact.title || existing.label,
-            metadata: metadataJson || existing.metadata,
-            updatedAt: now,
-          })
-        } else {
-          await getDb().deployments.create({
-            id: nanoid(12),
-            taskId,
-            type: 'web',
-            url,
-            path: urlPath,
-            qrCodeUrl: null,
-            pagePath: null,
-            appId: null,
-            label: artifact.title || null,
-            metadata: metadataJson,
-            createdAt: now,
-            updatedAt: now,
-          })
-        }
-      }
-
-      // Also update legacy previewUrl for backward compatibility
-      try {
-        await getDb().tasks.update(taskId, { previewUrl: url })
-      } catch {
-        // Non-critical
-      }
-    } else {
-      // Other artifact types (json, image without miniprogram context, etc.)
-      await getDb().deployments.create({
-        id: nanoid(12),
-        taskId,
-        type: deploymentType as 'web' | 'miniprogram',
-        url: artifact.contentType === 'link' ? artifact.data : null,
-        path: null,
-        qrCodeUrl: artifact.contentType === 'image' ? artifact.data : null,
-        pagePath: null,
-        appId: null,
-        label: artifact.title || null,
-        metadata: metadataJson,
-        createdAt: now,
-        updatedAt: now,
-      })
-    }
-  }
-
   // ─── Stream Event Handlers ──────────────────────────────────────────
 
   private handleStreamEvent(
@@ -2038,12 +1703,6 @@ export class CloudbaseAgentService {
             ? block.content
             : null
 
-      // 检测 uploadFiles 结果，提取 CloudBase 部署 URL
-      this.tryExtractDeployUrl(block.tool_use_id, rawText, tracker, callback)
-
-      // 检测 publishMiniprogram 结果，提取预览二维码
-      this.tryExtractQrcode(block.tool_use_id, rawText, tracker, callback)
-
       let processedContent = block.content
       if (Array.isArray(block.content) && block.content.length > 0) {
         const firstBlock = block.content[0]
@@ -2065,150 +1724,6 @@ export class CloudbaseAgentService {
         is_error: block.is_error,
         parent_tool_use_id: parentToolUseId,
       })
-    }
-  }
-
-  /**
-   * 尝试从 uploadFiles 工具结果中提取 CloudBase 静态托管部署 URL
-   * 结果包含 accessUrl 或 staticDomain 则触发 artifact callback
-   */
-  private tryExtractDeployUrl(
-    toolUseId: string,
-    rawText: string | null,
-    tracker: ToolCallTracker,
-    callback: AgentCallback,
-  ): void {
-    const toolInfo = tracker.pendingToolCalls.get(toolUseId)
-    const toolName = toolInfo?.name || ''
-    if (!toolName.includes('uploadFiles') && !toolName.includes('cloudbase_uploadFiles')) return
-    if (!rawText) return
-
-    try {
-      let localPath: string | undefined
-      const inputJson = tracker.toolInputJsonBuffers.get(toolUseId)
-      if (inputJson) {
-        try {
-          localPath = JSON.parse(inputJson)?.localPath
-        } catch {
-          /* ignore */
-        }
-      }
-      if (!localPath) localPath = (toolInfo?.input as Record<string, unknown>)?.localPath as string | undefined
-
-      const isFile = localPath ? /\.[a-zA-Z0-9]+$/.test(localPath.replace(/\/+$/, '').split('/').pop() || '') : false
-      const deployUrl = CloudbaseAgentService.extractDeployUrl(rawText, isFile)
-      if (deployUrl) {
-        callback({
-          type: 'artifact',
-          artifact: {
-            title: 'Web 应用已部署',
-            contentType: 'link',
-            data: deployUrl,
-            metadata: { deploymentType: 'web' },
-          },
-        })
-      }
-    } catch {
-      // 提取失败不影响主流程
-    }
-  }
-
-  /**
-   * 从 uploadFiles 工具结果 JSON 中递归提取 CloudBase 部署 URL
-   * 支持 accessUrl / staticDomain 字段，最多递归 5 层
-   */
-  private static extractDeployUrl(rawText: string, isFile = false, depth = 0): string | null {
-    if (depth > 5) return null
-    try {
-      const parsed = JSON.parse(rawText)
-
-      if (Array.isArray(parsed)) {
-        const firstText = parsed[0]?.text
-        if (typeof firstText === 'string') {
-          return CloudbaseAgentService.extractDeployUrl(firstText, isFile, depth + 1)
-        }
-        return null
-      }
-
-      if (typeof parsed !== 'object' || parsed === null) return null
-
-      if (parsed.accessUrl) {
-        const url = new URL(parsed.accessUrl)
-        if (!isFile && url.pathname !== '/' && !url.pathname.endsWith('/')) {
-          url.pathname += '/'
-        }
-        if (!url.searchParams.get('t')) {
-          url.searchParams.set('t', String(Date.now()))
-        }
-        return url.toString()
-      }
-      if (parsed.staticDomain) return `https://${parsed.staticDomain}/?t=${Date.now()}`
-
-      const innerText = parsed?.res?.content?.[0]?.text || parsed?.content?.[0]?.text
-      if (typeof innerText === 'string') {
-        return CloudbaseAgentService.extractDeployUrl(innerText, isFile, depth + 1)
-      }
-    } catch {
-      // JSON parse 失败，忽略
-    }
-    return null
-  }
-
-  /**
-   * 尝试从 publishMiniprogram 工具结果中提取小程序预览二维码
-   * 成功则触发 artifact callback
-   */
-  private tryExtractQrcode(
-    toolUseId: string,
-    rawText: string | null,
-    tracker: ToolCallTracker,
-    callback: AgentCallback,
-  ): void {
-    const toolInfo = tracker.pendingToolCalls.get(toolUseId)
-    const toolName = toolInfo?.name || ''
-    if (!toolName.includes('publishMiniprogram') && !toolName.includes('Miniprogram')) return
-    if (!rawText) return
-
-    try {
-      let parsedResult: any = null
-      try {
-        parsedResult = JSON.parse(rawText)
-      } catch {
-        return
-      }
-
-      const action = parsedResult?.action || (toolInfo?.input as any)?.action
-
-      // 小程序预览二维码
-      if (parsedResult?.result?.qrcode) {
-        const qrcode = `data:${parsedResult?.result?.qrcode?.mimeType || 'image/png'};base64,${parsedResult?.result?.qrcode?.base64}`
-        callback({
-          type: 'artifact',
-          artifact: {
-            title: '小程序预览二维码',
-            description: '使用微信扫码预览小程序',
-            contentType: 'image',
-            data: qrcode,
-            metadata: parsedResult,
-          },
-        })
-        return
-      }
-
-      // 上传成功但无二维码
-      if (parsedResult?.success && action === 'upload') {
-        callback({
-          type: 'artifact',
-          artifact: {
-            title: '小程序上传成功',
-            description: '代码已上传到微信后台，可前往微信公众平台提交审核',
-            contentType: 'json',
-            data: JSON.stringify(parsedResult),
-          },
-        })
-      }
-    } catch {
-      // 提取失败不影响主流程
     }
   }
 

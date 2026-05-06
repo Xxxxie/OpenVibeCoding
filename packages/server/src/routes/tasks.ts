@@ -3,6 +3,7 @@ import { streamSSE } from 'hono/streaming'
 import { getDb } from '../db/index.js'
 import { nanoid } from 'nanoid'
 import { requireAuth, requireUserEnv, type AppEnv } from '../middleware/auth'
+import { readFileSync } from 'node:fs'
 import { createTaskLogger } from '../lib/task-logger'
 import { resolveSandboxConfig, backfillSandboxConfig } from '../lib/sandbox-config'
 import { decrypt } from '../lib/crypto'
@@ -449,28 +450,57 @@ tasksRouter.get('/:taskId/messages', requireUserEnv, async (c) => {
   try {
     const cloudbaseRecords = await persistenceService.loadDBMessages(taskId, envId, userId, 100)
     const messages = cloudbaseRecords.map((record) => {
-      const parts = (record.parts || []).map((p) => {
-        if (p.contentType === 'text') return { type: 'text' as const, text: p.content || '' }
-        else if (p.contentType === 'reasoning') return { type: 'thinking' as const, text: p.content || '' }
-        else if (p.contentType === 'tool_call')
-          return {
-            type: 'tool_call' as const,
-            toolCallId: p.toolCallId || p.partId,
-            toolName: (p.metadata?.toolCallName as string) || (p.metadata?.toolName as string) || 'tool',
-            input: p.content || p.metadata?.input,
-            status: (p.metadata?.status as string) || undefined,
-          }
-        else if (p.contentType === 'tool_result')
-          return {
-            type: 'tool_result' as const,
-            toolCallId: p.toolCallId || p.partId,
-            toolName: (p.metadata?.toolName as string) || undefined,
-            content: p.content || '',
-            isError: p.metadata?.isError as boolean | undefined,
-            status: (p.metadata?.status as string) || undefined,
-          }
-        return { type: 'text' as const, text: p.content || '' }
-      })
+      const parts = (record.parts || [])
+        .map((p) => {
+          if (p.contentType === 'text') {
+            // contentBlocks may be in p.metadata (TypeScript model) or directly on p
+            // (when CloudBase flattens the nested metadata object on read-back)
+            const contentBlocks = ((p.metadata as any)?.contentBlocks ?? (p as any).contentBlocks) as any[] | undefined
+            if (contentBlocks) {
+              const imageParts: any[] = []
+              for (const b of contentBlocks) {
+                if (b.type === 'image_blob_ref') {
+                  // Post-syncMessages: read from local blob file
+                  try {
+                    const data = readFileSync(b.blob_path as string).toString('base64')
+                    imageParts.push({ type: 'image' as const, data, mimeType: b.mime as string })
+                  } catch (e) {
+                    console.error('[messages] blob read failed:', b.blob_path, (e as Error).message)
+                  }
+                }
+              }
+              if (imageParts.length > 0) {
+                return [...imageParts, { type: 'text' as const, text: p.content || '' }]
+              }
+            }
+            return { type: 'text' as const, text: p.content || '' }
+          } else if (p.contentType === 'reasoning') return { type: 'thinking' as const, text: p.content || '' }
+          else if (p.contentType === 'tool_call')
+            return {
+              type: 'tool_call' as const,
+              toolCallId: p.toolCallId || p.partId,
+              toolName: (p.metadata?.toolCallName as string) || (p.metadata?.toolName as string) || 'tool',
+              input: p.content || p.metadata?.input,
+              status: (p.metadata?.status as string) || undefined,
+            }
+          else if (p.contentType === 'tool_result')
+            return {
+              type: 'tool_result' as const,
+              toolCallId: p.toolCallId || p.partId,
+              toolName: (p.metadata?.toolName as string) || undefined,
+              content: p.content || '',
+              isError: p.metadata?.isError as boolean | undefined,
+              status: (p.metadata?.status as string) || undefined,
+            }
+          else if (p.contentType === 'image')
+            return {
+              type: 'image' as const,
+              data: p.content || '',
+              mimeType: (p.metadata?.mimeType as string) || 'image/png',
+            }
+          return { type: 'text' as const, text: p.content || '' }
+        })
+        .flat()
       const textContent = parts
         .filter((p) => p.type === 'text')
         .map((p) => (p as { type: 'text'; text: string }).text)

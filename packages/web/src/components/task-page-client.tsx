@@ -43,6 +43,7 @@ export function TaskPageClient({
   // 读取 URL ?prompt= 参数，只读一次然后清除
   const [searchParams, setSearchParams] = useSearchParams()
   const [initialPrompt, setInitialPrompt] = useState<string | undefined>(undefined)
+  const [initialImages, setInitialImages] = useState<Array<{ data: string; mimeType: string }> | undefined>(undefined)
   const promptExtracted = useRef(false)
 
   useEffect(() => {
@@ -51,10 +52,20 @@ export function TaskPageClient({
     const p = searchParams.get('prompt')
     if (p) {
       setInitialPrompt(p)
+      // Pick up any images saved to sessionStorage when the task was created
+      const storedImages = sessionStorage.getItem(`task-images-${taskId}`)
+      if (storedImages) {
+        try {
+          setInitialImages(JSON.parse(storedImages))
+        } catch {
+          /* ignore */
+        }
+        sessionStorage.removeItem(`task-images-${taskId}`)
+      }
       // 用 replace 清除 URL 参数，不增加历史记录
       setSearchParams({}, { replace: true })
     }
-  }, [searchParams, setSearchParams])
+  }, [searchParams, setSearchParams, taskId])
 
   const handleInitialPromptConsumed = useCallback(() => {
     setInitialPrompt(undefined)
@@ -110,6 +121,7 @@ export function TaskPageClient({
           maxSandboxDuration={maxSandboxDuration}
           onStreamComplete={refetch}
           initialPrompt={initialPrompt}
+          initialImages={initialImages}
           onInitialPromptConsumed={handleInitialPromptConsumed}
         />
       </div>

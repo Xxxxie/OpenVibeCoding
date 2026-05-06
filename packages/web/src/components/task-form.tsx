@@ -13,7 +13,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { Loader2, ArrowUp, Settings, X, Cable, Globe, Code2 } from 'lucide-react'
+import { Loader2, ArrowUp, Settings, X, Cable, Globe, Code2, ImageIcon } from 'lucide-react'
 import { CodeBuddy, MiMo, OpenCode, ProviderLogos, type ProviderKey } from '@/components/logos'
 // import { Claude, Codex, Copilot, Cursor, Gemini } from '@/components/logos'
 import { setInstallDependencies, setMaxDuration, setKeepAlive, setEnableBrowser } from '@/lib/utils/cookies'
@@ -47,6 +47,7 @@ interface TaskFormProps {
     maxDuration: number
     keepAlive: boolean
     enableBrowser: boolean
+    imageBlocks?: Array<{ data: string; mimeType: string }>
   }) => void
   isSubmitting: boolean
   selectedOwner: string
@@ -60,12 +61,12 @@ interface TaskFormProps {
 
 /** runtime name → agent value 的映射（让 CODING_AGENTS 与后端 runtime name 对齐） */
 const RUNTIME_TO_AGENT: Record<string, string> = {
-  'tencent-sdk': 'codebuddy',
+  codebuddy: 'codebuddy',
   'opencode-acp': 'opencode',
 }
 
 const CODING_AGENTS = [
-  { value: 'codebuddy', label: 'CodeBuddy', icon: CodeBuddy, isLogo: true, runtime: 'tencent-sdk' },
+  { value: 'codebuddy', label: 'CodeBuddy', icon: CodeBuddy, isLogo: true, runtime: 'codebuddy' },
   { value: 'opencode', label: 'OpenCode', icon: OpenCode, isLogo: true, runtime: 'opencode-acp' },
   // --- Other agents (commented out, kept for reference) ---
   // { value: 'claude', label: 'Claude', icon: Claude, isLogo: true, runtime: 'claude' },
@@ -118,13 +119,17 @@ export function TaskForm({
   const [taskMode, setTaskMode] = useState<'default' | 'coding'>('coding')
   const [repos, setRepos] = useAtom(githubReposAtomFamily(selectedOwner))
   const [, setLoadingRepos] = useState(false)
+  const [pendingImages, setPendingImages] = useState<
+    Array<{ id: string; url: string; data: string; mimeType: string }>
+  >([])
+  const imageInputRef = useRef<HTMLInputElement>(null)
 
   // Per-agent model lists and availability, loaded from /api/agent/runtimes
   const [agentModels, setAgentModels] = useState<Record<string, ModelInfo[]>>({
     codebuddy: [{ id: 'glm-5.1', name: 'GLM 5.1' }],
   })
   const [unavailableAgents, setUnavailableAgents] = useState<Set<string>>(new Set())
-  const [selectedRuntime, setSelectedRuntime] = useState<string>('tencent-sdk')
+  const [selectedRuntime, setSelectedRuntime] = useState<string>('codebuddy')
 
   useEffect(() => {
     fetch('/api/agent/runtimes')
@@ -284,6 +289,43 @@ export function TaskForm({
     fetchRepos()
   }, [selectedOwner, repos, setRepos])
 
+  const processImageFile = (file: File) => {
+    if (!file.type.startsWith('image/')) return
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string
+      const base64 = dataUrl.split(',')[1]
+      const url = URL.createObjectURL(file)
+      setPendingImages((prev) => [
+        ...prev,
+        { id: `img-${Date.now()}-${Math.random()}`, url, data: base64, mimeType: file.type },
+      ])
+    }
+    reader.readAsDataURL(file)
+  }
+
+  const handlePasteImage = (e: React.ClipboardEvent) => {
+    Array.from(e.clipboardData.items).forEach((item) => {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile()
+        if (file) processImageFile(file)
+      }
+    })
+  }
+
+  const handleImageFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
+    Array.from(e.target.files ?? []).forEach(processImageFile)
+    e.target.value = ''
+  }
+
+  const removeImage = (id: string) => {
+    setPendingImages((prev) => {
+      const img = prev.find((i) => i.id === id)
+      if (img) URL.revokeObjectURL(img.url)
+      return prev.filter((i) => i.id !== id)
+    })
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     console.log('[TaskForm] handleSubmit called, prompt:', prompt?.slice(0, 20), 'isSubmitting:', isSubmitting)
@@ -307,7 +349,10 @@ export function TaskForm({
         maxDuration,
         keepAlive,
         enableBrowser,
+        imageBlocks:
+          pendingImages.length > 0 ? pendingImages.map(({ data, mimeType }) => ({ data, mimeType })) : undefined,
       })
+      setPendingImages([])
       return
     }
 
@@ -356,7 +401,10 @@ export function TaskForm({
       maxDuration,
       keepAlive,
       enableBrowser,
+      imageBlocks:
+        pendingImages.length > 0 ? pendingImages.map(({ data, mimeType }) => ({ data, mimeType })) : undefined,
     })
+    setPendingImages([])
   }
 
   return (
@@ -378,21 +426,48 @@ export function TaskForm({
 
       <form onSubmit={handleSubmit}>
         <div className="relative border rounded-2xl shadow-sm overflow-hidden bg-muted/30 cursor-text">
+          {/* Pending images preview */}
+          {pendingImages.length > 0 && (
+            <div className="flex flex-wrap gap-2 px-4 pt-3">
+              {pendingImages.map((img) => (
+                <div key={img.id} className="relative group">
+                  <img src={img.url} alt="" className="h-16 w-16 rounded-lg object-cover border border-border" />
+                  <button
+                    type="button"
+                    onClick={() => removeImage(img.id)}
+                    className="absolute -top-1 -right-1 w-4 h-4 bg-background border border-border rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                  >
+                    <X className="h-2.5 w-2.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           {/* Prompt Input */}
           <div className="relative bg-transparent">
             <Textarea
               ref={textareaRef}
               id="prompt"
-              placeholder="Describe what you want the AI agent to do..."
+              placeholder="Describe what you want the AI agent to do... (paste images with Ctrl+V)"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleTextareaKeyDown}
+              onPaste={handlePasteImage}
               disabled={isSubmitting}
               required
               rows={4}
               className="w-full border-0 resize-none focus-visible:ring-0 focus-visible:ring-offset-0 p-4 text-base !bg-transparent shadow-none!"
             />
           </div>
+          {/* Hidden file input */}
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/gif,image/webp"
+            multiple
+            className="hidden"
+            onChange={handleImageFiles}
+          />
 
           {/* Mode + Agent/Model selector */}
           <div className="p-4">
@@ -480,7 +555,7 @@ export function TaskForm({
                 </div>
 
                 {/* Option Chips - Only visible on desktop */}
-                {(!installDependencies || maxDuration !== maxSandboxDuration || keepAlive) && (
+                {/* {(!installDependencies || maxDuration !== maxSandboxDuration || keepAlive) && (
                   <div className="hidden sm:flex items-center gap-2 flex-wrap">
                     {!installDependencies && (
                       <Badge variant="secondary" className="text-xs h-6 px-2 gap-1 bg-transparent border-0">
@@ -531,7 +606,7 @@ export function TaskForm({
                       </Badge>
                     )}
                   </div>
-                )}
+                )} */}
               </div>
 
               {/* Right side: Action Icons and Submit Button */}
@@ -680,9 +755,18 @@ export function TaskForm({
                     </DropdownMenu>
                   </TooltipProvider>
 
+                  <button
+                    type="button"
+                    onClick={() => imageInputRef.current?.click()}
+                    className="flex items-center justify-center h-8 w-8 rounded-full text-muted-foreground hover:text-foreground transition-colors"
+                    title="Attach image"
+                  >
+                    <ImageIcon className="h-4 w-4" />
+                  </button>
+
                   <Button
                     type="submit"
-                    disabled={isSubmitting || !prompt.trim()}
+                    disabled={isSubmitting || (!prompt.trim() && pendingImages.length === 0)}
                     size="sm"
                     className="rounded-full h-8 w-8 p-0"
                   >

@@ -5,7 +5,7 @@
  * 与"对外的会话/流式/持久化逻辑（routes/acp.ts、persistence.service.ts）"解耦。
  *
  * 现状：原 `CloudbaseAgentService` 直接耦合 `@tencent-ai/agent-sdk`。
- * 重构后：`CloudbaseAgentService` 退化为 `TencentSdkRuntime`（实现 IAgentRuntime），
+ * 重构后：`CloudbaseAgentService` 退化为 `CodeBuddyRuntime`（实现 IAgentRuntime），
  *         新增 `OpencodeAcpRuntime`，由 `AgentRuntimeRegistry` 调度。
  *
  * 关键约束（来自 routes/acp.ts 现有调用面）：
@@ -43,7 +43,7 @@ export interface ChatStreamResult {
  */
 export interface IAgentRuntime {
   /**
-   * Runtime 唯一标识（e.g. 'tencent-sdk', 'opencode-acp', 'claude-code-acp'）
+   * Runtime 唯一标识（e.g. 'codebuddy', 'opencode-acp', 'claude-code-acp'）
    */
   readonly name: string
 

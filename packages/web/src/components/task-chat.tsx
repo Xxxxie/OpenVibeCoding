@@ -35,6 +35,8 @@ import {
   MoreVertical,
   MessageSquare,
   Trash2,
+  X,
+  ImageIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Streamdown } from 'streamdown'
@@ -62,6 +64,10 @@ export function TaskChat({
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null)
   const [isStopping, setIsStopping] = useState(false)
   const [activeTab, setActiveTab] = useState('chat')
+  const [pendingImages, setPendingImages] = useState<
+    Array<{ id: string; url: string; data: string; mimeType: string }>
+  >([])
+  const imageInputRef = useRef<HTMLInputElement>(null)
 
   // Tab data
   const [prComments, setPrComments] = useState<PRComment[]>([])
@@ -397,10 +403,12 @@ export function TaskChat({
   const isAgentBusy = task.status === 'processing' || task.status === 'pending'
 
   const handleSendMessage = async () => {
-    if (!newMessage.trim() || isSending || isAgentBusy) return
+    if ((!newMessage.trim() && pendingImages.length === 0) || isSending || isAgentBusy) return
     const text = newMessage.trim()
+    const images = pendingImages.map(({ data, mimeType }) => ({ data, mimeType }))
     setNewMessage('')
-    await chatSendMessage(text, (draft) => setNewMessage(draft))
+    setPendingImages([])
+    await chatSendMessage(text, (draft) => setNewMessage(draft), images.length > 0 ? images : undefined)
     await fetchMessages(false)
   }
 
@@ -410,6 +418,45 @@ export function TaskChat({
       if (isAgentBusy) return
       handleSendMessage()
     }
+  }
+
+  const processImageFile = (file: File) => {
+    if (!file.type.startsWith('image/')) return
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string
+      // dataUrl = "data:image/png;base64,<data>"
+      const base64 = dataUrl.split(',')[1]
+      const url = URL.createObjectURL(file)
+      setPendingImages((prev) => [
+        ...prev,
+        { id: `img-${Date.now()}-${Math.random()}`, url, data: base64, mimeType: file.type },
+      ])
+    }
+    reader.readAsDataURL(file)
+  }
+
+  const handlePasteImage = (e: React.ClipboardEvent) => {
+    const items = Array.from(e.clipboardData.items)
+    items.forEach((item) => {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile()
+        if (file) processImageFile(file)
+      }
+    })
+  }
+
+  const handleImageFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
+    Array.from(e.target.files ?? []).forEach(processImageFile)
+    e.target.value = ''
+  }
+
+  const removeImage = (id: string) => {
+    setPendingImages((prev) => {
+      const img = prev.find((i) => i.id === id)
+      if (img) URL.revokeObjectURL(img.url)
+      return prev.filter((i) => i.id !== id)
+    })
   }
 
   const handleCopyMessage = async (messageId: string, content: string) => {
@@ -921,6 +968,23 @@ export function TaskChat({
                   className={`${groupIndex > 0 ? 'mt-4' : ''} sticky top-0 z-10 before:content-[""] before:absolute before:inset-0 before:bg-background before:-z-10`}
                 >
                   <Card className="px-2 py-2 bg-card rounded-md relative z-10 gap-0.5">
+                    {/* Render image parts outside height-limited container */}
+                    {group.userMessage.parts?.some((p) => p.type === 'image') && (
+                      <div className="flex flex-wrap gap-1.5 mb-1.5">
+                        {group.userMessage.parts
+                          .filter((p) => p.type === 'image')
+                          .map((p, i) =>
+                            p.type === 'image' ? (
+                              <img
+                                key={i}
+                                src={`data:${p.mimeType};base64,${p.data}`}
+                                alt=""
+                                className="h-14 max-w-[100px] rounded object-cover border border-border"
+                              />
+                            ) : null,
+                          )}
+                      </div>
+                    )}
                     <div
                       ref={(el) => {
                         contentRefs.current[group.userMessage.id] = el
@@ -1328,14 +1392,49 @@ export function TaskChat({
       {/* Input Area */}
       {!readOnly && activeTab === 'chat' && (
         <div className="flex-shrink-0 px-3 pb-3">
+          {/* Pending images preview */}
+          {pendingImages.length > 0 && (
+            <div className="flex flex-wrap gap-2 mb-2">
+              {pendingImages.map((img) => (
+                <div key={img.id} className="relative group">
+                  <img src={img.url} alt="" className="h-16 w-16 rounded-lg object-cover border border-border" />
+                  <button
+                    onClick={() => removeImage(img.id)}
+                    className="absolute -top-1 -right-1 w-4 h-4 bg-background border border-border rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                  >
+                    <X className="h-2.5 w-2.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="relative">
             <Textarea
               value={newMessage}
               onChange={(e) => setNewMessage(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Send a follow-up message..."
-              className="w-full min-h-[60px] max-h-[120px] resize-none pr-12 text-base md:text-xs"
+              onPaste={handlePasteImage}
+              placeholder="Send a follow-up message... (paste images with Ctrl+V)"
+              className="w-full min-h-[60px] max-h-[120px] resize-none pr-16 text-base md:text-xs"
               disabled={isSending}
+            />
+            {/* Image picker button */}
+            {!isAgentBusy && !isSending && (
+              <button
+                onClick={() => imageInputRef.current?.click()}
+                className="absolute bottom-2 right-8 rounded-full h-5 w-5 text-muted-foreground hover:text-foreground flex items-center justify-center"
+                title="Attach image"
+              >
+                <ImageIcon className="h-3 w-3" />
+              </button>
+            )}
+            <input
+              ref={imageInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/gif,image/webp"
+              multiple
+              className="hidden"
+              onChange={handleImageFiles}
             />
             {isAgentBusy || isSending ? (
               <button
@@ -1353,7 +1452,7 @@ export function TaskChat({
             ) : (
               <button
                 onClick={handleSendMessage}
-                disabled={!newMessage.trim()}
+                disabled={!newMessage.trim() && pendingImages.length === 0}
                 className="absolute bottom-2 right-2 rounded-full h-5 w-5 bg-primary text-primary-foreground hover:bg-primary/90 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
                 title="Send message"
               >

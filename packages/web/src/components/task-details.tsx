@@ -111,6 +111,7 @@ interface TaskDetailsProps {
   maxSandboxDuration?: number
   onStreamComplete?: () => void
   initialPrompt?: string
+  initialImages?: Array<{ data: string; mimeType: string }>
   onInitialPromptConsumed?: () => void
 }
 
@@ -193,6 +194,7 @@ export function TaskDetails({
   maxSandboxDuration = 300,
   onStreamComplete,
   initialPrompt,
+  initialImages,
   onInitialPromptConsumed,
 }: TaskDetailsProps) {
   // ── Theme & session (for CloudDashboard) ──
@@ -210,8 +212,8 @@ export function TaskDetails({
     if (!initialPrompt || initialTriggered.current) return
     initialTriggered.current = true
     onInitialPromptConsumed?.()
-    chatStream.sendInitialPrompt(initialPrompt)
-  }, [initialPrompt, onInitialPromptConsumed, chatStream.sendInitialPrompt])
+    chatStream.sendInitialPrompt(initialPrompt, initialImages)
+  }, [initialPrompt, initialImages, onInitialPromptConsumed, chatStream.sendInitialPrompt])
 
   const [optimisticStatus, setOptimisticStatus] = useState<Task['status'] | null>(null)
   const [mcpServers, setMcpServers] = useState<Connector[]>([])
