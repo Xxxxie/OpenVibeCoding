@@ -129,43 +129,38 @@ export function TaskForm({
   useEffect(() => {
     fetch('/api/agent/runtimes')
       .then((r) => r.json())
-      .then(
-        (data: {
-          default: string
-          runtimes: Array<{ name: string; available: boolean; models: ModelInfo[] }>
-        }) => {
-          const newAgentModels: Record<string, ModelInfo[]> = {}
-          const unavailable = new Set<string>()
+      .then((data: { default: string; runtimes: Array<{ name: string; available: boolean; models: ModelInfo[] }> }) => {
+        const newAgentModels: Record<string, ModelInfo[]> = {}
+        const unavailable = new Set<string>()
 
-          for (const rt of data.runtimes) {
-            if (!rt.available) {
-              // mark all agents that use this runtime as unavailable
-              for (const agent of CODING_AGENTS) {
-                if (agent.runtime === rt.name) unavailable.add(agent.value)
-              }
-            } else if (rt.models.length > 0) {
-              // assign models to every agent that maps to this runtime
-              for (const agent of CODING_AGENTS) {
-                if (agent.runtime === rt.name) newAgentModels[agent.value] = rt.models
-              }
+        for (const rt of data.runtimes) {
+          if (!rt.available) {
+            // mark all agents that use this runtime as unavailable
+            for (const agent of CODING_AGENTS) {
+              if (agent.runtime === rt.name) unavailable.add(agent.value)
+            }
+          } else if (rt.models.length > 0) {
+            // assign models to every agent that maps to this runtime
+            for (const agent of CODING_AGENTS) {
+              if (agent.runtime === rt.name) newAgentModels[agent.value] = rt.models
             }
           }
+        }
 
-          setAgentModels((prev) => ({ ...prev, ...newAgentModels }))
-          setUnavailableAgents(unavailable)
+        setAgentModels((prev) => ({ ...prev, ...newAgentModels }))
+        setUnavailableAgents(unavailable)
 
-          // Set default agent/runtime from server
-          const defaultAgentValue = RUNTIME_TO_AGENT[data.default]
-          if (defaultAgentValue) {
-            setSelectedAgent(defaultAgentValue)
-            setSelectedRuntime(data.default)
-            const defaultModels = newAgentModels[defaultAgentValue]
-            if (defaultModels && defaultModels.length > 0) {
-              setSelectedModel(defaultModels[0].id)
-            }
+        // Set default agent/runtime from server
+        const defaultAgentValue = RUNTIME_TO_AGENT[data.default]
+        if (defaultAgentValue) {
+          setSelectedAgent(defaultAgentValue)
+          setSelectedRuntime(data.default)
+          const defaultModels = newAgentModels[defaultAgentValue]
+          if (defaultModels && defaultModels.length > 0) {
+            setSelectedModel(defaultModels[0].id)
           }
-        },
-      )
+        }
+      })
       .catch(() => {
         /* silently ignore */
       })
