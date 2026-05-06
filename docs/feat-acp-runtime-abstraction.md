@@ -2,7 +2,7 @@
 
 > 分支：`feat/acp-runtime-abstraction`
 > 基线：`origin/main`（c9b68f9）
-> 14 commits，46 files changed，+5889 / -22
+> 15 commits，63 files changed
 
 ---
 
@@ -217,3 +217,94 @@ npx tsx --env-file=.env scripts/test-runtime-selector.mts
 - [ ] 前端 task-chat、AskUserForm、ToolConfirmDialog、PlanModeCard 等组件无变化
 - [ ] 管理后台（`/admin`）、任务列表、沙箱 preview、git 相关功能不受影响
 - [ ] 多 agent / multi-repo 任务创建路径正常（`selectedRuntime` 透传不报错）
+
+---
+
+## 四、增量变更（续 commit）
+
+### 4.1 Agent 统一选择器 + Per-Agent 模型
+
+**问题**：前端同时显示静态 CodeBuddy 标签和 runtime 下拉选择器，冗余。
+
+**方案**：合并为统一的 Agent `<Select>` 组件，采用静态列表（Method B）：
+
+- `CODING_AGENTS` 静态数组：`codebuddy`、`opencode`、`mimo`，每个带 `runtime` 字段
+- `RUNTIME_TO_AGENT` 映射：`tencent-sdk → codebuddy`，`opencode-acp → opencode`
+- 多 agent 共享同一 runtime（`opencode` 和 `mimo` 都映射 `opencode-acp`）
+- 后端 availability check 结果驱动 `unavailableAgents` Set，不可用时 disabled
+- 每个 agent 独立模型列表，切换 agent 时自动校验 `selectedModel` 是否在新模型列表中，不存在则选第 0 个
+- `useEffect` 监听 `[selectedAgent, agentModels, selectedModel]` 防止竞态
+
+**改动**：`task-form.tsx`（重构 agent/model 选择逻辑）
+
+---
+
+### 4.2 MiMo 模型集成
+
+新增 MiMo（小米）provider 到 OpenCode 配置：
+
+- **配置文件**：`.opencode/opencode.json`（项目级，checked in）
+  - Provider: `mimo`，使用 `@ai-sdk/openai-compatible`
+  - baseURL: `https://token-plan-sgp.xiaomimimo.com/v1`
+  - apiKey: `{env:MIMO_API_KEY}`（env var 替代，不硬编码）
+  - 默认模型：`mimo-v2.5-pro`（支持图片理解）
+  - TTS 模型：`mimo-v2.5-tts`、`mimo-v2.5-tts-voiceclone`、`mimo-v2.5-tts-voicedesign`
+- **Logo**：`packages/web/public/logos/mimo.png` + `components/logos/mimo.tsx` + `ProviderLogos` 映射
+- **后端模型列表**：`opencode-acp-runtime.ts` 的 `getSupportedModels()` 返回 MiMo + Moonshot 模型
+- **环境变量**：`.env.example` 添加 `MIMO_API_KEY` 占位
+
+**改动**：`.opencode/opencode.json`（新增）、`mimo.png`（新增）、`mimo.tsx`（新增）、`provider-logos.tsx`、`task-form.tsx`、`opencode-acp-runtime.ts`、`.env.example`
+
+---
+
+### 4.3 配置隔离：项目级 tool override
+
+**问题**：opencode tool 安装在全局 `~/.config/opencode/tools/`，不同项目/用户互相干扰。
+
+**方案**：
+
+- Tool 安装目录改为项目级 `.opencode/tools/`（`.gitignore` 排除生成物）
+- 新增 `resolveProjectRoot()`：从 `__dirname` 向上查找含 `packages/server` 的目录
+- 新增 `getOpencodeConfigDir()`：返回 `OPENCODE_CONFIG_DIR ?? <projectRoot>/.opencode`
+- spawn opencode 时注入 `OPENCODE_CONFIG_DIR` 环境变量，与用户全局配置隔离
+- 支持 `OPENCODE_PROJECT_ROOT` env override（CI/部署场景）
+
+**改动**：`opencode-installer.ts`、`opencode-acp-runtime.ts`、`opencode-tool-templates/*.ts`、`.gitignore`
+
+---
+
+### 4.4 修复：ACP 完成后发送按钮卡住
+
+**问题**：ACP session 显示 `[DONE]` 后，对话框发送按钮一直不恢复为"发送"状态。
+
+**根因**：`observeStreamWithLiveCallback` 在 SSE 流结束时未更新 `task.status`，前端 `isAgentBusy = task.status === 'processing' || task.status === 'pending'` 始终为 true。
+
+**修复**：在 `[DONE]` SSE 消息之后，更新 `task.status` 为 `'done'`（或 `'error'`）：
+
+```typescript
+const finalRun = getAgentRun(sessionId)
+const finalStatus = finalRun?.status === 'error' ? 'error' : 'done'
+await getDb().tasks.update(sessionId, { status: finalStatus, updatedAt: Date.now() })
+```
+
+**改动**：`acp.ts`
+
+---
+
+### 4.5 增量改动文件清单
+
+| 路径 | 类型 | 说明 |
+|---|---|---|
+| `.opencode/opencode.json` | 新增 | MiMo provider 配置（checked in） |
+| `.gitignore` | 修改 | +`.opencode/tools/` |
+| `.env.example` | 修改 | +`MIMO_API_KEY` 占位 |
+| `packages/web/public/logos/mimo.png` | 新增 | MiMo 品牌 PNG |
+| `packages/web/src/components/logos/mimo.tsx` | 新增 | MiMo logo 组件 |
+| `packages/web/src/components/logos/index.ts` | 修改 | +MiMo export |
+| `packages/web/src/components/logos/provider-logos.tsx` | 修改 | +MiMoProvider |
+| `packages/web/src/components/task-form.tsx` | 修改 | Agent 统一选择器 + per-agent 模型 |
+| `packages/server/src/routes/acp.ts` | 修改 | task status done 修复 + runtimes 返回 models |
+| `packages/server/src/agent/runtime/opencode-acp-runtime.ts` | 修改 | MiMo 模型列表 + OPENCODE_CONFIG_DIR |
+| `packages/server/src/agent/runtime/opencode-installer.ts` | 修改 | 项目级安装 + resolveProjectRoot |
+| `packages/server/src/agent/runtime/opencode-tool-templates/*.ts` | 修改 | 模板简化 |
+| `packages/server/src/agent/cloudbase-agent.service.ts` | 修改 | 类型对齐 |

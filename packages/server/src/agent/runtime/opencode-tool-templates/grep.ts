@@ -22,19 +22,10 @@ export default {
     '- Returns file paths and line numbers with at least one match sorted by modification time.',
   args: {
     pattern: z.string().describe('The regex pattern to search for in file contents'),
-    path: z
-      .string()
-      .optional()
-      .describe('The directory to search in. Defaults to the current working directory.'),
-    include: z
-      .string()
-      .optional()
-      .describe('File pattern to include in the search (e.g. "*.js", "*.{ts,tsx}")'),
+    path: z.string().optional().describe('The directory to search in. Defaults to the current working directory.'),
+    include: z.string().optional().describe('File pattern to include in the search (e.g. "*.js", "*.{ts,tsx}")'),
   },
-  async execute(
-    args: { pattern: string; path?: string; include?: string },
-    context: { directory?: string },
-  ) {
+  async execute(args: { pattern: string; path?: string; include?: string }, context: { directory?: string }) {
     if (process.env.SANDBOX_MODE === '1') {
       return await sandboxCall('grep', {
         pattern: args.pattern,

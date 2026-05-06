@@ -52,13 +52,13 @@ let cachedModels: ModelInfo[] | null = null
 
 // Static model list (temporary, replace with dynamic fetch when ready)
 const STATIC_MODELS: ModelInfo[] = [
-  { id: 'minimax-m2.7', name: 'MiniMax-M2.7' },
-  { id: 'minimax-m2.5', name: 'MiniMax-M2.5' },
+  { id: 'glm-5.1', name: 'GLM-5.1' },
+  { id: 'glm-5.0', name: 'GLM-5.0' },
   { id: 'kimi-k2.6', name: 'Kimi-K2.6' },
   { id: 'kimi-k2.5', name: 'Kimi-K2.5' },
   { id: 'kimi-k2-thinking', name: 'Kimi-K2-Thinking' },
-  { id: 'glm-5.1', name: 'GLM-5.1' },
-  { id: 'glm-5.0', name: 'GLM-5.0' },
+  { id: 'minimax-m2.7', name: 'MiniMax-M2.7' },
+  { id: 'minimax-m2.5', name: 'MiniMax-M2.5' },
   { id: 'deepseek-v3-2-volc', name: 'DeepSeek-V3.2' },
 ]
 

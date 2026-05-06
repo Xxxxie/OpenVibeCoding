@@ -718,6 +718,16 @@ async function observeStreamWithLiveCallback(
     }
     await stream.writeSSE({ data: '[DONE]' })
 
+    // Update task status: pending → done (or error).
+    // This allows the frontend to exit its "busy" state and show the send button.
+    try {
+      const finalRun = getAgentRun(sessionId)
+      const finalStatus = finalRun?.status === 'error' ? 'error' : 'done'
+      await getDb().tasks.update(sessionId, { status: finalStatus, updatedAt: Date.now() })
+    } catch {
+      // Non-critical — frontend will eventually poll the task and reconcile
+    }
+
     // Cleanup stream events — only if agent is no longer running.
     // If agent is still running (client disconnected mid-stream),
     // keep events in DB for reconnection via GET /observe/:sessionId.
@@ -797,10 +807,11 @@ acp.get('/runtimes', async (c) => {
   const runtimes = agentRuntimeRegistry.list()
   const defaultRuntime = agentRuntimeRegistry.resolve()
   const items = await Promise.all(
-    runtimes.map(async (r) => ({
-      name: r.name,
-      available: await r.isAvailable().catch(() => false),
-    })),
+    runtimes.map(async (r) => {
+      const available = await r.isAvailable().catch(() => false)
+      const models = available ? await r.getSupportedModels().catch(() => []) : []
+      return { name: r.name, available, models }
+    }),
   )
   return c.json({
     default: defaultRuntime.name,

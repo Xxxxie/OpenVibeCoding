@@ -59,6 +59,11 @@ const MiniMax = (props: SVGProps<SVGSVGElement> & React.ImgHTMLAttributes<HTMLIm
   <img src="/logos/minimax.png" alt="MimiMax" {...(props as React.ImgHTMLAttributes<HTMLImageElement>)} />
 )
 
+// MiMo / Xiaomi MiMo (official brand PNG)
+const MiMoProvider = (props: SVGProps<SVGSVGElement> & React.ImgHTMLAttributes<HTMLImageElement>) => (
+  <img src="/logos/mimo.png" alt="MiMo" {...(props as React.ImgHTMLAttributes<HTMLImageElement>)} />
+)
+
 // DeepSeek (from @lobehub/icons, official brand)
 const DeepSeek = (props: SVGProps<SVGSVGElement>) => (
   <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" {...props}>
@@ -159,6 +164,7 @@ export const ProviderLogos = {
   baidu: Baidu,
   generic: GenericLLM,
   minimax: MiniMax,
+  mimo: MiMoProvider,
 } as const
 
 export type ProviderKey = keyof typeof ProviderLogos

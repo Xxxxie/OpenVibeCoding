@@ -3,16 +3,17 @@
  *
  * 基于 ACP 协议的 OpenCode agent runtime，严格遵守 agent/sandbox 分离原则。
  *
- * 架构（"全局 tool override + env 注入"）：
+ * 架构（"项目级 tool override + env 注入"）：
  *
  *   server 启动时：
  *     ensureOpencodeToolsInstalled()
- *       └─ 把 read/write/bash/edit/grep/glob 模板拷贝到 ~/.config/opencode/tools/
+ *       └─ 把 read/write/bash/edit/grep/glob 模板拷贝到 <projectRoot>/.opencode/tools/
  *          （同名 custom tool 覆盖 builtin — 实测已验证）
  *
  *   每次 chatStream：
  *     1. 如果有 envId：scfSandboxManager.getOrCreate()
  *     2. spawn opencode acp，通过 child env 注入：
+ *          OPENCODE_CONFIG_DIR=<projectRoot>/.opencode  （隔离用户全局配置）
  *          SANDBOX_MODE=1
  *          SANDBOX_BASE_URL=<沙箱 HTTPS>
  *          SANDBOX_AUTH_HEADERS_JSON=<凭证 JSON>
@@ -43,7 +44,7 @@ import {
 import { persistenceService } from '../persistence.service.js'
 import { CloudbaseAgentService } from '../cloudbase-agent.service.js'
 import { getAcpTransportFactory, getResolvedBin, type AcpTransport } from './acp-transport.js'
-import { ensureOpencodeToolsInstalled } from './opencode-installer.js'
+import { ensureOpencodeToolsInstalled, getOpencodeConfigDir } from './opencode-installer.js'
 import { registerPending, resolvePending, rejectPendingForConversation } from './pending-permission-registry.js'
 import { resolvePendingQuestion, rejectPendingQuestionsForConversation } from './pending-question-registry.js'
 import { OpencodeMessageBuilder, findLastRecordIds, buildHistoryContextPrompt } from './opencode-message-builder.js'
@@ -177,10 +178,15 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
 
   async getSupportedModels(): Promise<ModelInfo[]> {
     return [
-      { id: 'moonshot/kimi-k2-0905-preview', name: 'Kimi K2 (0905)', vendor: 'Moonshot' },
+      // MiMo (default)
+      { id: 'mimo/mimo-v2.5-pro', name: 'MiMo V2.5 Pro', vendor: 'MiMo' },
+      { id: 'mimo/mimo-v2.5', name: 'MiMo V2.5', vendor: 'MiMo' },
+      { id: 'mimo/mimo-v2.5-tts', name: 'MiMo V2.5 TTS', vendor: 'MiMo' },
+      { id: 'mimo/mimo-v2.5-tts-voiceclone', name: 'MiMo V2.5 TTS VoiceClone', vendor: 'MiMo' },
+      { id: 'mimo/mimo-v2.5-tts-voicedesign', name: 'MiMo V2.5 TTS VoiceDesign', vendor: 'MiMo' },
+      // Moonshot (direct)
       { id: 'moonshot/kimi-k2-turbo-preview', name: 'Kimi K2 Turbo', vendor: 'Moonshot' },
-      { id: 'opencode/big-pickle', name: 'OpenCode Big Pickle', vendor: 'OpenCode Zen' },
-      { id: 'opencode/gpt-5-nano', name: 'OpenCode GPT-5 Nano', vendor: 'OpenCode Zen' },
+      { id: 'moonshot/kimi-k2-0905-preview', name: 'Kimi K2 (0905)', vendor: 'Moonshot' },
     ]
   }
 
@@ -350,7 +356,10 @@ export class OpencodeAcpRuntime implements IAgentRuntime {
       }
 
       // 3. 构造 spawn env — 把沙箱凭证 + AskUser 回调 URL 通过 env 注入 opencode 子进程
-      const childEnv: Record<string, string> = {}
+      const childEnv: Record<string, string> = {
+        // 指向项目内 .opencode/，隔离用户全局配置
+        OPENCODE_CONFIG_DIR: getOpencodeConfigDir(),
+      }
       if (sandbox) {
         const authHeaders = await sandbox.getAuthHeaders()
         childEnv.SANDBOX_MODE = '1'

@@ -18,17 +18,14 @@ export default {
     'Writes a file to the filesystem. Overwrites existing files.\n\n' +
     'Usage:\n' +
     '- This tool will overwrite the existing file if there is one at the provided path.\n' +
-    '- If this is an existing file, you MUST use the Read tool first to read the file\'s contents.\n' +
+    "- If this is an existing file, you MUST use the Read tool first to read the file's contents.\n" +
     '- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\n' +
     '- In sandbox mode, use relative paths (no leading /); they resolve against the session working directory.',
   args: {
     filePath: z.string().describe('The absolute path to the file to write (must be absolute, not relative)'),
     content: z.string().describe('The content to write to the file'),
   },
-  async execute(
-    args: { filePath: string; content: string },
-    context: { directory?: string },
-  ) {
+  async execute(args: { filePath: string; content: string }, context: { directory?: string }) {
     if (process.env.SANDBOX_MODE === '1') {
       return await sandboxCall('write', { path: args.filePath, content: args.content })
     }

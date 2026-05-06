@@ -25,13 +25,8 @@ export default {
   args: {
     filePath: z.string().describe('The absolute path to the file to modify'),
     oldString: z.string().describe('The text to replace'),
-    newString: z
-      .string()
-      .describe('The text to replace it with (must be different from oldString)'),
-    replaceAll: z
-      .boolean()
-      .optional()
-      .describe('Replace all occurrences of oldString (default false)'),
+    newString: z.string().describe('The text to replace it with (must be different from oldString)'),
+    replaceAll: z.boolean().optional().describe('Replace all occurrences of oldString (default false)'),
   },
   async execute(
     args: { filePath: string; oldString: string; newString: string; replaceAll?: boolean },

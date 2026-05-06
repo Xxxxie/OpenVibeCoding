@@ -1,8 +1,10 @@
 /**
- * OpenCode 全局配置安装器
+ * OpenCode 项目级配置安装器
  *
- * 目的：把 tool override 模板一次性装到 `~/.config/opencode/tools/`，这样：
- *   - 所有 opencode 实例都能加载（全局生效，不必每 session 写一遍）
+ * 目的：把 tool override 模板装到项目根目录的 `.opencode/tools/`，这样：
+ *   - 同一项目的所有 session 共享同一份 tools（session 之间不重复写入）
+ *   - 与用户的全局 `~/.config/opencode/` 完全隔离，不污染用户配置
+ *   - spawn 时通过 `OPENCODE_CONFIG_DIR=<projectRoot>/.opencode` 让 opencode 只读项目目录
  *   - 模板自身通过 `process.env.SANDBOX_*` 读取 per-session 凭证
  *   - opencode 看到 custom tool `read` / `write` / ...，**覆盖** builtin 同名工具
  *
@@ -15,7 +17,6 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import os from 'node:os'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
@@ -60,11 +61,46 @@ function resolveTemplateDir(): string {
   )
 }
 
-/** 安装目录：默认 ~/.config/opencode/tools/ */
+/**
+ * 解析项目根目录。
+ * 优先级：
+ *   1. OPENCODE_PROJECT_ROOT env（测试 / 自定义部署时覆盖）
+ *   2. 从 __dirname 向上查找 package.json 中 name === 'coding-agent-template' 的目录
+ *   3. 从 __dirname 向上找包含 packages/server 的 monorepo 根
+ *   4. process.cwd() 兜底
+ */
+export function resolveProjectRoot(): string {
+  const fromEnv = process.env.OPENCODE_PROJECT_ROOT
+  if (fromEnv) return fromEnv
+
+  // 向上最多 8 层查找 monorepo 根（含 packages/server 子目录）
+  let dir = __dirname
+  for (let i = 0; i < 8; i++) {
+    if (fs.existsSync(path.join(dir, 'packages', 'server'))) return dir
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+
+  return process.cwd()
+}
+
+/**
+ * 安装目录：项目根 `.opencode/tools/`
+ * 可通过 OPENCODE_TOOLS_INSTALL_DIR 完全覆盖（保留旧的逃生舱）。
+ */
 function getInstallDir(): string {
   const override = process.env.OPENCODE_TOOLS_INSTALL_DIR
   if (override) return override
-  return path.join(os.homedir(), '.config', 'opencode', 'tools')
+  return path.join(resolveProjectRoot(), '.opencode', 'tools')
+}
+
+/**
+ * 返回项目级 `.opencode/` 目录路径（供 spawn 时注入 OPENCODE_CONFIG_DIR）。
+ * 可通过 OPENCODE_CONFIG_DIR env 覆盖（若用户自行设置则尊重用户）。
+ */
+export function getOpencodeConfigDir(): string {
+  return process.env.OPENCODE_CONFIG_DIR ?? path.join(resolveProjectRoot(), '.opencode')
 }
 
 /** 读文件返回 sha256 hex */

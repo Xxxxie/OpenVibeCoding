@@ -26,16 +26,8 @@ export default {
     '- AVOID using this tool for file operations (reading/writing/editing/searching); use the specialized tools instead.',
   args: {
     command: z.string().describe('The command to execute'),
-    timeout: z
-      .number()
-      .int()
-      .positive()
-      .optional()
-      .describe('Optional timeout in milliseconds'),
-    description: z
-      .string()
-      .optional()
-      .describe('A clear, concise description of what this command does in 5-10 words'),
+    timeout: z.number().int().positive().optional().describe('Optional timeout in milliseconds'),
+    description: z.string().optional().describe('A clear, concise description of what this command does in 5-10 words'),
     workdir: z
       .string()
       .optional()
@@ -69,11 +61,7 @@ export default {
   },
 }
 
-async function sandboxCall(
-  tool: string,
-  body: unknown,
-  timeoutMs: number,
-): Promise<string | { output: string }> {
+async function sandboxCall(tool: string, body: unknown, timeoutMs: number): Promise<string | { output: string }> {
   const baseUrl = process.env.SANDBOX_BASE_URL
   if (!baseUrl) throw new Error('SANDBOX_BASE_URL not set')
   const headers = JSON.parse(process.env.SANDBOX_AUTH_HEADERS_JSON || '{}') as Record<string, string>

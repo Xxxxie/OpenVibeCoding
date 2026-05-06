@@ -13,18 +13,17 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { Loader2, ArrowUp, Settings, X, Cable, Users, Globe, Code2 } from 'lucide-react'
-import { CodeBuddy, ProviderLogos, type ProviderKey } from '@/components/logos'
-// import { Claude, Codex, Copilot, Cursor, Gemini, OpenCode } from '@/components/logos'
+import { Loader2, ArrowUp, Settings, X, Cable, Globe, Code2 } from 'lucide-react'
+import { CodeBuddy, MiMo, OpenCode, ProviderLogos, type ProviderKey } from '@/components/logos'
+// import { Claude, Codex, Copilot, Cursor, Gemini } from '@/components/logos'
 import { setInstallDependencies, setMaxDuration, setKeepAlive, setEnableBrowser } from '@/lib/utils/cookies'
 import { useConnectors } from '@/components/connectors-provider'
 import { ConnectorDialog } from '@/components/connectors/manage-connectors'
 import { toast } from 'sonner'
-import { useAtom, useAtomValue, useSetAtom } from 'jotai'
+import { useAtom, useSetAtom } from 'jotai'
 import { taskPromptAtom } from '@/lib/atoms/task'
 import { lastSelectedModelAtomFamily, githubReposAtomFamily } from '@/lib/atoms/github'
 import type { ModelInfo } from '@coder/shared'
-import { useLocation } from 'react-router'
 
 interface GitHubRepo {
   name: string
@@ -59,23 +58,21 @@ interface TaskFormProps {
   maxSandboxDuration?: number
 }
 
-/** Human-readable labels for runtime names returned by GET /api/agent/runtimes */
-const RUNTIME_LABELS: Record<string, string> = {
-  'tencent-sdk': 'CodeBuddy (Default)',
-  'opencode-acp': 'OpenCode ACP',
+/** runtime name → agent value 的映射（让 CODING_AGENTS 与后端 runtime name 对齐） */
+const RUNTIME_TO_AGENT: Record<string, string> = {
+  'tencent-sdk': 'codebuddy',
+  'opencode-acp': 'opencode',
 }
 
 const CODING_AGENTS = [
-  // CodeBuddy agent (default)
-  { value: 'codebuddy', label: 'CodeBuddy', icon: CodeBuddy, isLogo: true },
+  { value: 'codebuddy', label: 'CodeBuddy', icon: CodeBuddy, isLogo: true, runtime: 'tencent-sdk' },
+  { value: 'opencode', label: 'OpenCode', icon: OpenCode, isLogo: true, runtime: 'opencode-acp' },
   // --- Other agents (commented out, kept for reference) ---
-  // { value: 'multi-agent', label: 'Compare', icon: Users, isLogo: false },
-  // { value: 'claude', label: 'Claude', icon: Claude, isLogo: true },
-  // { value: 'codex', label: 'Codex', icon: Codex, isLogo: true },
-  // { value: 'copilot', label: 'Copilot', icon: Copilot, isLogo: true },
-  // { value: 'cursor', label: 'Cursor', icon: Cursor, isLogo: true },
-  // { value: 'gemini', label: 'Gemini', icon: Gemini, isLogo: true },
-  // { value: 'opencode', label: 'opencode', icon: OpenCode, isLogo: true },
+  // { value: 'claude', label: 'Claude', icon: Claude, isLogo: true, runtime: 'claude' },
+  // { value: 'codex', label: 'Codex', icon: Codex, isLogo: true, runtime: 'codex' },
+  // { value: 'copilot', label: 'Copilot', icon: Copilot, isLogo: true, runtime: 'copilot' },
+  // { value: 'cursor', label: 'Cursor', icon: Cursor, isLogo: true, runtime: 'cursor' },
+  // { value: 'gemini', label: 'Gemini', icon: Gemini, isLogo: true, runtime: 'gemini' },
 ] as const
 
 // Map model name prefix to provider logo key
@@ -92,6 +89,7 @@ const MODEL_PROVIDER_MAP: [string[], ProviderKey][] = [
   [['ernie', 'wenxin', 'baidu'], 'baidu'],
   [['llama', 'meta'], 'generic'],
   [['minimax'], 'minimax'],
+  [['mimo'], 'mimo'],
 ]
 
 function getModelProviderKey(modelId: string): ProviderKey {
@@ -101,29 +99,6 @@ function getModelProviderKey(modelId: string): ProviderKey {
   }
   return 'generic'
 }
-
-// Model options for each agent
-const AGENT_MODELS: Record<string, Array<{ value: string; label: string }>> = {
-  codebuddy: [{ value: 'glm-5.1', label: 'GLM 5.1' }],
-  // --- Other agents (commented out, kept for reference) ---
-  // claude: [
-  //   { value: 'claude-sonnet-4-5', label: 'Sonnet 4.5' },
-  //   { value: 'anthropic/claude-opus-4.6', label: 'Opus 4.6' },
-  //   { value: 'claude-haiku-4-5', label: 'Haiku 4.5' },
-  // ],
-}
-
-// Default models for each agent
-const DEFAULT_MODELS = {
-  codebuddy: 'glm-5.1',
-  // --- Other agents (commented out) ---
-  // claude: 'claude-sonnet-4-5',
-  // codex: 'openai/gpt-5.1',
-  // copilot: 'claude-sonnet-4.5',
-  // cursor: 'auto',
-  // gemini: 'gemini-3-pro-preview',
-  // opencode: 'gpt-5',
-} as const
 
 export function TaskForm({
   onSubmit,
@@ -137,32 +112,62 @@ export function TaskForm({
   maxSandboxDuration = 300,
 }: TaskFormProps) {
   const [prompt, setPrompt] = useAtom(taskPromptAtom)
-  const selectedAgent = 'codebuddy'
-  const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_MODELS.codebuddy)
+  const [selectedAgent, setSelectedAgent] = useState<string>('codebuddy')
+  const [selectedModel, setSelectedModel] = useState<string>('glm-5.1')
   // Default to 'coding' mode — tasks without a git repo are always coding/sandbox tasks
   const [taskMode, setTaskMode] = useState<'default' | 'coding'>('coding')
-  const [codebuddyModels, setCodebuddyModels] = useState<ModelInfo[]>([{ id: 'glm-5.1', name: 'GLM 5.1' }])
   const [repos, setRepos] = useAtom(githubReposAtomFamily(selectedOwner))
   const [, setLoadingRepos] = useState(false)
 
-  // Runtime selector: loaded from /api/agent/runtimes
-  const [selectedRuntime, setSelectedRuntime] = useState<string>('')
-  const [runtimeOptions, setRuntimeOptions] = useState<Array<{ name: string; label: string }>>([])
+  // Per-agent model lists and availability, loaded from /api/agent/runtimes
+  const [agentModels, setAgentModels] = useState<Record<string, ModelInfo[]>>({
+    codebuddy: [{ id: 'glm-5.1', name: 'GLM 5.1' }],
+  })
+  const [unavailableAgents, setUnavailableAgents] = useState<Set<string>>(new Set())
+  const [selectedRuntime, setSelectedRuntime] = useState<string>('tencent-sdk')
+
   useEffect(() => {
     fetch('/api/agent/runtimes')
       .then((r) => r.json())
-      .then((data: { default: string; runtimes: Array<{ name: string; available: boolean }> }) => {
-        const available = data.runtimes.filter((r) => r.available)
-        if (available.length <= 1) return // 只有一个 runtime 时不显示选择器
-        const options = available.map((r) => ({
-          name: r.name,
-          label: RUNTIME_LABELS[r.name] ?? r.name,
-        }))
-        setRuntimeOptions(options)
-        setSelectedRuntime(data.default ?? '')
-      })
+      .then(
+        (data: {
+          default: string
+          runtimes: Array<{ name: string; available: boolean; models: ModelInfo[] }>
+        }) => {
+          const newAgentModels: Record<string, ModelInfo[]> = {}
+          const unavailable = new Set<string>()
+
+          for (const rt of data.runtimes) {
+            if (!rt.available) {
+              // mark all agents that use this runtime as unavailable
+              for (const agent of CODING_AGENTS) {
+                if (agent.runtime === rt.name) unavailable.add(agent.value)
+              }
+            } else if (rt.models.length > 0) {
+              // assign models to every agent that maps to this runtime
+              for (const agent of CODING_AGENTS) {
+                if (agent.runtime === rt.name) newAgentModels[agent.value] = rt.models
+              }
+            }
+          }
+
+          setAgentModels((prev) => ({ ...prev, ...newAgentModels }))
+          setUnavailableAgents(unavailable)
+
+          // Set default agent/runtime from server
+          const defaultAgentValue = RUNTIME_TO_AGENT[data.default]
+          if (defaultAgentValue) {
+            setSelectedAgent(defaultAgentValue)
+            setSelectedRuntime(data.default)
+            const defaultModels = newAgentModels[defaultAgentValue]
+            if (defaultModels && defaultModels.length > 0) {
+              setSelectedModel(defaultModels[0].id)
+            }
+          }
+        },
+      )
       .catch(() => {
-        /* silently ignore — runtimes endpoint optional */
+        /* silently ignore */
       })
   }, [])
 
@@ -175,30 +180,6 @@ export function TaskForm({
 
   // Connectors state
   const { connectors } = useConnectors()
-
-  // Fetch supported models from backend on mount
-  useEffect(() => {
-    fetch('/api/agent/acp', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', method: 'initialize', id: 1, params: { protocolVersion: 1 } }),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        const models = data?.result?.supportedModels
-        if (Array.isArray(models) && models.length > 0) {
-          setCodebuddyModels(models)
-          const ids = models.map((m: ModelInfo) => m.id)
-          if (!ids.includes(selectedModel)) {
-            setSelectedModel(models[0].id)
-          }
-        }
-      })
-      .catch(() => {
-        // Silently ignore - fall back to static defaults
-      })
-  }, [])
 
   // Ref for the textarea to focus it programmatically
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -244,46 +225,38 @@ export function TaskForm({
     }
   }
 
-  // Get URL search params
-  const location = useLocation()
-  const searchParams = new URLSearchParams(location.search)
-
-  // Load saved model and options on mount, and focus the prompt input
+  // Focus the prompt input when the component mounts
   useEffect(() => {
-    // Check URL params for model override
-    const urlModel = searchParams.get('model')
-    if (urlModel) {
-      const agentModels = AGENT_MODELS['claude' as keyof typeof AGENT_MODELS]
-      if (agentModels?.some((model) => model.value === urlModel)) {
-        setSelectedModel(urlModel)
-      }
-    }
-
-    // Focus the prompt input when the component mounts
     if (textareaRef.current) {
       textareaRef.current.focus()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Get saved model atom for current agent
-  const savedModelAtom = lastSelectedModelAtomFamily(selectedAgent)
-  const savedModel = useAtomValue(savedModelAtom)
-  const setSavedModel = useSetAtom(savedModelAtom)
-
-  // Update model when agent changes
-  useEffect(() => {
-    // Load saved model for this agent or use default
-    const agentModels = AGENT_MODELS[selectedAgent as keyof typeof AGENT_MODELS]
-    if (savedModel && agentModels?.some((model) => model.value === savedModel)) {
-      setSelectedModel(savedModel)
-    } else {
-      const defaultModel = DEFAULT_MODELS[selectedAgent as keyof typeof DEFAULT_MODELS]
-      if (defaultModel) {
-        setSelectedModel(defaultModel)
-      }
+  // When agent changes: switch runtime + reset model if current selection not in new list
+  const handleAgentChange = (agentValue: string) => {
+    setSelectedAgent(agentValue)
+    const agentDef = CODING_AGENTS.find((a) => a.value === agentValue)
+    if (agentDef) setSelectedRuntime(agentDef.runtime)
+    const models = agentModels[agentValue] ?? []
+    if (models.length === 0) return
+    if (!models.some((m) => m.id === selectedModel)) {
+      setSelectedModel(models[0].id)
     }
-  }, [selectedAgent, savedModel])
+  }
+
+  // Validate selectedModel whenever agent or its models change.
+  // Catches races where agentModels arrives after selectedAgent update.
+  useEffect(() => {
+    const models = agentModels[selectedAgent] ?? []
+    if (models.length === 0) return
+    if (!models.some((m) => m.id === selectedModel)) {
+      setSelectedModel(models[0].id)
+    }
+  }, [selectedAgent, agentModels, selectedModel])
+
+  // Get saved model atom for current agent (persists selection across page loads)
+  const savedModelAtom = lastSelectedModelAtomFamily(selectedAgent)
+  const setSavedModel = useSetAtom(savedModelAtom)
 
   // Fetch repositories when owner changes
   useEffect(() => {
@@ -445,20 +418,47 @@ export function TaskForm({
                 </button>
                 <span className="text-muted-foreground/50">·</span>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground px-2 h-8">
-                  {(() => {
-                    const agent = CODING_AGENTS.find((a) => a.value === selectedAgent)
-                    return agent ? (
-                      <>
-                        <agent.icon className="w-4 h-4" />
-                        <span>{agent.label}</span>
-                      </>
-                    ) : null
-                  })()}
+                  {/* Agent selector */}
+                  <Select value={selectedAgent} onValueChange={handleAgentChange}>
+                    <SelectTrigger className="h-7 border-0 shadow-none px-1 py-0 text-sm text-muted-foreground hover:text-foreground bg-transparent focus:ring-0 gap-1 w-auto min-w-[90px]">
+                      {(() => {
+                        const agent = CODING_AGENTS.find((a) => a.value === selectedAgent)
+                        return agent ? (
+                          <>
+                            <agent.icon className="w-4 h-4" />
+                            <span className="truncate">{agent.label}</span>
+                          </>
+                        ) : null
+                      })()}
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CODING_AGENTS.map((agent) => {
+                        const disabled = unavailableAgents.has(agent.value)
+                        return (
+                          <SelectItem key={agent.value} value={agent.value} disabled={disabled}>
+                            <span className={`flex items-center gap-2 ${disabled ? 'opacity-40' : ''}`}>
+                              <agent.icon className="w-4 h-4" />
+                              <span>{agent.label}</span>
+                              {disabled && <span className="text-xs">(unavailable)</span>}
+                            </span>
+                          </SelectItem>
+                        )
+                      })}
+                    </SelectContent>
+                  </Select>
                   <span className="text-muted-foreground/50">·</span>
-                  <Select value={selectedModel} onValueChange={setSelectedModel}>
+                  {/* Model selector — options change per agent */}
+                  <Select
+                    value={selectedModel}
+                    onValueChange={(v) => {
+                      setSelectedModel(v)
+                      setSavedModel(v)
+                    }}
+                  >
                     <SelectTrigger className="h-7 border-0 shadow-none px-1 py-0 text-sm text-muted-foreground hover:text-foreground bg-transparent focus:ring-0 gap-1 w-auto min-w-[120px]">
                       {(() => {
-                        const current = codebuddyModels.find((m) => m.id === selectedModel)
+                        const models = agentModels[selectedAgent] ?? []
+                        const current = models.find((m) => m.id === selectedModel)
                         const ProviderIcon = ProviderLogos[getModelProviderKey(selectedModel)]
                         return (
                           <>
@@ -469,7 +469,7 @@ export function TaskForm({
                       })()}
                     </SelectTrigger>
                     <SelectContent>
-                      {codebuddyModels.map((m) => {
+                      {(agentModels[selectedAgent] ?? []).map((m) => {
                         const ProviderIcon = ProviderLogos[getModelProviderKey(m.id)]
                         return (
                           <SelectItem key={m.id} value={m.id}>
@@ -482,27 +482,6 @@ export function TaskForm({
                       })}
                     </SelectContent>
                   </Select>
-
-                  {/* Runtime selector — only shown when multiple runtimes available */}
-                  {runtimeOptions.length > 1 && (
-                    <>
-                      <span className="text-muted-foreground/50">·</span>
-                      <Select value={selectedRuntime} onValueChange={setSelectedRuntime}>
-                        <SelectTrigger className="h-7 border-0 shadow-none px-1 py-0 text-sm text-muted-foreground hover:text-foreground bg-transparent focus:ring-0 gap-1 w-auto min-w-[110px]">
-                          <span className="truncate">
-                            {RUNTIME_LABELS[selectedRuntime] ?? (selectedRuntime || 'Runtime')}
-                          </span>
-                        </SelectTrigger>
-                        <SelectContent>
-                          {runtimeOptions.map((r) => (
-                            <SelectItem key={r.name} value={r.name}>
-                              {r.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </>
-                  )}
                 </div>
 
                 {/* Option Chips - Only visible on desktop */}

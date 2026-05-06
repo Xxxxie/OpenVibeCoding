@@ -24,23 +24,10 @@ export default {
     '- In sandbox mode, use relative paths (no leading /); they resolve against the session working directory.',
   args: {
     filePath: z.string().describe('The absolute path to the file or directory to read'),
-    offset: z
-      .number()
-      .int()
-      .nonnegative()
-      .optional()
-      .describe('The line number to start reading from (1-indexed)'),
-    limit: z
-      .number()
-      .int()
-      .positive()
-      .optional()
-      .describe('The maximum number of lines to read (defaults to 2000)'),
+    offset: z.number().int().nonnegative().optional().describe('The line number to start reading from (1-indexed)'),
+    limit: z.number().int().positive().optional().describe('The maximum number of lines to read (defaults to 2000)'),
   },
-  async execute(
-    args: { filePath: string; offset?: number; limit?: number },
-    context: { directory?: string },
-  ) {
+  async execute(args: { filePath: string; offset?: number; limit?: number }, context: { directory?: string }) {
     if (process.env.SANDBOX_MODE === '1') {
       return await sandboxCall('read', {
         path: args.filePath,
