@@ -6,10 +6,8 @@
  *
  * 架构（"项目级 tool override + env 注入 + 共享沙箱"）：
  *
- *   server 启动时：
- *     ensureOpencodeToolsInstalled()
- *       └─ 把 read/write/bash/edit/grep/glob 模板拷贝到 <projectRoot>/.opencode/tools/
- *          （同名 custom tool 覆盖 builtin — 实测已验证）
+ *   工具文件直接 checked in 到 .opencode/tools/（无需安装步骤）。
+ *   同名 custom tool 覆盖 opencode builtin — read/write/bash/edit/grep/glob。
  *
  *   每次 chatStream：
  *     1. BaseAgentRuntime.setupSandbox() 创建/获取 SCF 沙箱（共享实例）
@@ -40,7 +38,7 @@ import {
 import { persistenceService } from '../persistence.service.js'
 import { CloudbaseAgentService } from '../cloudbase-agent.service.js'
 import { getAcpTransportFactory, getResolvedBin, type AcpTransport } from './acp-transport.js'
-import { ensureOpencodeToolsInstalled, getOpencodeConfigDir } from './opencode-installer.js'
+import { getOpencodeConfigDir } from './opencode-installer.js'
 import { registerPending, resolvePending, rejectPendingForConversation } from './pending-permission-registry.js'
 import { resolvePendingQuestion, rejectPendingQuestionsForConversation } from './pending-question-registry.js'
 import { OpencodeMessageBuilder, findLastRecordIds, buildHistoryContextPrompt } from './opencode-message-builder.js'
@@ -61,8 +59,6 @@ const DEFAULT_OPENCODE_MODEL = process.env.OPENCODE_DEFAULT_MODEL || 'custom/def
 const SANDBOX_WORKSPACE_ROOT = process.env.SANDBOX_WORKSPACE_ROOT || '.'
 
 // ─── State ───────────────────────────────────────────────────────────────
-
-let toolsInstallPromise: Promise<void> | null = null
 
 /**
  * 活跃 agent 的 liveCallback 注册表。
@@ -138,28 +134,6 @@ function cryptoRandomToken(): string {
   // Node runtime 保证有 crypto.getRandomValues
   ;(globalThis.crypto as Crypto).getRandomValues(bytes)
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
-}
-
-/** 惰性确保全局 tools 已安装；多次调用只执行一次。 */
-function ensureToolsInstalledOnce(): Promise<void> {
-  if (process.env.OPENCODE_SKIP_TOOLS_INSTALL === '1') {
-    return Promise.resolve()
-  }
-  if (!toolsInstallPromise) {
-    toolsInstallPromise = ensureOpencodeToolsInstalled()
-      .then((r) => {
-        if (r.installed.length || r.forced) {
-          console.log(
-            `[OpencodeAcpRuntime] installed opencode tools to ${r.installDir}: installed=${r.installed.join(',') || '-'} skipped=${r.skipped.join(',') || '-'}`,
-          )
-        }
-      })
-      .catch((err) => {
-        console.error('[OpencodeAcpRuntime] failed to install opencode tools:', err)
-        // Don't reset — broken installer is better than infinite retry loop
-      })
-  }
-  return toolsInstallPromise
 }
 
 // ─── Runtime ─────────────────────────────────────────────────────────────
@@ -340,12 +314,11 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
 
     let transport: AcpTransport | null = null
     let sandbox: SandboxInstance | null = null
-    let sandboxMcpClient: { close: () => Promise<void>; mcpUrl?: string } | null = null
+    let sandboxMcpClient: { close: () => Promise<void> } | null = null
     let sessionWorkingDir: string | null = null
 
     try {
-      // 0. 确保全局 opencode tools 已安装
-      await ensureToolsInstalledOnce()
+      // 0. 确保 opencode.json 已从 example 初始化（若不存在）
 
       // 1. 使用基类共享设施初始化沙箱 + MCP + 系统提示
       const isCodingMode = options.mode === 'coding'
@@ -483,13 +456,27 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
         },
       })
 
-      // 7. 创建 session — 注入 CloudBase MCP server
-      // sandboxMcpClient.server（在 base-runtime.setupSandbox 里创建）已通过
-      // StreamableHTTPServerTransport 暴露为 localhost HTTP endpoint（mcpUrl）。
-      // opencode 通过 McpServerHttp { type:'http', url } 连接，复用完全相同的工具注册逻辑。
+      // 7. 创建 session — 注入 CloudBase MCP server（全局 /cloudbase-mcp 路由）
+      // 全局 HTTP MCP server 挂载在 server 进程的 /cloudbase-mcp 路径，
+      // opencode 通过 McpServerHttp 连接，sandbox 信息通过 headers 传入。
+      // 每次 HTTP 请求创建 per-request McpServer（stateless），工具 schema 按 scopeId 缓存。
       const mcpServers: Array<{ type: 'http'; name: string; url: string; headers: Array<{ name: string; value: string }> }> = []
-      if (sandboxMcpClient?.mcpUrl) {
-        mcpServers.push({ type: 'http', name: 'cloudbase', url: sandboxMcpClient.mcpUrl, headers: [] })
+      if (sandbox) {
+        const authHeaders = await sandbox.getAuthHeaders()
+        const serverPort = Number(process.env.PORT) || 3001
+        mcpServers.push({
+          type: 'http',
+          name: 'cloudbase',
+          url: `http://localhost:${serverPort}/cloudbase-mcp`,
+          headers: [
+            { name: 'X-Sandbox-Url', value: sandbox.baseUrl },
+            { name: 'X-Sandbox-Auth', value: JSON.stringify(authHeaders) },
+            { name: 'X-Scope-Id', value: conversationId },
+            ...(process.env.MCP_API_KEY
+              ? [{ name: 'Authorization', value: `Bearer ${process.env.MCP_API_KEY}` }]
+              : []),
+          ],
+        })
       }
       const newRes = await conn.newSession({
         cwd: sessionWorkingDir,

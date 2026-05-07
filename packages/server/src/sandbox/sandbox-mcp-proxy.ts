@@ -9,15 +9,12 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SandboxInstance } from './scf-sandbox-manager.js'
 import { tool as sdkTool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod'
 import { nanoid } from 'nanoid'
 import cron from 'node-cron'
-import http from 'node:http'
-import type { AddressInfo } from 'node:net'
 import { getDb } from '../db/index.js'
 import { scheduleTask, unscheduleTask } from '../services/cron-scheduler.js'
 import { extractDeployUrl } from '../agent/runtime/base-runtime.js'
@@ -533,34 +530,13 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
   server.tool('publishMiniprogram', PUBLISH_MP_DESC, PUBLISH_MP_SCHEMA, handlePublishMiniprogram)
   server.tool('getDeployJobStatus', DEPLOY_STATUS_DESC, DEPLOY_STATUS_SCHEMA, handleGetDeployJobStatus)
 
-  // ── Wire InMemoryTransport pair (CodeBuddy SDK runtime) ──────────────────
+  // ── Wire InMemoryTransport pair ───────────────────────────────
 
   const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair()
   await server.connect(serverTransport)
 
   const client = new Client({ name: 'cloudbase-agent', version: '1.0.0' })
   await client.connect(clientTransport)
-
-  // ── Expose HTTP endpoint (OpenCode ACP runtime) ───────────────────────────
-  // 同一个 McpServer 实例再挂一个 StreamableHTTPServerTransport，
-  // opencode 通过 McpServerHttp { type:'http', url } 连接。
-  // localhost 随机端口，生命周期与 launchAgent 一致（close() 时关闭）。
-
-  const httpTransport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
-  await server.connect(httpTransport)
-
-  const httpServer = http.createServer(async (req, res) => {
-    try {
-      await httpTransport.handleRequest(req, res)
-    } catch {
-      res.writeHead(500).end()
-    }
-  })
-  await new Promise<void>((resolve, reject) => {
-    httpServer.listen(0, '127.0.0.1', resolve)
-    httpServer.on('error', reject)
-  })
-  const mcpUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}/mcp`
 
   // ── Build SDK MCP Server for passing to query() mcpServers ────
   // createSdkMcpServer is needed because agent-sdk's mcpServers option
@@ -819,13 +795,13 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
     client,
     server,
     sdkServer,
-    /** localhost HTTP URL for OpenCode ACP mcpServers config */
-    mcpUrl,
     close: async () => {
-      try { await client.close() } catch {}
-      try { await server.close() } catch {}
-      try { await httpTransport.close() } catch {}
-      await new Promise<void>((r) => httpServer.close(() => r()))
+      try {
+        await client.close()
+      } catch {}
+      try {
+        await server.close()
+      } catch {}
     },
   }
 }

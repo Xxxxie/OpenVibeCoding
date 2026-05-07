@@ -50,6 +50,7 @@ import apiKeysRoutes from './routes/api-keys'
 import miscRoutes from './routes/misc'
 import reposRoutes from './routes/repos'
 import databaseRoutes from './routes/database.js'
+import mcpCloudbaseRoutes from './routes/mcp-cloudbase.js'
 import storageRoutes from './routes/storage.js'
 import functionsRoutes from './routes/functions.js'
 import sqlRoutes from './routes/sql.js'
@@ -69,6 +70,9 @@ app.use(
 
 // API routes (must be before static files)
 app.use('*', authMiddleware)
+
+// CloudBase MCP HTTP server (for OpenCode ACP runtime — self-authenticates via X-Sandbox-Auth)
+app.route('/cloudbase-mcp', mcpCloudbaseRoutes)
 
 app.get('/health', (c) => c.json({ status: 'ok' }))
 app.route('/api/auth', authRoutes)
