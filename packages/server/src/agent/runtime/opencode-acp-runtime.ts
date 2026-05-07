@@ -25,7 +25,6 @@
  */
 
 import { v4 as uuidv4 } from 'uuid'
-import { fileURLToPath } from 'node:url'
 import { ClientSideConnection } from '@agentclientprotocol/sdk'
 import type { AgentCallback, AgentCallbackMessage, AgentOptions } from '@coder/shared'
 import type { ChatStreamResult } from './types.js'
@@ -60,76 +59,6 @@ const DEFAULT_OPENCODE_MODEL = process.env.OPENCODE_DEFAULT_MODEL || 'custom/def
 
 /** 沙箱内工作目录（agent 看到的"当前目录"概念）。相对路径工具都会以此为根。 */
 const SANDBOX_WORKSPACE_ROOT = process.env.SANDBOX_WORKSPACE_ROOT || '.'
-
-// ─── CloudBase MCP server (stdio) ────────────────────────────────────────
-
-const __dirname_runtime = path.dirname(fileURLToPath(import.meta.url))
-
-/**
- * 找到 cloudbase-mcp-server.ts 脚本路径（供 McpServerStdio 的 args 使用）。
- * opencode 原生支持 .ts，使用 tsx/bun 直接运行。
- */
-function resolveCloudbaseMcpServerScript(): string | null {
-  const candidates = [
-    // 源码运行（tsx dev）
-    path.resolve(__dirname_runtime, 'opencode-tool-templates/cloudbase-mcp-server.ts'),
-    // dist 运行
-    path.resolve(__dirname_runtime, '../src/agent/runtime/opencode-tool-templates/cloudbase-mcp-server.ts'),
-    path.resolve(process.cwd(), 'packages/server/src/agent/runtime/opencode-tool-templates/cloudbase-mcp-server.ts'),
-  ]
-  for (const c of candidates) {
-    if (fs.existsSync(c)) return c
-  }
-  return null
-}
-
-type McpServerEntry =
-  | { name: string; command: string; args: Array<string>; env: Array<{ name: string; value: string }> }
-  | { type: 'http'; name: string; url: string; headers: Array<{ name: string; value: string }> }
-
-/**
- * 构建传给 conn.newSession() 的 mcpServers 列表。
- * 如果沙箱可用，注入 CloudBase MCP server（stdio 方式，opencode 原生 spawn）。
- */
-function buildOpencodeMcpServers(
-  sandbox: SandboxInstance | null,
-  authHeaders: Record<string, string> = {},
-  scopeId?: string,
-  credentials?: { envId: string; secretId: string; secretKey: string; sessionToken?: string },
-): McpServerEntry[] {
-  if (!sandbox) return []
-
-  const scriptPath = resolveCloudbaseMcpServerScript()
-  if (!scriptPath) {
-    console.warn('[OpencodeAcpRuntime] cloudbase-mcp-server.ts not found, CloudBase tools unavailable')
-    return []
-  }
-
-  // Node.js 运行 .ts 时需要 tsx（opencode binary 自带 bun，但我们在 server 进程里 spawn node）
-  // 优先用 npx tsx 运行脚本（与 server 同环境）
-  const env: Array<{ name: string; value: string }> = [
-    { name: 'SANDBOX_BASE_URL', value: sandbox.baseUrl },
-    { name: 'SANDBOX_AUTH_HEADERS_JSON', value: JSON.stringify(authHeaders) },
-  ]
-  if (scopeId) env.push({ name: 'SANDBOX_SCOPE_ID', value: scopeId })
-  if (credentials) {
-    env.push({ name: 'CLOUDBASE_ENV_ID', value: credentials.envId })
-    env.push({ name: 'TENCENTCLOUD_SECRETID', value: credentials.secretId })
-    env.push({ name: 'TENCENTCLOUD_SECRETKEY', value: credentials.secretKey })
-    if (credentials.sessionToken) {
-      env.push({ name: 'TENCENTCLOUD_SESSIONTOKEN', value: credentials.sessionToken })
-    }
-  }
-
-  return [
-    {
-      name: 'cloudbase',
-      command: process.execPath, // node 可执行文件路径
-      args: ['--import', 'tsx/esm', scriptPath],
-      env,
-    },
-  ]
-}
 
 // ─── State ───────────────────────────────────────────────────────────────
 
@@ -254,9 +183,10 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
       }
       const models: ModelInfo[] = []
       for (const [providerKey, providerDef] of Object.entries(config.provider ?? {})) {
-        const vendorName = typeof providerDef.name === 'string' && !providerDef.name.startsWith('{env:')
-          ? providerDef.name
-          : process.env.OPENCODE_PROVIDER_NAME || providerKey
+        const vendorName =
+          typeof providerDef.name === 'string' && !providerDef.name.startsWith('{env:')
+            ? providerDef.name
+            : process.env.OPENCODE_PROVIDER_NAME || providerKey
         for (const [modelKey, modelDef] of Object.entries(providerDef.models ?? {})) {
           models.push({
             id: `${providerKey}/${modelKey}`,
@@ -410,7 +340,7 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
 
     let transport: AcpTransport | null = null
     let sandbox: SandboxInstance | null = null
-    let sandboxMcpClient: { close: () => Promise<void> } | null = null
+    let sandboxMcpClient: { close: () => Promise<void>; mcpUrl?: string } | null = null
     let sessionWorkingDir: string | null = null
 
     try {
@@ -553,22 +483,14 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
         },
       })
 
-      // 7. 创建 session — 注入 CloudBase MCP server（stdio 方式）
-      // opencode spawn 一个独立进程运行 cloudbase-mcp-server.ts，通过 stdio 提供 CloudBase 工具
-      const sandboxAuthHeaders = sandbox ? await sandbox.getAuthHeaders() : {}
-      const mcpServers = buildOpencodeMcpServers(
-        sandbox,
-        sandboxAuthHeaders,
-        conversationId,
-        options.userCredentials
-          ? {
-              envId: envId ?? '',
-              secretId: options.userCredentials.secretId,
-              secretKey: options.userCredentials.secretKey,
-              sessionToken: options.userCredentials.sessionToken,
-            }
-          : undefined,
-      )
+      // 7. 创建 session — 注入 CloudBase MCP server
+      // sandboxMcpClient.server（在 base-runtime.setupSandbox 里创建）已通过
+      // StreamableHTTPServerTransport 暴露为 localhost HTTP endpoint（mcpUrl）。
+      // opencode 通过 McpServerHttp { type:'http', url } 连接，复用完全相同的工具注册逻辑。
+      const mcpServers: Array<{ type: 'http'; name: string; url: string; headers: Array<{ name: string; value: string }> }> = []
+      if (sandboxMcpClient?.mcpUrl) {
+        mcpServers.push({ type: 'http', name: 'cloudbase', url: sandboxMcpClient.mcpUrl, headers: [] })
+      }
       const newRes = await conn.newSession({
         cwd: sessionWorkingDir,
         mcpServers,
