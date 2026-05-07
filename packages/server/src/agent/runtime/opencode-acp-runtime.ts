@@ -522,13 +522,6 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
 
       completeAgent(conversationId, 'completed')
       finalRecordStatus = 'done'
-
-      // Archive to git if sandbox was used (同 CodeBuddy runtime 行为对齐)
-      if (sandbox) {
-        archiveToGit(sandbox, conversationId, prompt).catch((err) => {
-          console.error('[OpencodeAcpRuntime] archiveToGit failed:', err)
-        })
-      }
     } catch (error: any) {
       const isAbort = abortController.signal.aborted || error?.name === 'AbortError'
       console.error('[OpencodeAcpRuntime] launchAgent error:', error)
@@ -563,6 +556,12 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
         } catch {
           /* noop */
         }
+      }
+      // Archive to git（含 error/cancel 场景，保留最终工作状态）
+      if (sandbox) {
+        archiveToGit(sandbox, conversationId, prompt).catch((err) => {
+          console.error('[OpencodeAcpRuntime] archiveToGit failed:', err)
+        })
       }
       // 清理临时工作目录（如果是我们自己建的）
       if (sessionWorkingDir && !options.cwd && sessionWorkingDir.startsWith(os.tmpdir())) {
