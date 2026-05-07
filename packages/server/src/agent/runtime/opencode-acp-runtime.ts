@@ -45,6 +45,7 @@ import { OpencodeMessageBuilder, findLastRecordIds, buildHistoryContextPrompt } 
 import { BaseAgentRuntime } from './base-runtime.js'
 import type { SandboxInstance } from '../../sandbox/scf-sandbox-manager.js'
 import { archiveToGit } from '../../sandbox/git-archive.js'
+import { getDb } from '../../db/index.js'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
@@ -457,13 +458,27 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
       })
 
       // 7. 创建 session — 注入 CloudBase MCP server（全局 /cloudbase-mcp 路由）
-      // 全局 HTTP MCP server 挂载在 server 进程的 /cloudbase-mcp 路径，
-      // opencode 通过 McpServerHttp 连接，sandbox 信息通过 headers 传入。
-      // 每次 HTTP 请求创建 per-request McpServer（stateless），工具 schema 按 scopeId 缓存。
+      // 全局 HTTP MCP server 挂载在 server 进程的 /cloudbase-mcp 路径。
+      // 认证：使用当前用户的 server API key（sak_xxx），通过 authMiddleware 校验。
+      // sandboxAuth 来自 sandbox.getAuthHeaders()，包含所有沙箱需要的 headers。
+      // X-Session-Id 仅用于本地工具 schema 缓存 key，不传给沙箱。
       const mcpServers: Array<{ type: 'http'; name: string; url: string; headers: Array<{ name: string; value: string }> }> = []
       if (sandbox) {
         const authHeaders = await sandbox.getAuthHeaders()
         const serverPort = Number(process.env.PORT) || 3001
+
+        // 获取用户 API key 用于 /cloudbase-mcp 路由认证
+        let userApiKey = ''
+        try {
+          const user = await getDb().users.findById(userId)
+          if (user?.apiKey) {
+            const { decrypt } = await import('../../lib/crypto.js')
+            userApiKey = decrypt(user.apiKey)
+          }
+        } catch {
+          /* API key 获取失败不影响主流程，未认证时路由会返回 401 */
+        }
+
         mcpServers.push({
           type: 'http',
           name: 'cloudbase',
@@ -471,10 +486,8 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
           headers: [
             { name: 'X-Sandbox-Url', value: sandbox.baseUrl },
             { name: 'X-Sandbox-Auth', value: JSON.stringify(authHeaders) },
-            { name: 'X-Scope-Id', value: conversationId },
-            ...(process.env.MCP_API_KEY
-              ? [{ name: 'Authorization', value: `Bearer ${process.env.MCP_API_KEY}` }]
-              : []),
+            { name: 'X-Session-Id', value: conversationId },
+            ...(userApiKey ? [{ name: 'Authorization', value: `Bearer ${userApiKey}` }] : []),
           ],
         })
       }

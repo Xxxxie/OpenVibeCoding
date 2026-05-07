@@ -18,7 +18,6 @@
  *     headers: [
  *       { name: 'X-Sandbox-Url',  value: sandbox.baseUrl },
  *       { name: 'X-Sandbox-Auth', value: JSON.stringify(authHeaders) },
- *       { name: 'X-Scope-Id',     value: conversationId },
  *       { name: 'Authorization',  value: 'Bearer <MCP_API_KEY>' },
  *     ]
  *   }
@@ -29,6 +28,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import type { HttpBindings } from '@hono/node-server'
 import { z } from 'zod'
+import type { AppEnv } from '../middleware/auth.js'
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -69,11 +69,11 @@ function setCachedTools(scopeId: string, tools: ToolSchema[]): void {
 
 // ─── Sandbox HTTP helpers ──────────────────────────────────────────────────
 // 不依赖 SandboxInstance，直接通过 fetch 调沙箱 HTTP API
+// sandboxAuth 已包含所有必要的认证和 scope headers（来自 sandbox.getAuthHeaders()），不额外注入
 
 async function sandboxFetch(
   sandboxUrl: string,
   sandboxAuth: Record<string, string>,
-  scopeId: string,
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
@@ -82,7 +82,6 @@ async function sandboxFetch(
     headers: {
       'Content-Type': 'application/json',
       ...sandboxAuth,
-      'X-Scope-Id': scopeId,
       ...(init.headers as Record<string, string> | undefined),
     },
   })
@@ -91,11 +90,10 @@ async function sandboxFetch(
 async function sandboxBash(
   sandboxUrl: string,
   sandboxAuth: Record<string, string>,
-  scopeId: string,
   command: string,
   timeoutMs = 60_000,
 ): Promise<string> {
-  const res = await sandboxFetch(sandboxUrl, sandboxAuth, scopeId, '/api/tools/bash', {
+  const res = await sandboxFetch(sandboxUrl, sandboxAuth, '/api/tools/bash', {
     method: 'POST',
     body: JSON.stringify({ command, timeout: timeoutMs }),
     signal: AbortSignal.timeout(timeoutMs + 5_000),
@@ -112,29 +110,22 @@ async function sandboxBash(
 async function discoverCloudbaseTools(
   sandboxUrl: string,
   sandboxAuth: Record<string, string>,
-  scopeId: string,
 ): Promise<ToolSchema[]> {
-  const tmpPath = `.cloudbase-mcp-schema-${scopeId.slice(0, 8)}.json`
+  const tmpPath = `.cloudbase-mcp-schema-${Date.now()}.json`
   try {
     await sandboxBash(
       sandboxUrl,
       sandboxAuth,
-      scopeId,
       `mcporter list cloudbase --schema --output json > ${tmpPath} 2>&1`,
       25_000,
     )
-    const res = await sandboxFetch(
-      sandboxUrl,
-      sandboxAuth,
-      scopeId,
-      `/e2b-compatible/files?path=${encodeURIComponent(tmpPath)}`,
-    )
+    const res = await sandboxFetch(sandboxUrl, sandboxAuth, `/e2b-compatible/files?path=${encodeURIComponent(tmpPath)}`)
     if (!res.ok) throw new Error(`Failed to read schema file: ${res.status}`)
     const parsed = (await res.json()) as any
     if (!Array.isArray(parsed.tools)) throw new Error('No tools array in schema response')
     return parsed.tools as ToolSchema[]
   } finally {
-    sandboxBash(sandboxUrl, sandboxAuth, scopeId, `rm -f ${tmpPath}`, 5_000).catch(() => {})
+    sandboxBash(sandboxUrl, sandboxAuth, `rm -f ${tmpPath}`, 5_000).catch(() => {})
   }
 }
 
@@ -157,13 +148,12 @@ function serializeFnCall(toolName: string, args: Record<string, unknown>): strin
 async function mcporterCall(
   sandboxUrl: string,
   sandboxAuth: Record<string, string>,
-  scopeId: string,
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<string> {
   const expr = serializeFnCall(toolName, args)
   const escaped = expr.replace(/'/g, "'\\''")
-  return sandboxBash(sandboxUrl, sandboxAuth, scopeId, `mcporter call '${escaped}' 2>&1`, 60_000)
+  return sandboxBash(sandboxUrl, sandboxAuth, `mcporter call '${escaped}' 2>&1`, 60_000)
 }
 
 // ─── JSON Schema to Zod ────────────────────────────────────────────────────
@@ -220,14 +210,15 @@ const SKIP_TOOLS = new Set(['logout', 'interactiveDialog'])
 async function buildMcpServer(
   sandboxUrl: string,
   sandboxAuth: Record<string, string>,
-  scopeId: string,
+  /** 本地缓存 key（conversationId），不传给沙箱 */
+  sessionId: string,
 ): Promise<McpServer> {
-  // Get or discover tool schema
-  let tools = getCachedTools(scopeId)
+  // Get or discover tool schema (cached by sessionId)
+  let tools = getCachedTools(sessionId)
   if (!tools) {
     try {
-      tools = await discoverCloudbaseTools(sandboxUrl, sandboxAuth, scopeId)
-      setCachedTools(scopeId, tools)
+      tools = await discoverCloudbaseTools(sandboxUrl, sandboxAuth)
+      setCachedTools(sessionId, tools)
     } catch (e) {
       console.warn('[cloudbase-mcp] Tool discovery failed:', (e as Error).message)
       tools = []
@@ -246,7 +237,7 @@ async function buildMcpServer(
       zodShape,
       async (args: Record<string, unknown>) => {
         try {
-          const output = await mcporterCall(sandboxUrl, sandboxAuth, scopeId, tool.name, args)
+          const output = await mcporterCall(sandboxUrl, sandboxAuth, tool.name, args)
           return {
             content: [{ type: 'text' as const, text: typeof output === 'string' ? output : JSON.stringify(output) }],
           }
@@ -262,24 +253,20 @@ async function buildMcpServer(
 
 // ─── Hono Route ───────────────────────────────────────────────────────────
 
-const MCP_API_KEY = process.env.MCP_API_KEY
+const app = new Hono<AppEnv & { Bindings: HttpBindings }>()
 
-const app = new Hono<{ Bindings: HttpBindings }>()
-
-// All methods: parse sandbox headers and dispatch to MCP transport
+// All methods: authenticate → parse sandbox headers → dispatch to MCP transport
 app.all('*', async (c) => {
-  // Optional API key check
-  if (MCP_API_KEY) {
-    const auth = c.req.header('Authorization') ?? ''
-    const key = auth.startsWith('Bearer ') ? auth.slice(7) : auth
-    if (key !== MCP_API_KEY) {
-      return c.json({ error: 'Unauthorized' }, 401)
-    }
+  // 认证：要求已登录用户（支持 cookie session 和 API key sak_xxx）
+  const session = c.get('session')
+  if (!session?.user?.id) {
+    return c.json({ error: 'Unauthorized' }, 401)
   }
 
   const sandboxUrl = c.req.header('X-Sandbox-Url')
   const sandboxAuthRaw = c.req.header('X-Sandbox-Auth') ?? '{}'
-  const scopeId = c.req.header('X-Scope-Id') ?? 'default'
+  // sessionId 仅用于本地工具 schema 缓存 key，不传给沙箱
+  const sessionId = c.req.header('X-Session-Id') ?? 'default'
 
   if (!sandboxUrl) {
     return c.json({ error: 'X-Sandbox-Url header required' }, 400)
@@ -293,7 +280,7 @@ app.all('*', async (c) => {
   }
 
   // Build per-request McpServer with tools registered
-  const mcpServer = await buildMcpServer(sandboxUrl, sandboxAuth, scopeId)
+  const mcpServer = await buildMcpServer(sandboxUrl, sandboxAuth, sessionId)
 
   // Create stateless transport and handle this single HTTP request.
   // @hono/node-server exposes Node.js raw req/res via c.env (HttpBindings).
