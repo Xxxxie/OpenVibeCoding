@@ -295,16 +295,19 @@ app.all('*', async (c) => {
   // Build per-request McpServer with tools registered
   const mcpServer = await buildMcpServer(sandboxUrl, sandboxAuth, scopeId)
 
-  // Create stateless transport and handle this single HTTP request
-  // @hono/node-server exposes Node.js raw req/res via c.env (HttpBindings)
+  // Create stateless transport and handle this single HTTP request.
+  // @hono/node-server exposes Node.js raw req/res via c.env (HttpBindings).
+  // transport.handleRequest writes directly to the Node.js ServerResponse,
+  // so we must tell Hono NOT to write its own response afterward.
+  // We use the @hono/node-server internal header 'x-hono-already-sent' = '1'
+  // which causes responseViaResponseObject to skip all header/body writing.
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
   await mcpServer.connect(transport)
 
   const { incoming, outgoing } = c.env
   await transport.handleRequest(incoming, outgoing)
 
-  // Response was written directly to outgoing (ServerResponse), return empty to Hono
-  return new Response(null, { status: 200 })
+  return new Response(null, { status: 200, headers: { 'x-hono-already-sent': '1' } })
 })
 
 export default app

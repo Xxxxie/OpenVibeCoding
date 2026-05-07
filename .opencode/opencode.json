@@ -7,7 +7,7 @@
       "name": "MiMo",
       "options": {
         "baseURL": "{env:OPENAI_API_ENDPOINT}",
-        "apiKey": "{env:MIMO_API_KEY}"
+        "apiKey": "{env:OPENAI_API_KEY}"
       },
       "models": {
         "mimo-v2.5-pro": {
