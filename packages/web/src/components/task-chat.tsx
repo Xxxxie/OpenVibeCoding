@@ -45,7 +45,16 @@ import { taskChatInputAtomFamily } from '@/lib/atoms/task'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { TaskListPanel } from '@/components/chat/task-list-panel'
 
-const HIDDEN_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'])
+const HIDDEN_TOOLS = new Set([
+  // CodeBuddy SDK task management 工具（由 TaskListPanel 独立展示）
+  'TaskCreate',
+  'TaskUpdate',
+  'TaskList',
+  'TaskGet',
+  // OpenCode 的 todowrite（同样交给 TaskListPanel 统一展示）
+  'todowrite',
+  'TodoWrite',
+])
 
 export function TaskChat({
   taskId,

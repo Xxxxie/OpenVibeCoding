@@ -55,7 +55,7 @@ export interface ToolRenderer {
  * 所以这里只需注册核心短名即可。
  */
 export const TOOL_RENDERERS: Record<string, ToolRenderer> = {
-  // Claude 内置工具
+  // Claude 内置工具（CodeBuddy SDK，名字是 PascalCase）
   Bash: bashRenderer,
   Read: readRenderer,
   Write: writeRenderer,
@@ -70,6 +70,19 @@ export const TOOL_RENDERERS: Record<string, ToolRenderer> = {
   Agent: taskRenderer, // Anthropic SDK 的 Agent 工具等价 Task
   ImageGen: imageGenRenderer,
   ImageEdit: imageGenRenderer, // 复用 ImageGen 渲染器
+
+  // OpenCode builtin 工具（小写命名，复用同一套渲染器）
+  bash: bashRenderer,
+  read: readRenderer,
+  write: writeRenderer,
+  edit: editRenderer,
+  multiedit: editRenderer,
+  grep: grepRenderer,
+  glob: globRenderer,
+  webfetch: webFetchRenderer,
+  websearch: webSearchRenderer,
+  todowrite: todoWriteRenderer,
+  task: taskRenderer,
 }
 
 /**

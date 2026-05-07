@@ -32,16 +32,52 @@ function parseInput(raw: unknown): Record<string, unknown> {
 }
 
 // ---------------------------------------------------------------------------
-// deriveTasks — extract tasks from TaskCreate / TaskUpdate tool calls
+// deriveTasks — extract tasks from multiple sources:
+//   1. CodeBuddy SDK: TaskCreate + TaskUpdate 工具（task id 来自 result 里的 "Task #N"）
+//   2. OpenCode: todowrite / TodoWrite 工具（一次性全量 todos 数组）
 // ---------------------------------------------------------------------------
+
+/** 支持 CodeBuddy TaskCreate / OpenCode todowrite 两种工具名 */
+const TASK_CREATE_TOOLS = new Set(['TaskCreate'])
+const TASK_UPDATE_TOOLS = new Set(['TaskUpdate'])
+const TODO_WRITE_TOOLS = new Set(['todowrite', 'TodoWrite'])
+
+interface TodoItemInput {
+  content?: string
+  activeForm?: string
+  status?: 'pending' | 'in_progress' | 'completed'
+  priority?: string
+}
 
 export function deriveTasks(messages: TaskMessage[]): DerivedTask[] {
   const tasks: Record<string, DerivedTask> = {}
 
+  // 记录按时间顺序最近一次 todoWrite 调用的 message/partIndex，
+  // 用于判断哪个 todoWrite 是当前权威版本（后覆盖前）。
+  let lastTodoWriteSnapshot: DerivedTask[] | null = null
+
   for (const msg of messages) {
     if (!msg.parts) continue
     for (const part of msg.parts) {
-      if (part.type === 'tool_call' && part.toolName === 'TaskCreate') {
+      // ─── 1. OpenCode todowrite：一次性全量 todos 数组 ───────────
+      if (part.type === 'tool_call' && TODO_WRITE_TOOLS.has(part.toolName)) {
+        const input = parseInput(part.input)
+        const todos = Array.isArray(input.todos) ? (input.todos as TodoItemInput[]) : []
+        lastTodoWriteSnapshot = todos
+          .filter((t) => t && (t.content || t.activeForm))
+          .map((t, idx) => ({
+            id: `todo-${idx + 1}`,
+            subject: t.content ? String(t.content) : '',
+            status: (t.status === 'completed' || t.status === 'in_progress'
+              ? t.status
+              : 'pending') as DerivedTask['status'],
+            activeForm: t.activeForm ? String(t.activeForm) : undefined,
+          }))
+        continue
+      }
+
+      // ─── 2. CodeBuddy TaskCreate / TaskUpdate ────────────────────
+      if (part.type === 'tool_call' && TASK_CREATE_TOOLS.has(part.toolName)) {
         const input = parseInput(part.input)
 
         // Find matching tool_result to extract task ID
@@ -60,7 +96,7 @@ export function deriveTasks(messages: TaskMessage[]): DerivedTask[] {
           activeForm: input.activeForm ? String(input.activeForm) : undefined,
           owner: input.owner ? String(input.owner) : undefined,
         }
-      } else if (part.type === 'tool_call' && part.toolName === 'TaskUpdate') {
+      } else if (part.type === 'tool_call' && TASK_UPDATE_TOOLS.has(part.toolName)) {
         const input = parseInput(part.input)
         const taskId = input.taskId ? String(input.taskId) : undefined
         if (!taskId || !tasks[taskId]) continue
@@ -76,6 +112,12 @@ export function deriveTasks(messages: TaskMessage[]): DerivedTask[] {
         if (input.owner !== undefined) task.owner = input.owner ? String(input.owner) : undefined
       }
     }
+  }
+
+  // 如果存在 todoWrite 快照，它作为权威来源（覆盖 CodeBuddy 的 task 列表，
+  // 两者不会同时存在于同一会话）。若想都保留，可以 spread concat。
+  if (lastTodoWriteSnapshot && lastTodoWriteSnapshot.length > 0) {
+    return lastTodoWriteSnapshot
   }
 
   return Object.values(tasks)

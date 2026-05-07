@@ -46,6 +46,7 @@ import { resolvePendingQuestion, rejectPendingQuestionsForConversation } from '.
 import { OpencodeMessageBuilder, findLastRecordIds, buildHistoryContextPrompt } from './opencode-message-builder.js'
 import { BaseAgentRuntime } from './base-runtime.js'
 import type { SandboxInstance } from '../../sandbox/scf-sandbox-manager.js'
+import { archiveToGit } from '../../sandbox/git-archive.js'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
@@ -463,20 +464,15 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
         },
       })
 
-      // 7. 创建 session — 注入 MCP server（来自基类 sandbox MCP proxy）
-      const mcpServers: Array<{ url: string; headers?: Record<string, string> }> = []
-      if (sandbox && sandboxResult?.mcpClient) {
-        // sandbox 内有 MCP endpoint，opencode 可以通过 HTTP transport 直接调用
-        // CloudBase 工具（数据库、云函数、存储等）
-        const authHeaders = await sandbox.getAuthHeaders()
-        mcpServers.push({
-          url: `${sandbox.baseUrl}/mcp`,
-          headers: authHeaders,
-        })
-      }
+      // 7. 创建 session
+      //
+      // 注意：sandbox 通过 .opencode/tools/*.ts 的 custom tool 直接转发到
+      // sandbox 的 /api/tools/{toolName} endpoint（已通过 SANDBOX_BASE_URL env 注入），
+      // 不需要单独的 MCP server。CloudBase 资源操作（数据库/云函数等）
+      // 暂不通过 opencode 的 mcpServers 配置（沙箱没有 standalone MCP HTTP endpoint）。
       const newRes = await conn.newSession({
         cwd: sessionWorkingDir,
-        mcpServers,
+        mcpServers: [],
       })
       const opencodeSessionId = newRes.sessionId
 
@@ -526,6 +522,13 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
 
       completeAgent(conversationId, 'completed')
       finalRecordStatus = 'done'
+
+      // Archive to git if sandbox was used (同 CodeBuddy runtime 行为对齐)
+      if (sandbox) {
+        archiveToGit(sandbox, conversationId, prompt).catch((err) => {
+          console.error('[OpencodeAcpRuntime] archiveToGit failed:', err)
+        })
+      }
     } catch (error: any) {
       const isAbort = abortController.signal.aborted || error?.name === 'AbortError'
       console.error('[OpencodeAcpRuntime] launchAgent error:', error)
