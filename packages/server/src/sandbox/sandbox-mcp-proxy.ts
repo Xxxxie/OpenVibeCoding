@@ -788,7 +788,7 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
   })
 
   log(
-    `[sandbox-mcp] Ready. sandbox=${sandbox.functionName} session=${sandbox.envId} scope=${sandbox.conversationId} mode=${sandbox.sandboxMode} coding=${sandbox.isCodingMode} tools=${cloudbaseTools.length}\n`,
+    `[sandbox-mcp] Ready. sandbox=${sandbox.functionName} session=${sandbox.scfSessionId} scope=${sandbox.conversationId} mode=${sandbox.sandboxMode} coding=${sandbox.isCodingMode} tools=${cloudbaseTools.length}\n`,
   )
 
   return {

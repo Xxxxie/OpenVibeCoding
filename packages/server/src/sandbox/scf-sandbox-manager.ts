@@ -32,7 +32,16 @@ interface ScfSandboxConfig {
 export class SandboxInstance {
   readonly functionName: string
   readonly conversationId: string
-  readonly envId: string
+  /**
+   * SCF session ID (used as `X-Cloudbase-Session-Id` header for sandbox auth).
+   * - In `shared` workspaceIsolation mode: equals the user's CloudBase envId
+   * - In `isolated` mode: equals conversationId
+   * - May be overridden via `options.sandboxSessionId` in `getOrCreate`
+   *
+   * 注意：这不是用户的 CloudBase 环境 ID（之前误命名为 envId 容易引起混淆），
+   * 实际是沙箱 SCF function 的 session ID。
+   */
+  readonly scfSessionId: string
   readonly sandboxEnvId: string
   readonly baseUrl: string
   readonly status: 'creating' | 'ready' | 'error'
@@ -62,7 +71,7 @@ export class SandboxInstance {
     ctx: {
       functionName: string
       conversationId: string
-      envId: string
+      scfSessionId: string
       status: 'creating' | 'ready' | 'error'
       mode: SandboxMode
       sandboxMode?: 'shared' | 'isolated'
@@ -72,7 +81,7 @@ export class SandboxInstance {
   ) {
     this.functionName = ctx.functionName
     this.conversationId = ctx.conversationId
-    this.envId = ctx.envId
+    this.scfSessionId = ctx.scfSessionId
     this.sandboxEnvId = this.deps.sandboxEnvId
     this.baseUrl = `https://${this.deps.sandboxEnvId}.api.tcloudbasegateway.com/v1/functions/${ctx.functionName}`
     this.status = ctx.status
@@ -86,10 +95,10 @@ export class SandboxInstance {
     return this.deps.getAccessToken()
   }
 
-  static buildAuthHeaders(accessToken: string, sessionId: string): Record<string, string> {
+  static buildAuthHeaders(accessToken: string, scfSessionId: string): Record<string, string> {
     return {
       Authorization: `Bearer ${accessToken}`,
-      'X-Cloudbase-Session-Id': sessionId,
+      'X-Cloudbase-Session-Id': scfSessionId,
       'X-Tcb-Webfn': 'true',
     }
   }
@@ -117,7 +126,7 @@ export class SandboxInstance {
   async getAuthHeaders(): Promise<Record<string, string>> {
     const accessToken = await this.getAccessToken()
     return {
-      ...SandboxInstance.buildAuthHeaders(accessToken, this.envId),
+      ...SandboxInstance.buildAuthHeaders(accessToken, this.scfSessionId),
       ...SandboxInstance.buildScopeHeaders(this.conversationId, this.sandboxMode, this.isCodingMode),
     }
   }
@@ -313,7 +322,7 @@ export class ScfSandboxManager {
       return new SandboxInstance(instanceDeps, {
         functionName,
         conversationId,
-        envId: scfSessionId,
+        scfSessionId,
         status: 'ready',
         mode,
         sandboxMode: isolation,
@@ -346,7 +355,7 @@ export class ScfSandboxManager {
     return new SandboxInstance(instanceDeps, {
       functionName,
       conversationId,
-      envId: scfSessionId,
+      scfSessionId,
       status: 'ready',
       mode: 'shared',
       sandboxMode: mode as any,
@@ -357,7 +366,7 @@ export class ScfSandboxManager {
   private async createNewFunction(
     functionName: string,
     conversationId: string,
-    envId: string,
+    scfSessionId: string,
     mode: SandboxMode,
     options?: any,
     onProgress?: SandboxProgressCallback,
@@ -387,7 +396,7 @@ export class ScfSandboxManager {
       const instanceDeps = await this.buildInstanceDeps()
       const mcpConfig = await this.buildSandboxMcpConfig(
         functionName,
-        envId,
+        scfSessionId,
         conversationId,
         instanceDeps.sandboxEnvId,
         isolation,
@@ -397,7 +406,7 @@ export class ScfSandboxManager {
       return new SandboxInstance(instanceDeps, {
         functionName,
         conversationId,
-        envId,
+        scfSessionId,
         status: 'ready',
         mode,
         sandboxMode: isolation,

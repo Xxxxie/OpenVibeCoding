@@ -338,6 +338,8 @@ export abstract class BaseAgentRuntime implements IAgentRuntime {
     sandboxSessionId: string
     toolOverrideConfig: { url: string; headers: Record<string, string> } | null
     mcpClient: Awaited<ReturnType<typeof createSandboxMcpClient>> | null
+    /** Short-lived JWE session cookie for authenticating localhost requests (e.g. /cloudbase-mcp) */
+    sessionJwe: string | null
   }> {
     const { conversationId, envId, userId, userCredentials, isCodingMode, callback, model } = options
 
@@ -350,6 +352,7 @@ export abstract class BaseAgentRuntime implements IAgentRuntime {
         sandboxSessionId: envId || conversationId,
         toolOverrideConfig: null,
         mcpClient: null,
+        sessionJwe: null,
       }
     }
 
@@ -391,6 +394,7 @@ export abstract class BaseAgentRuntime implements IAgentRuntime {
     let toolOverrideConfig: { url: string; headers: Record<string, string> } | null = null
     let mcpClient: Awaited<ReturnType<typeof createSandboxMcpClient>> | null = null
     let detectedCwd: string | null = null
+    let capturedSessionJwe: string | null = null
 
     try {
       sandboxInstance = await scfSandboxManager.getOrCreate(
@@ -407,7 +411,7 @@ export abstract class BaseAgentRuntime implements IAgentRuntime {
 
       toolOverrideConfig = await sandboxInstance.getToolOverrideConfig()
 
-      // Inject hosting presign config for ImageGen
+      // Inject hosting presign config for ImageGen, and capture sessionJwe for /cloudbase-mcp auth
       try {
         const user = await getDb().users.findById(userId)
         if (user) {
@@ -423,6 +427,7 @@ export abstract class BaseAgentRuntime implements IAgentRuntime {
             },
           }
           const sessionJwe = await encryptJWE(session, '2h')
+          capturedSessionJwe = sessionJwe
           const serverPort = Number(process.env.PORT) || 3001
           ;(toolOverrideConfig as any).hosting = {
             presignUrl: `http://localhost:${serverPort}/api/storage/presign?bucketType=static`,
@@ -514,6 +519,7 @@ export abstract class BaseAgentRuntime implements IAgentRuntime {
       sandboxSessionId,
       toolOverrideConfig,
       mcpClient,
+      sessionJwe: capturedSessionJwe,
     }
   }
 

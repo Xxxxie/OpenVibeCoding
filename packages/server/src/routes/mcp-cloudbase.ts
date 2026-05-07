@@ -107,10 +107,7 @@ async function sandboxBash(
 
 // ─── Tool Schema Discovery ─────────────────────────────────────────────────
 
-async function discoverCloudbaseTools(
-  sandboxUrl: string,
-  sandboxAuth: Record<string, string>,
-): Promise<ToolSchema[]> {
+async function discoverCloudbaseTools(sandboxUrl: string, sandboxAuth: Record<string, string>): Promise<ToolSchema[]> {
   const tmpPath = `.cloudbase-mcp-schema-${Date.now()}.json`
   try {
     await sandboxBash(
@@ -257,7 +254,7 @@ const app = new Hono<AppEnv & { Bindings: HttpBindings }>()
 
 // All methods: authenticate → parse sandbox headers → dispatch to MCP transport
 app.all('*', async (c) => {
-  // 认证：要求已登录用户（支持 cookie session 和 API key sak_xxx）
+  // 认证：要求已登录 session（cookie nex_session=<jwe> 由 base-runtime.setupSandbox 签发）
   const session = c.get('session')
   if (!session?.user?.id) {
     return c.json({ error: 'Unauthorized' }, 401)

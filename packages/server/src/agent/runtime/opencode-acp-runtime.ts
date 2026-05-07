@@ -45,7 +45,6 @@ import { OpencodeMessageBuilder, findLastRecordIds, buildHistoryContextPrompt } 
 import { BaseAgentRuntime } from './base-runtime.js'
 import type { SandboxInstance } from '../../sandbox/scf-sandbox-manager.js'
 import { archiveToGit } from '../../sandbox/git-archive.js'
-import { getDb } from '../../db/index.js'
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
@@ -338,7 +337,6 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
         })
         sandbox = sandboxResult.sandbox
         sandboxMcpClient = sandboxResult.mcpClient
-
         // Coding mode: auto-allow all write tools + mark preview ready
         if (isCodingMode && conversationId) {
           this.allowAllWriteToolsForCodingMode(conversationId)
@@ -459,26 +457,14 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
 
       // 7. 创建 session — 注入 CloudBase MCP server（全局 /cloudbase-mcp 路由）
       // 全局 HTTP MCP server 挂载在 server 进程的 /cloudbase-mcp 路径。
-      // 认证：使用当前用户的 server API key（sak_xxx），通过 authMiddleware 校验。
+      // 认证：复用 base-runtime.setupSandbox() 已签发的 sessionJwe（同 nex_session cookie 格式），
+      //      与 storage/presign 的 tool-override 机制完全一致。
       // sandboxAuth 来自 sandbox.getAuthHeaders()，包含所有沙箱需要的 headers。
       // X-Session-Id 仅用于本地工具 schema 缓存 key，不传给沙箱。
       const mcpServers: Array<{ type: 'http'; name: string; url: string; headers: Array<{ name: string; value: string }> }> = []
-      if (sandbox) {
+      if (sandbox && sandboxResult?.sessionJwe) {
         const authHeaders = await sandbox.getAuthHeaders()
         const serverPort = Number(process.env.PORT) || 3001
-
-        // 获取用户 API key 用于 /cloudbase-mcp 路由认证
-        let userApiKey = ''
-        try {
-          const user = await getDb().users.findById(userId)
-          if (user?.apiKey) {
-            const { decrypt } = await import('../../lib/crypto.js')
-            userApiKey = decrypt(user.apiKey)
-          }
-        } catch {
-          /* API key 获取失败不影响主流程，未认证时路由会返回 401 */
-        }
-
         mcpServers.push({
           type: 'http',
           name: 'cloudbase',
@@ -487,7 +473,7 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
             { name: 'X-Sandbox-Url', value: sandbox.baseUrl },
             { name: 'X-Sandbox-Auth', value: JSON.stringify(authHeaders) },
             { name: 'X-Session-Id', value: conversationId },
-            ...(userApiKey ? [{ name: 'Authorization', value: `Bearer ${userApiKey}` }] : []),
+            { name: 'Cookie', value: `nex_session=${sandboxResult.sessionJwe}` },
           ],
         })
       }
