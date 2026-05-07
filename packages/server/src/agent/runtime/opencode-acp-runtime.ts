@@ -55,7 +55,7 @@ import fs from 'node:fs'
 
 // OPENCODE_BIN 常量已删除——统一使用 acp-transport.ts 的 getResolvedBin()
 // 好处：单一权威来源，isAvailable() 与 spawn 使用同一路径，支持 fallback 候选
-const DEFAULT_OPENCODE_MODEL = process.env.OPENCODE_DEFAULT_MODEL || 'moonshot/kimi-k2-0905-preview'
+const DEFAULT_OPENCODE_MODEL = process.env.OPENCODE_DEFAULT_MODEL || 'custom/default'
 
 /** 沙箱内工作目录（agent 看到的"当前目录"概念）。相对路径工具都会以此为根。 */
 const SANDBOX_WORKSPACE_ROOT = process.env.SANDBOX_WORKSPACE_ROOT || '.'
@@ -175,17 +175,26 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
   }
 
   async getSupportedModels(): Promise<ModelInfo[]> {
-    return [
-      // MiMo (default)
-      { id: 'mimo/mimo-v2.5-pro', name: 'MiMo V2.5 Pro', vendor: 'MiMo' },
-      { id: 'mimo/mimo-v2.5', name: 'MiMo V2.5', vendor: 'MiMo' },
-      { id: 'mimo/mimo-v2.5-tts', name: 'MiMo V2.5 TTS', vendor: 'MiMo' },
-      { id: 'mimo/mimo-v2.5-tts-voiceclone', name: 'MiMo V2.5 TTS VoiceClone', vendor: 'MiMo' },
-      { id: 'mimo/mimo-v2.5-tts-voicedesign', name: 'MiMo V2.5 TTS VoiceDesign', vendor: 'MiMo' },
-      // Moonshot (direct)
-      { id: 'moonshot/kimi-k2-turbo-preview', name: 'Kimi K2 Turbo', vendor: 'Moonshot' },
-      { id: 'moonshot/kimi-k2-0905-preview', name: 'Kimi K2 (0905)', vendor: 'Moonshot' },
-    ]
+    // Read model list from OPENCODE_MODELS env var (JSON array of {id, name, vendor?})
+    // Falls back to a single default model entry using OPENCODE_DEFAULT_MODEL
+    const modelsEnv = process.env.OPENCODE_MODELS
+    if (modelsEnv) {
+      try {
+        const parsed = JSON.parse(modelsEnv) as Array<{ id: string; name: string; vendor?: string }>
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map((m) => ({
+            id: m.id,
+            name: m.name,
+            vendor: m.vendor || process.env.OPENCODE_PROVIDER_NAME || 'Custom',
+          }))
+        }
+      } catch {
+        // ignore parse error, fall through
+      }
+    }
+    const defaultModel = DEFAULT_OPENCODE_MODEL
+    const providerName = process.env.OPENCODE_PROVIDER_NAME || 'Custom'
+    return [{ id: defaultModel, name: defaultModel.split('/').pop() || defaultModel, vendor: providerName }]
   }
 
   async chatStream(prompt: string, callback: AgentCallback | null, options: AgentOptions): Promise<ChatStreamResult> {
@@ -323,6 +332,7 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
 
     let transport: AcpTransport | null = null
     let sandbox: SandboxInstance | null = null
+    let sandboxMcpClient: { close: () => Promise<void>; mcpUrl?: string } | null = null
     let sessionWorkingDir: string | null = null
 
     try {
@@ -345,6 +355,7 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
           model: modelId,
         })
         sandbox = sandboxResult.sandbox
+        sandboxMcpClient = sandboxResult.mcpClient
 
         // Coding mode: auto-allow all write tools + mark preview ready
         if (isCodingMode && conversationId) {
@@ -464,15 +475,24 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
         },
       })
 
-      // 7. 创建 session
+      // 7. 创建 session — 注入 CloudBase MCP server（来自 sandbox-mcp-proxy 的本地 HTTP endpoint）
       //
-      // 注意：sandbox 通过 .opencode/tools/*.ts 的 custom tool 直接转发到
-      // sandbox 的 /api/tools/{toolName} endpoint（已通过 SANDBOX_BASE_URL env 注入），
-      // 不需要单独的 MCP server。CloudBase 资源操作（数据库/云函数等）
-      // 暂不通过 opencode 的 mcpServers 配置（沙箱没有 standalone MCP HTTP endpoint）。
+      // sandbox-mcp-proxy 同时挂了两个 transport：
+      //   - InMemoryTransport：供 CodeBuddy SDK runtime 使用（sdkServer）
+      //   - StreamableHTTPServerTransport（localhost random port）：供 opencode 通过 HTTP 访问
+      // opencode 通过此 MCP server 调用 CloudBase 工具（数据库/云函数/存储等）
+      const mcpServers: Array<{ type: 'http'; name: string; url: string; headers: Array<{ name: string; value: string }> }> = []
+      if (sandboxMcpClient?.mcpUrl) {
+        mcpServers.push({
+          type: 'http',
+          name: 'cloudbase',
+          url: sandboxMcpClient.mcpUrl,
+          headers: [], // localhost 无需认证头
+        })
+      }
       const newRes = await conn.newSession({
         cwd: sessionWorkingDir,
-        mcpServers: [],
+        mcpServers,
       })
       const opencodeSessionId = newRes.sessionId
 
@@ -562,6 +582,14 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
         archiveToGit(sandbox, conversationId, prompt).catch((err) => {
           console.error('[OpencodeAcpRuntime] archiveToGit failed:', err)
         })
+      }
+      // Close sandbox MCP client（同 CodeBuddy runtime 对齐）
+      if (sandboxMcpClient) {
+        try {
+          await sandboxMcpClient.close()
+        } catch {
+          /* noop */
+        }
       }
       // 清理临时工作目录（如果是我们自己建的）
       if (sessionWorkingDir && !options.cwd && sessionWorkingDir.startsWith(os.tmpdir())) {
