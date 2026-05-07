@@ -5,20 +5,16 @@
  * - No NestJS dependencies
  * - Uses native fetch for HTTP calls
  * - Creates MCP server proxying to sandbox
- * - Exposes a local Streamable HTTP endpoint so OpenCode ACP can connect via mcpServers
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SandboxInstance } from './scf-sandbox-manager.js'
 import { tool as sdkTool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod'
 import { nanoid } from 'nanoid'
 import cron from 'node-cron'
-import http from 'node:http'
-import type { AddressInfo } from 'node:net'
 import { getDb } from '../db/index.js'
 import { scheduleTask, unscheduleTask } from '../services/cron-scheduler.js'
 import { extractDeployUrl } from '../agent/runtime/base-runtime.js'
@@ -534,42 +530,13 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
   server.tool('publishMiniprogram', PUBLISH_MP_DESC, PUBLISH_MP_SCHEMA, handlePublishMiniprogram)
   server.tool('getDeployJobStatus', DEPLOY_STATUS_DESC, DEPLOY_STATUS_SCHEMA, handleGetDeployJobStatus)
 
-  // ── Wire InMemoryTransport pair (for CodeBuddy SDK runtime) ─────────────
-  // The existing McpServer is connected to an InMemoryTransport pair so the
-  // Tencent SDK runtime can use it via sdkServer.  This path is unchanged.
+  // ── Wire InMemoryTransport pair ───────────────────────────────
 
   const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair()
   await server.connect(serverTransport)
 
   const client = new Client({ name: 'cloudbase-agent', version: '1.0.0' })
   await client.connect(clientTransport)
-
-  // ── Expose a local Streamable HTTP endpoint (for OpenCode ACP runtime) ──
-  // OpenCode connects to MCP servers via HTTP (McpServerHttp in ACP protocol).
-  // We spin up a localhost HTTP server on a random port using the same McpServer
-  // instance so all tools are available through both transports.
-
-  const httpTransport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined, // stateless — no session tracking needed
-  })
-  await server.connect(httpTransport)
-
-  const httpServer = http.createServer(async (req, res) => {
-    try {
-      await httpTransport.handleRequest(req, res)
-    } catch (e) {
-      res.writeHead(500)
-      res.end()
-    }
-  })
-
-  await new Promise<void>((resolve, reject) => {
-    httpServer.listen(0, '127.0.0.1', () => resolve())
-    httpServer.on('error', reject)
-  })
-
-  const addr = httpServer.address() as AddressInfo
-  const mcpUrl = `http://127.0.0.1:${addr.port}/mcp`
 
   // ── Build SDK MCP Server for passing to query() mcpServers ────
   // createSdkMcpServer is needed because agent-sdk's mcpServers option
@@ -828,8 +795,6 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
     client,
     server,
     sdkServer,
-    /** Local HTTP URL for the MCP server (used by OpenCode ACP mcpServers config) */
-    mcpUrl,
     close: async () => {
       try {
         await client.close()
@@ -837,10 +802,6 @@ export async function createSandboxMcpClient(deps: SandboxMcpDeps): Promise<{
       try {
         await server.close()
       } catch {}
-      try {
-        await httpTransport.close()
-      } catch {}
-      await new Promise<void>((resolve) => httpServer.close(() => resolve()))
     },
   }
 }
