@@ -461,7 +461,12 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
       //      与 storage/presign 的 tool-override 机制完全一致。
       // sandboxAuth 来自 sandbox.getAuthHeaders()，包含所有沙箱需要的 headers。
       // X-Session-Id 仅用于本地工具 schema 缓存 key，不传给沙箱。
-      const mcpServers: Array<{ type: 'http'; name: string; url: string; headers: Array<{ name: string; value: string }> }> = []
+      const mcpServers: Array<{
+        type: 'http'
+        name: string
+        url: string
+        headers: Array<{ name: string; value: string }>
+      }> = []
       if (sandbox && sandboxResult?.sessionJwe) {
         const authHeaders = await sandbox.getAuthHeaders()
         const serverPort = Number(process.env.PORT) || 3001

@@ -381,16 +381,24 @@ async function handleSessionPrompt(c: any, id: number | string, params: SessionP
     return c.json(rpcErr(id, JSON_RPC_ERRORS.INTERNAL, 'CloudBase environment not bound'))
   }
 
-  // Check if agent is already running via registry
-  const existingRun = getAgentRun(sessionId)
-  if (existingRun && existingRun.status === 'running') {
-    return observeStream(c, id, sessionId, existingRun.turnId, envId, userId)
-  }
+  // Resume payload (askAnswers / toolConfirmation) 必须路由到 runtime.chatStream 的
+  // resume 分支来 resolve 挂起的 question/permission，而不是只 observe。
+  // 这里优先检查 resume payload —— 有 resume 时跳过 observeStream early-return。
+  const hasResumePayloadEarly =
+    (params?.askAnswers && Object.keys(params.askAnswers).length > 0) || !!params?.toolConfirmation
 
-  // Check DB status as fallback
-  const latestStatus = await persistenceService.getLatestRecordStatus(sessionId, userId, envId)
-  if (latestStatus && (latestStatus.status === 'pending' || latestStatus.status === 'streaming')) {
-    return c.json(rpcErr(id, JSON_RPC_ERRORS.INVALID_REQUEST, 'A prompt turn is already in progress'))
+  if (!hasResumePayloadEarly) {
+    // Check if agent is already running via registry
+    const existingRun = getAgentRun(sessionId)
+    if (existingRun && existingRun.status === 'running') {
+      return observeStream(c, id, sessionId, existingRun.turnId, envId, userId)
+    }
+
+    // Check DB status as fallback
+    const latestStatus = await persistenceService.getLatestRecordStatus(sessionId, userId, envId)
+    if (latestStatus && (latestStatus.status === 'pending' || latestStatus.status === 'streaming')) {
+      return c.json(rpcErr(id, JSON_RPC_ERRORS.INVALID_REQUEST, 'A prompt turn is already in progress'))
+    }
   }
 
   // Extract prompt text and image blocks

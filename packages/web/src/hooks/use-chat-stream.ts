@@ -177,6 +177,8 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
         setPlanMode,
         setAgentPhase,
         clearQuestionState,
+        setIsSending,
+        setIsStreamingResponse,
       })
     },
     [clearQuestionState, setPlanMode, taskId],
@@ -352,7 +354,9 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
       const answers: Record<string, string> = {}
       for (const question of askData.questions) {
         const answerValue = toolInputs[question.question] || toolAnswers[question.question]
-        if (answerValue) answers[question.question] = answerValue
+        // Key 约定: 使用 question.header（与 opencode AskUserQuestion custom tool 对齐，
+        // 后者通过 `data.answers[q.header]` 取值）。CodeBuddy SDK 也使用 header。
+        if (answerValue) answers[question.header] = answerValue
       }
 
       phaseRef.current = 'streaming'

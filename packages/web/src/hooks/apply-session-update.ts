@@ -57,6 +57,13 @@ export interface ApplySessionUpdateCtx {
   setPlanMode: Dispatch<SetStateAction<PlanModeLike>>
   setAgentPhase: Dispatch<SetStateAction<AgentPhaseInfo>>
   clearQuestionState: (toolCallId: string) => void
+  /**
+   * 当 ask_user / tool_confirm / ExitPlanMode 到达时需要立即解除 sending 状态，
+   * 使表单按钮可点击。CodeBuddy SDK 会随即关闭 SSE，但 OpenCode 的 HTTP 长挂起
+   * 不会关闭 SSE，必须显式重置以避免 UI 一直禁用。
+   */
+  setIsSending: Dispatch<SetStateAction<boolean>>
+  setIsStreamingResponse: Dispatch<SetStateAction<boolean>>
 }
 
 /**
@@ -86,6 +93,8 @@ export function applySessionUpdate(ctx: ApplySessionUpdateCtx): void {
     setPlanMode,
     setAgentPhase,
     clearQuestionState,
+    setIsSending,
+    setIsStreamingResponse,
   } = ctx
   const u = update as any
 
@@ -155,6 +164,9 @@ export function applySessionUpdate(ctx: ApplySessionUpdateCtx): void {
       // Block fetchMessages when AskUserQuestion arrives
       if (String(u.title || '') === 'AskUserQuestion') {
         phaseRef.current = 'waiting_for_interaction'
+        // 立即解除 sending 状态（OpenCode 情况）
+        setIsSending(false)
+        setIsStreamingResponse(false)
       }
       break
     }
@@ -218,6 +230,10 @@ export function applySessionUpdate(ctx: ApplySessionUpdateCtx): void {
 
     case 'tool_confirm':
       phaseRef.current = 'waiting_for_interaction'
+      // 立即解除 sending 状态，使确认按钮可点击
+      // （OpenCode runtime 的 SSE 不会在中断时关闭，必须显式重置）
+      setIsSending(false)
+      setIsStreamingResponse(false)
       setToolConfirm({
         toolCallId: u.toolCallId,
         assistantMessageId: u.assistantMessageId,
@@ -243,6 +259,10 @@ export function applySessionUpdate(ctx: ApplySessionUpdateCtx): void {
 
     case 'ask_user':
       phaseRef.current = 'waiting_for_interaction'
+      // 立即解除 sending 状态，使提交按钮可点击
+      // （OpenCode runtime 的 SSE 不会在中断时关闭，必须显式重置）
+      setIsSending(false)
+      setIsStreamingResponse(false)
       break
 
     case 'artifact':
