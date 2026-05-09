@@ -40,9 +40,11 @@ export function getCodingSystemPrompt(envId: string, publishableKey: string): st
 
 <IMPORTANT>
 IMPORTANT: 必须先读取 src/utils/cloudbase.ts，将其中的 ENV_ID 和 PUBLISHABLE_KEY 替换为当前环境的真实值。
-IMPORTANT: 直接修改代码而非创建 .env 文件。
+IMPORTANT: 直接修改代码而非创建 .env 文件。有关登录态判断时使用 auth-web-cloudbase skill 使用 supabase-like 的 api。
 - ENV_ID：${envId}
 - PUBLISHABLE_KEY：${publishableKey}
+IMPORTANT: 注意数据库权限，默认 PUBLISHABLE_KEY 时是匿名身份，刚开始数据库最好公有读写，方便调试，后续完善。
+IMPORTANT: 页面需要做好 error 处理，显示出具体的错误堆栈信息，而非直接 crash。需要 toast 等方式显示而非 console 打印。
 </IMPORTANT>
 
 <tech-stack>
