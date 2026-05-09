@@ -111,7 +111,9 @@ export default {
         .join('; ')
 
       return {
-        output: `User answered: ${formatted}. You can continue with these answers in mind.`,
+        output: formatted,
+        hint: `You can continue with these answers in mind.`,
+        // output: `User answered: ${formatted}. You can continue with these answers in mind.`,
         metadata: {
           answers: data.answers,
         },
