@@ -57,6 +57,12 @@ COPY --from=build /app/packages/shared/dist ./packages/shared/dist
 # skill-loader-override reads CODEBUDDY_BUNDLED_SKILLS_DIR = packages/server/skills
 COPY --from=build /app/.agents/skills/cloudbase ./packages/server/skills/cloudbase
 
+# Copy opencode tool overrides (checked-in, not built into dist).
+# opencode-installer.ts:getOpencodeConfigDir() → resolveProjectRoot()/.opencode/,
+# and resolveProjectRoot() returns /app (ancestor containing packages/server/), so
+# tools must live at /app/.opencode/tools/*.ts in the runtime image.
+COPY --from=build /app/.opencode ./.opencode
+
 # Point shared exports to built dist (source .ts files not available at runtime)
 RUN sed -i 's|./src/index.ts|./dist/index.js|g' packages/shared/package.json
 
