@@ -425,6 +425,7 @@ tasksRouter.delete('/:taskId', requireUserEnv, async (c) => {
         const sandbox = await scfSandboxManager
           .getExisting(taskId, scfSessionId, {
             sandboxMode: existing.sandboxMode || undefined,
+            isCodingMode: existing.mode === 'code',
           })
           .catch(() => null)
         if (sandbox) {
