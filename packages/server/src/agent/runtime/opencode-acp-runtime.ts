@@ -521,6 +521,21 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
         prompt: [{ type: 'text', text: contextPrompt }],
       })
 
+      // 非正常停止原因：LLM provider 拒绝 (refusal) / 超出 token 上限 (max_tokens) /
+      // 超过最大 turn 请求数 (max_turn_requests) 时，assistant 可能没有产出任何 text，
+      // 只有截断的 reasoning。给用户显式提示，避免"空回复"的困惑。
+      //
+      // 注意：'cancelled' 不在此处提示（abort 流程走 catch 分支处理），'end_turn' 是正常完成。
+      const stopReason = promptRes.stopReason
+      if (stopReason === 'refusal' || stopReason === 'max_tokens' || stopReason === 'max_turn_requests') {
+        const hint = buildStopReasonHint(stopReason)
+        try {
+          await emit({ type: 'text', content: hint })
+        } catch {
+          /* noop */
+        }
+      }
+
       await emit({ type: 'agent_phase', phase: 'idle' })
       await emit({
         type: 'result',
@@ -748,3 +763,42 @@ function makeEmitter(ctx: {
 // ─── Singleton ────────────────────────────────────────────────────────────
 
 export const opencodeAcpRuntime = new OpencodeAcpRuntime()
+
+/**
+ * 为非正常 stopReason 生成面向用户的提示文本，塞到 assistant 消息尾部。
+ *
+ * - refusal：LLM provider 内容审查拒绝生成（如腾讯 MiMo 的 high risk 拦截）。
+ *   LLM 通常在这种情况下直接中断流，没有产出 text，只剩截断的 reasoning。
+ * - max_tokens：触发输出 token 上限，回复被截断。
+ * - max_turn_requests：LLM 在单轮内调用工具次数过多（通常是死循环）。
+ */
+function buildStopReasonHint(stopReason: 'refusal' | 'max_tokens' | 'max_turn_requests'): string {
+  switch (stopReason) {
+    case 'refusal':
+      return [
+        '',
+        '---',
+        '⚠️ **模型拒绝回复**：当前提问被 LLM provider 的内容安全策略拦截了。',
+        '',
+        '可能的原因：',
+        '- 提问或上下文中包含被模型方风险模型判定为敏感的内容（人名、专有名词、政治/安全相关话题等）。',
+        '- 多轮对话累积的 history 中有 provider 敏感词。',
+        '',
+        '建议：换一种表述方式重试，或清空当前会话重新开始；必要时切换到其他模型。',
+      ].join('\n')
+    case 'max_tokens':
+      return [
+        '',
+        '---',
+        '⚠️ **输出被截断**：回复达到了模型的最大 token 上限，内容可能不完整。你可以回复"继续"让模型接着写。',
+      ].join('\n')
+    case 'max_turn_requests':
+      return [
+        '',
+        '---',
+        '⚠️ **单轮工具调用次数达到上限**：为避免死循环，本轮已停止。',
+        '',
+        '建议：拆分任务，或重新描述目标让模型更聚焦地执行。',
+      ].join('\n')
+  }
+}
