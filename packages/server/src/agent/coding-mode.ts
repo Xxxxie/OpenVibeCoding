@@ -40,17 +40,15 @@ export function getCodingSystemPrompt(envId: string, publishableKey: string): st
 
 <IMPORTANT>
 IMPORTANT: 必须先读取 src/utils/cloudbase.ts，将其中的 ENV_ID 和 PUBLISHABLE_KEY 替换为当前环境的真实值。
-IMPORTANT: 直接修改代码而非创建 .env 文件。有关登录态判断时使用 auth-web-cloudbase skill 使用 supabase-like 的 api。
+IMPORTANT: 直接修改代码而非创建 .env 文件。有关登录态判断时使用 auth-web-cloudbase skill 使用 supabase-like 的 api，如果需要注册，不支持用户名密码注册，需要邮箱/手机号注册并同时设置用户名密码，同时需要先开启 邮箱/手机号 登录。
 - ENV_ID：${envId}
 - PUBLISHABLE_KEY：${publishableKey}
-IMPORTANT: 注意数据库权限，默认 PUBLISHABLE_KEY 时是匿名身份，刚开始数据库最好公有读写，方便调试，后续完善。
+IMPORTANT: 注意数据库权限，默认 PUBLISHABLE_KEY 时是匿名身份，刚开始数据库最好公有读写（ aclTag: CUSTOM, rule: { "read": true, "write": true } ），方便调试，后续完善。
 IMPORTANT: 页面需要做好 error 处理，显示出具体的错误堆栈信息，而非直接 crash。需要 toast 等方式显示而非 console 打印。
 </IMPORTANT>
 
 <tech-stack>
-- React 18 + TypeScript
-- Vite 6（开发服务器 + 构建工具）
-- Tailwind CSS（原子化 CSS 框架）
+- React 19 + Shadcn + Tailwind CSS + lucide-react + Vite 6
 - React Router（客户端路由）
 - @cloudbase/js-sdk（云开发前端 SDK）
 </tech-stack>

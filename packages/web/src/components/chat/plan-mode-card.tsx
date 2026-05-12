@@ -30,11 +30,7 @@ export function PlanModeCard({ planContent, isSending, isStreaming = true, onDec
   return (
     <Card className="p-3 border-primary/60 bg-primary/5">
       <div className="flex items-center gap-2 mb-2">
-        {terminated ? (
-          <CirclePause className="h-4 w-4 text-yellow-500" />
-        ) : (
-          <Rocket className="h-4 w-4 text-primary" />
-        )}
+        {terminated ? <CirclePause className="h-4 w-4 text-yellow-500" /> : <Rocket className="h-4 w-4 text-primary" />}
         <span className="text-sm font-medium">{terminated ? '生成已中断' : '准备开始编码'}</span>
       </div>
 

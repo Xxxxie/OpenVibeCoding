@@ -967,6 +967,9 @@ export function FileBrowser({
       const target = e.target as HTMLElement
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return
       const isCmdOrCtrl = e.ctrlKey || e.metaKey
+      // Don't intercept Cmd+C when user has text selected — let native copy work
+      const selection = window.getSelection()
+      if (isCmdOrCtrl && e.key === 'c' && selection && selection.toString().length > 0) return
       if (isCmdOrCtrl && e.key === 'c' && selectedFile) {
         e.preventDefault()
         handleCopy(selectedFile)

@@ -1481,7 +1481,14 @@ export class CloudbaseAgentService {
         // for-await 循环自然结束（SDK 没有发 'result' 消息，如 GLM 的 end_turn 行为）
         // 检测最后一条消息类型：如果是 user（tool_result），说明模型还想继续
         // 但被 SDK 的 end_turn 双发 bug 截断了——自动发起 resume 继续执行
-        while (!resultEmitted && lastMessageType === 'user' && glmResumeCount < MAX_GLM_RESUME) {
+        let consecutiveDryResumes = 0
+        const MAX_DRY_RESUMES = 2 // 连续 N 次 resume 无任何内容产出则放弃
+        while (
+          !resultEmitted &&
+          lastMessageType === 'user' &&
+          glmResumeCount < MAX_GLM_RESUME &&
+          consecutiveDryResumes < MAX_DRY_RESUMES
+        ) {
           glmResumeCount++
           console.log(
             `[Agent] GLM end_turn truncation detected (last msg=user), auto-resuming (${glmResumeCount}/${MAX_GLM_RESUME})...`,
@@ -1501,12 +1508,18 @@ export class CloudbaseAgentService {
           const q2 = query(resumeArgs)
           currentQuery = q2
 
+          let resumeHadContent = false // 追踪本次 resume 是否产出了有意义的内容
           for await (const message of q2) {
             console.log('[Agent] [resume] message type:', message.type, JSON.stringify(message).slice(0, 300))
             try {
               appendFileSync(debugMsgLogPath, JSON.stringify({ ts: Date.now(), resumed: true, ...message }) + '\n')
             } catch {
               /* ignore */
+            }
+
+            // assistant / stream_event 表示模型产出了内容（非空 resume）
+            if (message.type === 'assistant' || message.type === 'stream_event') {
+              resumeHadContent = true
             }
 
             if (message.type === 'user') {
@@ -1567,6 +1580,16 @@ export class CloudbaseAgentService {
                 break
             }
             if (resultEmitted) break
+          }
+
+          // 检测本次 resume 是否为"dry"（无任何 assistant/stream_event 内容产出）
+          if (!resumeHadContent && !resultEmitted) {
+            consecutiveDryResumes++
+            console.log(
+              `[Agent] Resume ${glmResumeCount} was dry (no content), consecutiveDry=${consecutiveDryResumes}/${MAX_DRY_RESUMES}`,
+            )
+          } else {
+            consecutiveDryResumes = 0
           }
         }
 

@@ -6,7 +6,7 @@ settings:
 
 patchedDependencies:
   '@tencent-ai/agent-sdk@0.3.68':
-    hash: f9a98e0f922a91e7d8c3304bd7d233d8bb7038115ab3d3e8f05e8871697d98ca
+    hash: e2c43a6b293fa80d9c5ca5826bbb662e3fba19581d6ff330849ad27ee47f6558
     path: patches/@tencent-ai__agent-sdk@0.3.68.patch
 
 importers:
@@ -205,7 +205,7 @@ importers:
         version: 22.0.1
       '@tencent-ai/agent-sdk':
         specifier: 0.3.68
-        version: 0.3.68(patch_hash=f9a98e0f922a91e7d8c3304bd7d233d8bb7038115ab3d3e8f05e8871697d98ca)(zod@4.3.6)
+        version: 0.3.68(patch_hash=e2c43a6b293fa80d9c5ca5826bbb662e3fba19581d6ff330849ad27ee47f6558)(zod@4.3.6)
       bcryptjs:
         specifier: ^3.0.3
         version: 3.0.3
@@ -8004,7 +8004,7 @@ snapshots:
 
   '@tanstack/virtual-core@3.13.23': {}
 
-  '@tencent-ai/agent-sdk@0.3.68(patch_hash=f9a98e0f922a91e7d8c3304bd7d233d8bb7038115ab3d3e8f05e8871697d98ca)(zod@4.3.6)':
+  '@tencent-ai/agent-sdk@0.3.68(patch_hash=e2c43a6b293fa80d9c5ca5826bbb662e3fba19581d6ff330849ad27ee47f6558)(zod@4.3.6)':
     dependencies:
       '@agentclientprotocol/sdk': 0.14.1(zod@4.3.6)
       '@modelcontextprotocol/sdk': 1.29.0(zod@4.3.6)
