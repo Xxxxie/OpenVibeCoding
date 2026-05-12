@@ -13,6 +13,7 @@ import { persistenceService } from '../agent/persistence.service'
 import { deleteConversationViaSandbox, scfSandboxManager, archiveToGit } from '../sandbox/index.js'
 import type { Octokit as OctokitType } from '@octokit/rest'
 import type { Task } from '../db/types.js'
+import { GitService } from '../services/git/git'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -358,6 +359,7 @@ tasksRouter.post('/', async (c) => {
     prStatus: null,
     prMergeCommitSha: null,
     mcpServerIds: null,
+    personalGitInfo: null,
     createdAt: now,
     updatedAt: now,
   })
@@ -2992,6 +2994,59 @@ tasksRouter.get('/:taskId/files/download', requireUserEnv, async (c) => {
     console.error('[files/download] error:', err)
     return c.json({ error: 'Download failed' }, 500)
   }
+})
+
+// ---------------------------------------------------------------------------
+// POST /:taskId/git/associate - Associate a Git repository with a task
+// ---------------------------------------------------------------------------
+tasksRouter.post('/:taskId/git/associate', async (c) => {
+  const authErr = requireAuth(c)
+  if (authErr) return authErr
+  const session = c.get('session')!
+  const { taskId } = c.req.param()
+  const body = await c.req.json()
+  const { repoUrl, branchName } = body
+
+  const task = await findActiveTask(taskId, session.user.id)
+  if (!task) return c.json({ success: false, error: 'Task not found' }, 404)
+
+  // const parsed = parseGitUrl(repoUrl)
+  // if (!parsed) return c.json({ success: false, error: 'Invalid repoUrl' }, 400)
+
+  try {
+    const gitService = new GitService({ repoUrl, branch: branchName })
+    await gitService.createOrGetRepo()
+  } catch (error) {
+    console.error('Failed to create or get repo:', error)
+    return c.json({ success: false, error: 'Failed to create or get repository' }, 500)
+  }
+
+  await getDb().tasks.update(taskId, {
+    personalGitInfo: JSON.stringify({ repoUrl, branchName }),
+    updatedAt: Date.now(),
+  })
+
+  return c.json({ success: true, message: 'Repository associated successfully' })
+})
+
+// ---------------------------------------------------------------------------
+// POST /:taskId/git/disassociate - Disassociate a Git repository from a task
+// ---------------------------------------------------------------------------
+tasksRouter.post('/:taskId/git/disassociate', async (c) => {
+  const authErr = requireAuth(c)
+  if (authErr) return authErr
+  const session = c.get('session')!
+  const { taskId } = c.req.param()
+
+  const task = await findActiveTask(taskId, session.user.id)
+  if (!task) return c.json({ success: false, error: 'Task not found' }, 404)
+
+  await getDb().tasks.update(taskId, {
+    personalGitInfo: null,
+    updatedAt: Date.now(),
+  })
+
+  return c.json({ success: true, message: 'Repository disassociated successfully' })
 })
 
 export default tasksRouter

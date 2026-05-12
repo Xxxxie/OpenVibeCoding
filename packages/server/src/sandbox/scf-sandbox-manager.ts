@@ -470,7 +470,7 @@ export class ScfSandboxManager {
           },
         },
         Environment: {
-          Variables: this.buildGitArchiveVars(),
+          Variables: [...this.buildGitArchiveVars(), ...this.buildGitPersonalVars()],
         },
         Description: 'SCF Sandbox for conversation (Image-based)',
       }
@@ -662,6 +662,12 @@ export class ScfSandboxManager {
       { Key: 'GIT_ARCHIVE_TOKEN', Value: token },
       { Key: 'GIT_ARCHIVE_USER', Value: user || '' },
     ]
+  }
+
+  private buildGitPersonalVars(): { Key: string; Value: string }[] {
+    const auth = process.env.GIT_PERSONAL_AUTH
+
+    return [{ Key: 'GIT_PERSONAL_AUTH', Value: auth || '' }]
   }
 
   private async deleteFunction(functionName: string): Promise<void> {

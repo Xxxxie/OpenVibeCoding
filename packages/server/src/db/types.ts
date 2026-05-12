@@ -64,6 +64,7 @@ export interface Task {
   updatedAt: number
   completedAt: number | null
   deletedAt: number | null
+  personalGitInfo: string | null
 }
 
 export interface Connector {

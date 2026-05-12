@@ -30,6 +30,7 @@ import {
 } from './agent-registry.js'
 import { EventBuffer } from './event-buffer.js'
 import { sessionPermissions, normalizeToolName } from './session-permissions.js'
+import { initRepo, pushToUserGit } from '../sandbox/git-personal'
 
 // ─── Constants ────────────────────────────────────────────────────────────
 
@@ -730,6 +731,15 @@ export class CloudbaseAgentService {
             detectedSandboxCwd = initResult.workspace
             wrappedCallback({ type: 'session', sandboxCwd: initResult.workspace } as any)
             console.log(`[Agent] Sandbox workspace initialized, cwd: ${initResult.workspace}`)
+          }
+
+          try {
+            const { success } = await initRepo(sandboxInstance, conversationId)
+            if (success) {
+              console.log(`[Agent] Sandbox user repo initialized`)
+            }
+          } catch (e) {
+            console.log(`[Agent] Sandbox initialized user repo err: ${e}`)
           }
 
           // Create sandbox MCP client，使用【登录用户凭证】操作 CloudBase 资源
@@ -1679,6 +1689,12 @@ export class CloudbaseAgentService {
 
       // Archive to git if sandbox was used
       if (sandboxInstance) {
+        try {
+          await pushToUserGit(sandboxInstance, conversationId, conversationId, prompt)
+        } catch (err) {
+          console.error('[Agent] Push to user git failed:', (err as Error).message)
+        }
+
         try {
           await archiveToGit(sandboxInstance, conversationId, prompt)
         } catch (err) {

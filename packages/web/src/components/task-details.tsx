@@ -93,6 +93,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from '@/components/ui/drawer'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import { useNavigate } from 'react-router'
 import { Link } from 'react-router'
 import BrowserbaseIcon from '@/components/icons/browserbase-icon'
@@ -270,6 +279,13 @@ export function TaskDetails({
   const [showTryAgainDialog, setShowTryAgainDialog] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
   const [isTryingAgain, setIsTryingAgain] = useState(false)
+  const [showLinkRepoDialog, setShowLinkRepoDialog] = useState(false)
+  const [linkRepoUrl, setLinkRepoUrl] = useState('')
+  const [linkBranchName, setLinkBranchName] = useState('')
+  const [isLinkingRepo, setIsLinkingRepo] = useState(false)
+  const [showUnlinkRepoDialog, setShowUnlinkRepoDialog] = useState(false)
+  const [isUnlinkingRepo, setIsUnlinkingRepo] = useState(false)
+  const [personalGitInfo, setPersonalGitInfo] = useState<{ repoUrl: string; branchName: string } | null>(null)
   const [selectedAgent, setSelectedAgent] = useState(task.selectedAgent || 'claude')
   const [selectedModel, setSelectedModel] = useState<string>(
     task.selectedModel || DEFAULT_MODELS[(task.selectedAgent as keyof typeof DEFAULT_MODELS) || 'claude'],
@@ -573,6 +589,24 @@ export function TaskDetails({
   )
   const healthyCountRef = useRef<number>(0)
   const lastHealthStatusRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    const loadPersonalGitInfo = async () => {
+      try {
+        const res = await fetch(`/api/tasks/${task.id}`)
+        const data = await res.json()
+        if (data.task?.personalGitInfo) {
+          const info = JSON.parse(data.task.personalGitInfo)
+          setPersonalGitInfo({ repoUrl: info.repoUrl || '', branchName: info.branchName || '' })
+        } else {
+          setPersonalGitInfo(null)
+        }
+      } catch {
+        setPersonalGitInfo(null)
+      }
+    }
+    loadPersonalGitInfo()
+  }, [task.id])
 
   // Initialize model correctly on mount and when agent changes in Try Again dialog
   useEffect(() => {
@@ -1659,6 +1693,59 @@ export function TaskDetails({
     }
   }
 
+  const handleLinkRepo = useCallback(async () => {
+    if (!linkRepoUrl.trim() || !linkBranchName.trim()) {
+      toast.error('Please enter repository URL and branch name')
+      return
+    }
+    setIsLinkingRepo(true)
+    try {
+      const response = await fetch(`/api/tasks/${task.id}/git/associate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repoUrl: linkRepoUrl.trim(), branchName: linkBranchName.trim() }),
+      })
+      const result = await response.json()
+      if (!response.ok || !result.success) throw new Error(result.error || 'Failed to link repository')
+
+      toast.success('Repository linked successfully')
+      setShowLinkRepoDialog(false)
+      setLinkRepoUrl('')
+      setLinkBranchName('')
+      setPersonalGitInfo({ repoUrl: linkRepoUrl.trim(), branchName: linkBranchName.trim() })
+      setRefreshKey((prev) => prev + 1)
+      refreshTasks()
+    } catch (err) {
+      console.error('Error linking repository:', err)
+      toast.error('Failed to link repository')
+    } finally {
+      setIsLinkingRepo(false)
+    }
+  }, [linkRepoUrl, linkBranchName, task.id, refreshTasks])
+
+  const handleUnlinkRepo = useCallback(async () => {
+    setIsUnlinkingRepo(true)
+    try {
+      const response = await fetch(`/api/tasks/${task.id}/git/disassociate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      const result = await response.json()
+      if (!response.ok || !result.success) throw new Error(result.error || 'Failed to unlink repository')
+
+      toast.success('Repository unlinked successfully')
+      setShowUnlinkRepoDialog(false)
+      setPersonalGitInfo(null)
+      setRefreshKey((prev) => prev + 1)
+      refreshTasks()
+    } catch (err) {
+      console.error('Error unlinking repository:', err)
+      toast.error('Failed to unlink repository')
+    } finally {
+      setIsUnlinkingRepo(false)
+    }
+  }, [task.id, refreshTasks])
+
   const handleDelete = async () => {
     setIsDeleting(true)
     try {
@@ -1912,6 +1999,29 @@ export function TaskDetails({
               <DropdownMenuItem onClick={() => setShowTryAgainDialog(true)}>
                 <RotateCcw className="h-4 w-4 mr-2" />
                 Try Again
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={async () => {
+                  let defaultRepoUrl = task.repoUrl || ''
+                  let defaultBranchName = task.branchName || ''
+                  try {
+                    const res = await fetch(`/api/tasks/${task.id}`)
+                    const data = await res.json()
+                    if (data.task?.personalGitInfo) {
+                      const info = JSON.parse(data.task.personalGitInfo)
+                      defaultRepoUrl = info.repoUrl || ''
+                      defaultBranchName = info.branchName || ''
+                    }
+                  } catch {
+                    // ignore, fallback to props
+                  }
+                  setLinkRepoUrl(defaultRepoUrl)
+                  setLinkBranchName(defaultBranchName)
+                  setShowLinkRepoDialog(true)
+                }}
+              >
+                <GitBranch className="h-4 w-4 mr-2" />
+                Link Git Repository
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => setShowDeleteDialog(true)} className="text-red-600">
                 <Trash2 className="h-4 w-4 mr-2" />
@@ -3242,6 +3352,96 @@ export function TaskDetails({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Link Git Repository Dialog */}
+      <Dialog open={showLinkRepoDialog} onOpenChange={setShowLinkRepoDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Link Git Repository</DialogTitle>
+            <DialogDescription>Enter the repository URL and branch name to associate with this task.</DialogDescription>
+          </DialogHeader>
+          <div className="py-4 space-y-4">
+            <div>
+              <Label htmlFor="link-repo-url">Repository URL</Label>
+              <Input
+                id="link-repo-url"
+                value={linkRepoUrl}
+                onChange={(e) => setLinkRepoUrl(e.target.value)}
+                placeholder="https://github.com/owner/repo.git"
+                className="mt-2"
+                autoFocus
+              />
+            </div>
+            <div>
+              <Label htmlFor="link-branch-name">Branch Name</Label>
+              <Input
+                id="link-branch-name"
+                value={linkBranchName}
+                onChange={(e) => setLinkBranchName(e.target.value)}
+                placeholder="main"
+                className="mt-2"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault()
+                    handleLinkRepo()
+                  }
+                }}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="destructive"
+              disabled={!personalGitInfo || isLinkingRepo}
+              onClick={() => {
+                setShowLinkRepoDialog(false)
+                setLinkRepoUrl('')
+                setLinkBranchName('')
+                setShowUnlinkRepoDialog(true)
+              }}
+            >
+              Unlink Repository
+            </Button>
+            <Button onClick={handleLinkRepo} disabled={isLinkingRepo || !linkRepoUrl.trim() || !linkBranchName.trim()}>
+              {isLinkingRepo ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Linking...
+                </>
+              ) : (
+                'Link Repository'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Unlink Git Repository Dialog */}
+      <Dialog open={showUnlinkRepoDialog} onOpenChange={setShowUnlinkRepoDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Unlink Git Repository</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to unlink the associated Git repository from this task?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowUnlinkRepoDialog(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleUnlinkRepo} disabled={isUnlinkingRepo} variant="destructive">
+              {isUnlinkingRepo ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Unlinking...
+                </>
+              ) : (
+                'Unlink Repository'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Delete Dialog */}
       <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>

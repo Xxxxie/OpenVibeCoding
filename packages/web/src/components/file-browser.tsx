@@ -139,7 +139,6 @@ export function FileBrowser({
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false)
   const [fileToDiscard, setFileToDiscard] = useState<string | null>(null)
   const [isDiscarding, setIsDiscarding] = useState(false)
-
   // Detect OS for keyboard shortcuts
   const isMac = useMemo(() => {
     if (typeof window === 'undefined') return false
