@@ -2,6 +2,13 @@ import type { AgentRunStatus } from '@coder/shared'
 
 // ─── Types ─────────────────────────────────────────────────────────────
 
+/**
+ * ACP 协议定义的 stopReason 合法值。
+ * 见 @agentclientprotocol/sdk 的 StopReason schema。
+ * 这里不引入 ACP SDK 的类型依赖，直接用字面量联合足以。
+ */
+export type StopReason = 'end_turn' | 'max_tokens' | 'max_turn_requests' | 'refusal' | 'cancelled'
+
 export interface AgentRun {
   conversationId: string
   turnId: string
@@ -12,6 +19,11 @@ export interface AgentRun {
   startTime: number
   lastSeq: number
   error?: string
+  /**
+   * 真实终止原因。runtime 在 completeAgent 时透传，routes/acp.ts 终结报文优先使用此值；
+   * 若 undefined 则 acp.ts 会根据 status 派生（cancelled→cancelled、error→refusal、else→end_turn）。
+   */
+  stopReason?: StopReason
 }
 
 // ─── Registry ──────────────────────────────────────────────────────────
@@ -37,11 +49,13 @@ export function completeAgent(
   conversationId: string,
   status: 'completed' | 'error' | 'cancelled',
   error?: string,
+  stopReason?: StopReason,
 ): void {
   const run = runningAgents.get(conversationId)
   if (run) {
     run.status = status
     if (error) run.error = error
+    if (stopReason) run.stopReason = stopReason
   }
 }
 

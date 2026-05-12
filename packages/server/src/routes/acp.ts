@@ -15,7 +15,7 @@ import {
 } from '@coder/shared'
 import { CloudbaseAgentService, getSupportedModels } from '../agent/cloudbase-agent.service.js'
 import { persistenceService } from '../agent/persistence.service.js'
-import { getAgentRun } from '../agent/agent-registry.js'
+import { getAgentRun, type StopReason } from '../agent/agent-registry.js'
 import { agentRuntimeRegistry } from '../agent/runtime/index.js'
 import { emitForConversation, getAskUserToken } from '../agent/runtime/opencode-acp-runtime.js'
 import { registerPendingQuestion } from '../agent/runtime/pending-question-registry.js'
@@ -64,6 +64,24 @@ function rpcErr(id: number | string | null, code: number, message: string): Json
     id: id ?? null,
     error: { code, message },
   }
+}
+
+/**
+ * 终结 SSE 报文时推导 ACP stopReason。
+ *
+ * 优先级：
+ *   1. runtime 通过 completeAgent 显式传入的 run.stopReason（最准确）
+ *   2. status='cancelled' → 'cancelled'
+ *   3. status='error'    → 'refusal'（ACP 协议没有 'error' 字面量，用 refusal
+ *                          对齐 CodeBuddy SDK 自己的 ACP server 行为；错误文本
+ *                          通过 agent_message_chunk ⚠️ 单独投递）
+ *   4. else              → 'end_turn'
+ */
+function resolveStopReason(run: { status?: string; stopReason?: StopReason } | undefined): StopReason {
+  if (run?.stopReason) return run.stopReason
+  if (run?.status === 'cancelled') return 'cancelled'
+  if (run?.status === 'error') return 'refusal'
+  return 'end_turn'
 }
 
 // ─── Health Check ──────────────────────────────────────────────────────────
@@ -549,7 +567,7 @@ async function observeStream(
     // 3. Send final response + [DONE]
     if (rpcId !== null) {
       const run = getAgentRun(sessionId)
-      const stopReason = run?.status === 'error' ? 'error' : 'end_turn'
+      const stopReason = resolveStopReason(run)
       await stream.writeSSE({ data: JSON.stringify(rpcOk(rpcId, { stopReason })) })
     }
     await stream.writeSSE({ data: '[DONE]' })
@@ -702,7 +720,7 @@ async function observeStreamWithLiveCallback(
     // ── Send final response + [DONE] ─────────────────────────
     if (rpcId !== null) {
       const run = getAgentRun(sessionId)
-      const stopReason = run?.status === 'error' ? 'error' : 'end_turn'
+      const stopReason = resolveStopReason(run)
 
       // 如果 agent 出错，先推一条 error 事件让前端知道原因
       if (run?.status === 'error' && run.error) {
@@ -766,6 +784,7 @@ async function handleSessionCancel(
     if (run && run.status === 'running') {
       run.abortController.abort()
       run.status = 'cancelled'
+      run.stopReason = 'cancelled'
     }
 
     if (envId) {

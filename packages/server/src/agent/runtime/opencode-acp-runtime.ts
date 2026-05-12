@@ -34,6 +34,7 @@ import {
   completeAgent,
   removeAgent,
   getNextSeq,
+  type StopReason,
 } from '../agent-registry.js'
 import { persistenceService } from '../persistence.service.js'
 import { CloudbaseAgentService } from '../cloudbase-agent.service.js'
@@ -547,7 +548,7 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
         }),
       })
 
-      completeAgent(conversationId, 'completed')
+      completeAgent(conversationId, 'completed', undefined, promptRes.stopReason as StopReason)
       finalRecordStatus = 'done'
     } catch (error: any) {
       const isAbort = abortController.signal.aborted || error?.name === 'AbortError'
@@ -574,7 +575,13 @@ export class OpencodeAcpRuntime extends BaseAgentRuntime {
       } catch {
         /* noop */
       }
-      completeAgent(conversationId, isAbort ? 'cancelled' : 'error', String(error?.message || error))
+      // OpenCode 抛错没法拿到模型自己的 stopReason：isAbort → cancelled，其它 → refusal（ACP 合法值）
+      completeAgent(
+        conversationId,
+        isAbort ? 'cancelled' : 'error',
+        String(error?.message || error),
+        isAbort ? 'cancelled' : 'refusal',
+      )
       finalRecordStatus = isAbort ? 'cancel' : 'error'
     } finally {
       if (transport) {

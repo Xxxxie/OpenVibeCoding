@@ -20,7 +20,14 @@ import { resolveSandboxConfig, backfillSandboxConfig } from '../lib/sandbox-conf
 import { decrypt } from '../lib/crypto.js'
 import { encryptJWE } from '../lib/session.js'
 import type { AgentCallbackMessage, AgentOptions, CodeBuddyMessage, ExtendedSessionUpdate } from '@coder/shared'
-import { registerAgent, getAgentRun, completeAgent, removeAgent, isAgentRunning } from './agent-registry.js'
+import {
+  registerAgent,
+  getAgentRun,
+  completeAgent,
+  removeAgent,
+  isAgentRunning,
+  type StopReason,
+} from './agent-registry.js'
 import { EventBuffer } from './event-buffer.js'
 import { sessionPermissions, normalizeToolName } from './session-permissions.js'
 
@@ -30,6 +37,36 @@ const DEFAULT_MODEL = 'glm-5.1'
 const OAUTH_TOKEN_ENDPOINT = 'https://copilot.tencent.com/oauth2/token'
 const CONNECT_TIMEOUT_MS = 60_000
 const ITERATION_TIMEOUT_MS = 2 * 60 * 1000
+
+/**
+ * 把 CodeBuddy SDK 的 result subtype + stream stop_reason 映射成 ACP stopReason。
+ *
+ * SDK result subtype 可能值（来自 @tencent-ai/agent-sdk lib/types.d.ts）：
+ *   'success' | 'error_during_execution' | 'error_max_turns' | 'error_max_budget_usd'
+ *
+ * SDK stream MessageDeltaEvent.delta.stop_reason 可能值：
+ *   'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' | 'pause_turn' | 'refusal'
+ *
+ * ACP 合法值（本仓库 registry.StopReason）：
+ *   'end_turn' | 'max_tokens' | 'max_turn_requests' | 'refusal' | 'cancelled'
+ */
+function mapCodebuddyStopReason(resultSubtype: string | undefined, streamStopReason: string | undefined): StopReason {
+  if (resultSubtype === 'error_max_turns') return 'max_turn_requests'
+  if (resultSubtype === 'error_max_budget_usd') return 'refusal'
+  if (streamStopReason === 'max_tokens') return 'max_tokens'
+  if (streamStopReason === 'refusal') return 'refusal'
+  return 'end_turn'
+}
+
+/**
+ * 把 ExecutionError.subtype（CLI 返回 result 时塞的 subtype）映射成 ACP stopReason。
+ * 'error_max_turns' → max_turn_requests；其它情况（error_during_execution / error_max_budget_usd）
+ * 统一映射为 refusal（ACP 没有 'error' 字面量）。
+ */
+function mapExecutionErrorStopReason(subtype: string | undefined): StopReason {
+  if (subtype === 'error_max_turns') return 'max_turn_requests'
+  return 'refusal'
+}
 
 // ─── Supported Models Cache ───────────────────────────────────────────────
 
@@ -979,6 +1016,10 @@ export class CloudbaseAgentService {
     // 让 finally 块据此把 task.status / agent run.status 标为 'error'，
     // 进而让 routes/acp.ts 的 SSE 终结报文使用 stopReason='error' + ⚠️ 提示。
     let runtimeError: Error | undefined
+    // 记录 runtime 计算出的真实 ACP stopReason（优先级高于 status 派生）
+    let runtimeStopReason: StopReason | undefined
+    // 流式阶段观察到的最近一次非中间态 stop_reason（end_turn/max_tokens/refusal/stop_sequence）
+    let lastStreamStopReason: string | undefined
     try {
       const sessionOpts: Record<string, unknown> = hasHistory
         ? { resume: conversationId, sessionId: conversationId }
@@ -1387,7 +1428,15 @@ export class CloudbaseAgentService {
             case 'stream_event': {
               // P7: SDKPartialAssistantMessage 顶层 parent_tool_use_id 透传到子工具链路
               const parentId = (message as any).parent_tool_use_id ?? null
-              this.handleStreamEvent((message as any).event, tracker, wrappedCallback, parentId)
+              const event = (message as any).event
+              // 捕获本轮模型 stop_reason 作为 ACP stopReason 的参考（最终以 result.subtype 为主）
+              if (event?.type === 'message_delta') {
+                const sr = event?.delta?.stop_reason
+                if (sr && sr !== 'tool_use' && sr !== 'pause_turn') {
+                  lastStreamStopReason = sr
+                }
+              }
+              this.handleStreamEvent(event, tracker, wrappedCallback, parentId)
               break
             }
             case 'user': {
@@ -1404,18 +1453,21 @@ export class CloudbaseAgentService {
               this.handleAssistantToolUseInputs(message, tracker, wrappedCallback, parentId)
               break
             }
-            case 'result':
+            case 'result': {
               // P4: agent 本轮执行完毕
               resultEmitted = true
               emitPhase('idle')
+              const resultSubtype = (message as any).subtype as string | undefined
+              runtimeStopReason = mapCodebuddyStopReason(resultSubtype, lastStreamStopReason)
               wrappedCallback({
                 type: 'result',
                 content: JSON.stringify({
-                  subtype: (message as any).subtype,
+                  subtype: resultSubtype,
                   duration_ms: (message as any).duration_ms,
                 }),
               })
               break messageLoop
+            }
             default:
               break
           }
@@ -1451,16 +1503,20 @@ export class CloudbaseAgentService {
           }
           console.error('[Agent] CLI process exited unexpectedly')
           runtimeError = err
+          runtimeStopReason = 'refusal'
           wrappedCallback({ type: 'error', content: 'Agent CLI 子进程异常退出' })
           return
         }
 
         // 真实运行错误（如 SDK 反序列化失败、模型返回异常等）：
         // 1) 通过 wrappedCallback 实时发一条 type:'error' → SSE log/agent_message_chunk
-        // 2) 记录 runtimeError，让 finally 块把 task/run 标为 'error'，
-        //    routes/acp.ts 终结时会发 stopReason:'error' + ⚠️ 提示
+        // 2) 记录 runtimeError + runtimeStopReason，让 finally 块把 task/run 标为 'error'
+        //    + 让 routes/acp.ts 终结时按 ACP 合法值发 stopReason（error_max_turns →
+        //    max_turn_requests，其它 → refusal），并发 ⚠️ 提示
         if (err instanceof ExecutionError) {
           const message = err.errors?.[0] || err.message || 'Agent 执行失败'
+          const subtype = (err as { subtype?: string }).subtype
+          runtimeStopReason = mapExecutionErrorStopReason(subtype)
           wrappedCallback({ type: 'error', content: message })
           runtimeError = err
           return
@@ -1591,12 +1647,19 @@ export class CloudbaseAgentService {
       // Update agent registry — 让 routes/acp.ts 终结报文据此选 stopReason
       // run.error 用 runtimeError.message 优先（用户可见的错误根因），
       // 没有就退回 syncError.message
+      // run.stopReason 由 runtime 在 message loop 中根据 result.subtype / stream stop_reason /
+      // ExecutionError.subtype 推导（见 mapCodebuddyStopReason / mapExecutionErrorStopReason）
       const agentRunStatus: 'completed' | 'error' | 'cancelled' = wasCancelled
         ? 'cancelled'
         : runtimeError || syncError
           ? 'error'
           : 'completed'
-      completeAgent(conversationId, agentRunStatus, runtimeError?.message ?? syncError?.message)
+      const agentStopReason: StopReason | undefined = wasCancelled
+        ? 'cancelled'
+        : syncError && !runtimeStopReason
+          ? 'refusal' // sync 层异常按 refusal 上报（ACP 合法值）
+          : runtimeStopReason
+      completeAgent(conversationId, agentRunStatus, runtimeError?.message ?? syncError?.message, agentStopReason)
 
       // Cleanup stream events NOW — after completeAgent() so the poll loop sees
       // isDone=true and drains remaining events before we remove them from DB.
