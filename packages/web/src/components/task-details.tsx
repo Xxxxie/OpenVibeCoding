@@ -71,6 +71,7 @@ import { TaskChat } from '@/components/task-chat'
 import { BrowserControls } from '@/components/chat/browser-controls'
 import { PreviewPlaceholder } from '@/components/chat/preview-placeholder'
 import { useChatStream } from '@/hooks/use-chat-stream'
+import { useAutoFix } from '@/hooks/use-auto-fix'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -204,7 +205,50 @@ export function TaskDetails({
   const sessionEnvId = session?.envId || ''
 
   // ── Chat stream — hoisted here so it survives TaskChat remounts ──
-  const chatStream = useChatStream(task.id, { onStreamComplete })
+  // onStreamComplete 经包装：原回调先跑，然后异步探测 /__dev_errors，
+  // 如有错误且 auto-fix 余量够，自动发 prompt 修复。
+  // 因为 autoFix 依赖 chatStream 本身，用 ref 打破循环。
+  const autoFixRef = useRef<{
+    scheduleAutoFix: (err: { source: string; summary: string; detail?: string }) => void
+  } | null>(null)
+
+  const isCodingModeForAutoFix = task.mode === 'coding'
+
+  const wrappedOnStreamComplete = useCallback(() => {
+    onStreamComplete?.()
+    if (!isCodingModeForAutoFix) return // 异步探测，不阻塞 chatStream 其它动作
+    ;(async () => {
+      try {
+        const res = await fetch(`/api/tasks/${task.id}/preview-errors`, { credentials: 'include' })
+        if (!res.ok) return
+        const data = (await res.json()) as {
+          ok?: boolean
+          buildErrors?: Array<{ source?: string; message?: string; file?: string }>
+          runtimeErrors?: Array<{ source?: string; message?: string; stack?: string; componentStack?: string }>
+        }
+        const buildErrs = data.buildErrors ?? []
+        const runtimeErrs = data.runtimeErrors ?? []
+        if (buildErrs.length === 0 && runtimeErrs.length === 0) return
+        const summary = [
+          ...buildErrs.map((e) => `[build:${e.source || 'vite'}] ${e.file ? e.file + ': ' : ''}${e.message || ''}`),
+          ...runtimeErrs.map((e) => `[runtime:${e.source || 'unknown'}] ${e.message || ''}`),
+        ].join('\n---\n')
+        const detail = runtimeErrs
+          .map((e) => [e.stack, e.componentStack].filter(Boolean).join('\n'))
+          .filter(Boolean)
+          .join('\n---\n')
+        autoFixRef.current?.scheduleAutoFix({
+          source: 'preview-errors-probe',
+          summary,
+          detail: detail || undefined,
+        })
+      } catch {
+        /* 静默 */
+      }
+    })()
+  }, [onStreamComplete, isCodingModeForAutoFix, task.id])
+
+  const chatStream = useChatStream(task.id, { onStreamComplete: wrappedOnStreamComplete })
 
   // Handle initial prompt (once) at this level
   const initialTriggered = useRef(false)
@@ -283,6 +327,49 @@ export function TaskDetails({
   const [checkingErrors, setCheckingErrors] = useState(false)
   const previewIframeRef = useRef<HTMLIFrameElement | null>(null)
   const previewAbortRef = useRef<AbortController | null>(null)
+
+  // ── 预览错误自动修复 ────────────────────────────────────────────
+  // 两个触发源：
+  //   1. iframe 预览内 postMessage({type:'preview-error', ...})
+  //   2. 每轮对话完成后探测 /api/tasks/:id/preview-errors（见 wrappedOnStreamComplete）
+  // 单 task 最多自动修复 3 次，taskId 切换 / 用户手动发 prompt 重置计数。
+  const autoFix = useAutoFix(task.id, { chatStream })
+  useEffect(() => {
+    autoFixRef.current = { scheduleAutoFix: autoFix.scheduleAutoFix }
+  }, [autoFix.scheduleAutoFix])
+
+  // iframe postMessage 监听
+  useEffect(() => {
+    if (!previewGatewayUrl) return
+    let iframeOrigin: string | null = null
+    try {
+      iframeOrigin = new URL(previewGatewayUrl).origin
+    } catch {
+      iframeOrigin = null
+    }
+    const onMessage = (e: MessageEvent) => {
+      if (!e.data || typeof e.data !== 'object') return
+      if ((e.data as { type?: string }).type !== 'preview-error') return
+      // origin 校验：只接受来自 iframe 的消息（防止任意页面伪造）
+      if (iframeOrigin && e.origin !== iframeOrigin) return
+
+      const payload = e.data as {
+        source?: string
+        message?: string
+        stack?: string
+        componentStack?: string
+      }
+      const message = payload.message || '(no message)'
+      const source = payload.source || 'unknown'
+      autoFix.scheduleAutoFix({
+        source: `iframe:${source}`,
+        summary: `[${source}] ${message}`,
+        detail: [payload.stack, payload.componentStack].filter(Boolean).join('\n') || undefined,
+      })
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [previewGatewayUrl, autoFix])
 
   /**
    * 调后端 SSE 流，实时推送进度。
@@ -2255,12 +2342,50 @@ export function TaskDetails({
                           setCheckingErrors(true)
                           try {
                             const res = await fetch(`/api/tasks/${task.id}/preview-errors`)
-                            const data = await res.json()
-                            if (data.hasErrors && data.errors) {
-                              await chatStream.sendMessage(`预览页面有错误，请修复：\n\n${data.errors}`, () => {})
-                            } else {
-                              toast.success('No errors found')
+                            if (!res.ok) {
+                              toast.error('Failed to check errors')
+                              return
                             }
+                            const data = (await res.json()) as {
+                              ok?: boolean
+                              buildErrors?: Array<{
+                                source?: string
+                                file?: string
+                                message?: string
+                                stack?: string
+                              }>
+                              runtimeErrors?: Array<{
+                                source?: string
+                                message?: string
+                                stack?: string
+                                componentStack?: string
+                              }>
+                            }
+                            const buildErrs = data.buildErrors ?? []
+                            const runtimeErrs = data.runtimeErrors ?? []
+                            if (buildErrs.length === 0 && runtimeErrs.length === 0) {
+                              toast.success('No errors found')
+                              return
+                            }
+                            const summary = [
+                              ...buildErrs.map(
+                                (e) => `[build:${e.source || 'vite'}] ${e.file ? e.file + ': ' : ''}${e.message || ''}`,
+                              ),
+                              ...runtimeErrs.map((e) => `[runtime:${e.source || 'unknown'}] ${e.message || ''}`),
+                            ].join('\n---\n')
+                            const detail = runtimeErrs
+                              .map((e) => [e.stack, e.componentStack].filter(Boolean).join('\n'))
+                              .filter(Boolean)
+                              .join('\n---\n')
+                            const prompt = [
+                              '预览页面有错误，请修复：',
+                              '',
+                              summary,
+                              ...(detail ? ['', detail] : []),
+                            ].join('\n')
+                            // 手动点击视为用户发起，重置 auto-fix 计数
+                            autoFix.notifyUserSend()
+                            await chatStream.sendMessage(prompt, () => {})
                           } catch {
                             toast.error('Failed to check errors')
                           } finally {
@@ -2576,6 +2701,7 @@ export function TaskDetails({
                   task={task}
                   chatStream={chatStream}
                   onStreamComplete={onStreamComplete}
+                  onManualUserSend={autoFix.notifyUserSend}
                 />
               </div>
             )}
@@ -2636,6 +2762,7 @@ export function TaskDetails({
                   task={task}
                   chatStream={chatStream}
                   onStreamComplete={onStreamComplete}
+                  onManualUserSend={autoFix.notifyUserSend}
                 />
               </div>
 
@@ -2983,6 +3110,7 @@ export function TaskDetails({
               task={task}
               chatStream={chatStream}
               onStreamComplete={onStreamComplete}
+              onManualUserSend={autoFix.notifyUserSend}
             />
           </div>
         </div>

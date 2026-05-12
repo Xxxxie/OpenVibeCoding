@@ -78,6 +78,11 @@ export interface TaskChatProps {
   readOnly?: boolean
   /** 消息 API 基础路径，默认 ''。管理员查看时设为 '/api/admin' */
   messagesApiBase?: string
+  /**
+   * 用户手动点"发送"时触发（不包括自动修复之类的编程化发送）。
+   * 由父层 TaskDetails 用来重置 useAutoFix 的自动修复计数。
+   */
+  onManualUserSend?: () => void
 }
 
 // ─── Tab Data Types ───────────────────────────────────────────────────

@@ -63,6 +63,7 @@ export function TaskChat({
   chatStream: externalChatStream,
   readOnly = false,
   messagesApiBase = '',
+  onManualUserSend,
 }: TaskChatProps) {
   // ─── Local UI state ───────────────────────────────────────────────
 
@@ -417,6 +418,8 @@ export function TaskChat({
     const images = pendingImages.map(({ data, mimeType }) => ({ data, mimeType }))
     setNewMessage('')
     setPendingImages([])
+    // 通知上层这是用户手动发送（用于重置自动修复计数等）
+    onManualUserSend?.()
     await chatSendMessage(text, (draft) => setNewMessage(draft), images.length > 0 ? images : undefined)
     await fetchMessages(false)
   }

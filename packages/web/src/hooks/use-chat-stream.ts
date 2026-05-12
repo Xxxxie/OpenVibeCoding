@@ -272,12 +272,20 @@ export function useChatStream(taskId: string, options: UseChatStreamOptions = {}
     [enterStreaming, exitStreaming, planMode.active, runPromptStream, taskId],
   )
 
-  /** Send a follow-up message in an existing conversation. */
+  /**
+   * Send a follow-up message in an existing conversation.
+   *
+   * opts.isAutoFix —— 自动修复触发的发送（如预览错误自动修复）。
+   * 当前 hook 不根据此 flag 改变行为，仅供外部 wrapper 判断是否为"用户手动发送"
+   * 以做计数重置等副作用。若日后想在 server 侧记录自动触发来源，可通过
+   * runPromptStream 透传。
+   */
   const sendMessage = useCallback(
     async (
       text: string,
       onRestoreDraft: (text: string) => void,
       imageBlocks?: Array<{ data: string; mimeType: string }>,
+      _opts?: { isAutoFix?: boolean },
     ) => {
       const userMsgId = `local-${Date.now()}`
       const userMsg: TaskMessage = {

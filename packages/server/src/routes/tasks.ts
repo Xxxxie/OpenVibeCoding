@@ -2811,8 +2811,11 @@ tasksRouter.get('/:taskId/preview-url', requireUserEnv, async (c) => {
 })
 
 // ---------------------------------------------------------------------------
-// GET /:taskId/preview-errors — 检查 Vite dev server 日志中的错误
-// 返回 { hasErrors, errors } 供前端将错误发送到聊天
+// GET /:taskId/preview-errors — 代理沙箱内 Vite dev server 的 /__dev_errors
+// 返回 { ok, buildErrors, runtimeErrors } 原样透传（来自 vite dev plugin）。
+// 前端在两处消费：
+//   1) task-details.tsx 手动"Fix errors"按钮
+//   2) use-auto-fix hook：每轮对话完成 / iframe postMessage 触发时探测
 // ---------------------------------------------------------------------------
 tasksRouter.get('/:taskId/preview-errors', requireUserEnv, async (c) => {
   const session = c.get('session')!
@@ -2821,38 +2824,78 @@ tasksRouter.get('/:taskId/preview-errors', requireUserEnv, async (c) => {
   const task = await findActiveTask(taskId, session.user.id)
   if (!task) return c.json({ error: 'Task not found' }, 404)
 
+  // 沙箱没启动：等价于"没有错误"（预览不存在就无从谈错）
   if (!task.sandboxId) {
-    return c.json({ hasErrors: false, errors: '' })
+    return c.json({ ok: true, buildErrors: [], runtimeErrors: [] })
   }
 
   try {
     const { envId } = c.get('userEnv')!
-    const sandbox = await getScfSandbox(task, envId)
-    if (!sandbox) {
-      return c.json({ hasErrors: false, errors: '' })
-    }
-
-    const logRes = await sandbox.request('/api/tools/bash', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        command:
-          'tail -50 /tmp/devserver.log 2>/dev/null | grep -iE "(error|✘|\\[ERROR\\]|failed|Transform failed|Cannot find|Module not found|SyntaxError|TypeError)" || echo ""',
-        timeout: 5000,
-      }),
-      signal: AbortSignal.timeout(10_000),
+    const taskMode = (task as any).mode as string | null | undefined
+    const isCodingMode = taskMode === 'coding'
+    const sandboxConfig = resolveSandboxConfig({
+      sandboxMode: task.sandboxMode,
+      sandboxSessionId: task.sandboxSessionId,
+      sandboxCwd: task.sandboxCwd,
+      envId,
+      taskId,
     })
 
-    const logData = (await logRes.json()) as { result?: { output?: string } }
-    const errorLines = logData.result?.output?.trim() || ''
-
-    if (errorLines) {
-      return c.json({ hasErrors: true, errors: errorLines })
+    const sandbox = await getScfSandbox(task, envId, {
+      sandboxMode: sandboxConfig.sandboxMode,
+      isCodingMode,
+    })
+    if (!sandbox) {
+      return c.json({ ok: true, buildErrors: [], runtimeErrors: [] })
     }
-    return c.json({ hasErrors: false, errors: '' })
+
+    // 1) 查 vitePort —— 没起 vite 等价于没错误
+    let vitePort: number | null = null
+    try {
+      const infoRes = await sandbox.request('/api/scope/info', {
+        signal: AbortSignal.timeout(4_000),
+      })
+      if (infoRes.ok) {
+        const info = (await infoRes.json()) as { success?: boolean; vitePort?: number | null }
+        if (info.success && info.vitePort) vitePort = info.vitePort
+      }
+    } catch {
+      // 超时 / scope/info 不可用 → 视为没 vite
+    }
+    if (!vitePort) {
+      return c.json({ ok: true, buildErrors: [], runtimeErrors: [] })
+    }
+
+    // 2) 构造公网 gateway URL（与 iframe 同路径），拉 __dev_errors
+    const sandboxEnvId = process.env.TCB_ENV_ID || ''
+    const previewBase = `https://${sandboxEnvId}.service.tcloudbase.com/preview`
+    const resolvedSessionId = sandboxConfig.sandboxSessionId
+    let devErrorsUrl = `${previewBase}/${vitePort}/__dev_errors?cloudbase_session_id=${resolvedSessionId}`
+    if (sandboxConfig.sandboxMode === 'shared') devErrorsUrl += `&scope_id=${taskId}`
+    if (isCodingMode) devErrorsUrl += `&scope_template=coding`
+
+    const res = await fetch(devErrorsUrl, { signal: AbortSignal.timeout(8_000) })
+    if (!res.ok) {
+      return c.json({ error: `dev server __dev_errors returned ${res.status}` }, 500 as const)
+    }
+    const data = (await res.json()) as {
+      ok?: boolean
+      buildErrors?: unknown[]
+      runtimeErrors?: unknown[]
+    }
+    return c.json({
+      ok:
+        data.ok ??
+        (Array.isArray(data.buildErrors) &&
+          data.buildErrors.length === 0 &&
+          Array.isArray(data.runtimeErrors) &&
+          data.runtimeErrors.length === 0),
+      buildErrors: Array.isArray(data.buildErrors) ? data.buildErrors : [],
+      runtimeErrors: Array.isArray(data.runtimeErrors) ? data.runtimeErrors : [],
+    })
   } catch (err) {
-    console.error('[preview-errors] Failed to check dev server log:', err)
-    return c.json({ hasErrors: false, errors: '' })
+    console.error('[preview-errors] Failed to fetch __dev_errors:', err)
+    return c.json({ error: (err as Error).message || 'internal error' }, 500)
   }
 })
 
