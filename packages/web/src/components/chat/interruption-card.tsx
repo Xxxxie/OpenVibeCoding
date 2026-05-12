@@ -19,6 +19,7 @@ import { extractPlanContent } from './plan-content'
 interface InterruptionCardProps {
   data: ToolConfirmData
   isSending: boolean
+  isStreaming?: boolean
   onDecision: (action: PermissionAction) => void
 }
 
@@ -43,14 +44,16 @@ function formatInput(input: unknown): string {
   return JSON.stringify(input, null, 2)
 }
 
-export function InterruptionCard({ data, isSending, onDecision }: InterruptionCardProps) {
+export function InterruptionCard({ data, isSending, isStreaming, onDecision }: InterruptionCardProps) {
   const isExitPlanMode = data.toolName === 'ExitPlanMode'
 
   // P2: ExitPlanMode 单独委托给 PlanModeCard 渲染，避免这里堆叠太多分支逻辑
   if (isExitPlanMode) {
     // 优先使用服务端注入的 planContent；否则从 input 各种常见字段中兜底提取
     const planContent = data.planContent ?? extractPlanContent(data.input)
-    return <PlanModeCard planContent={planContent} isSending={isSending} onDecision={onDecision} />
+    return (
+      <PlanModeCard planContent={planContent} isSending={isSending} isStreaming={isStreaming} onDecision={onDecision} />
+    )
   }
 
   return (

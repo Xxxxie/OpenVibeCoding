@@ -1,4 +1,4 @@
-import { Rocket, Loader2 } from 'lucide-react'
+import { Rocket, Loader2, CirclePause } from 'lucide-react'
 import type { PermissionAction } from '@coder/shared'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -20,16 +20,22 @@ import { MarkdownBlock } from './markdown-block'
 interface PlanModeCardProps {
   planContent: string
   isSending: boolean
+  isStreaming?: boolean
   onDecision: (action: PermissionAction) => void
 }
 
-export function PlanModeCard({ planContent, isSending, onDecision }: PlanModeCardProps) {
+export function PlanModeCard({ planContent, isSending, isStreaming = true, onDecision }: PlanModeCardProps) {
   const hasPlan = planContent && planContent.trim().length > 0
+  const terminated = !isStreaming && !isSending
   return (
     <Card className="p-3 border-primary/60 bg-primary/5">
       <div className="flex items-center gap-2 mb-2">
-        <Rocket className="h-4 w-4 text-primary" />
-        <span className="text-sm font-medium">准备开始编码</span>
+        {terminated ? (
+          <CirclePause className="h-4 w-4 text-yellow-500" />
+        ) : (
+          <Rocket className="h-4 w-4 text-primary" />
+        )}
+        <span className="text-sm font-medium">{terminated ? '生成已中断' : '准备开始编码'}</span>
       </div>
 
       <div className="space-y-2">

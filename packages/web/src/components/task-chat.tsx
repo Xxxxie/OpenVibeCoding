@@ -1170,6 +1170,7 @@ export function TaskChat({
                                         result={resultPart?.type === 'tool_result' ? resultPart.content : undefined}
                                         isError={resultPart?.type === 'tool_result' ? resultPart.isError : false}
                                         isPending={isPending}
+                                        isStreaming={isStreamingResponse}
                                       />
                                       {resolvedAskData &&
                                         !readOnly &&
@@ -1219,6 +1220,7 @@ export function TaskChat({
                                     <InterruptionCard
                                       data={toolConfirm}
                                       isSending={isSending}
+                                      isStreaming={isStreamingResponse}
                                       onDecision={handleConfirmTool}
                                     />
                                   </div>
@@ -1359,7 +1361,7 @@ export function TaskChat({
 
           <div ref={messagesEndRef} />
         </div>
-        <TaskListPanel messages={messages} />
+        <TaskListPanel messages={messages} isStreaming={isStreamingResponse} />
       </>
     )
   }

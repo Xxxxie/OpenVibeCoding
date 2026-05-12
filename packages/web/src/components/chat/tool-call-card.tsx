@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react'
-import { Loader2, CheckCircle, XCircle, ChevronDown, ChevronRight } from 'lucide-react'
+import { Loader2, CheckCircle, XCircle, ChevronDown, ChevronRight, CirclePause } from 'lucide-react'
 import { defaultRenderer, getToolRenderer } from './tool-renderers'
 
 /**
@@ -23,6 +23,7 @@ export function ToolCallCard({
   result,
   isError,
   isPending,
+  isStreaming = true,
 }: {
   toolName: string
   toolCallId?: string
@@ -30,6 +31,8 @@ export function ToolCallCard({
   result?: string
   isError?: boolean
   isPending: boolean
+  /** Whether the ACP SSE stream is still active. When false and isPending, shows a paused icon instead of spinner. */
+  isStreaming?: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
 
@@ -61,7 +64,11 @@ export function ToolCallCard({
         className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-muted/30 transition-colors"
       >
         {isPending ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-400 flex-shrink-0" />
+          isStreaming ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-400 flex-shrink-0" />
+          ) : (
+            <CirclePause className="h-3.5 w-3.5 text-yellow-500 flex-shrink-0" />
+          )
         ) : isError ? (
           <XCircle className="h-3.5 w-3.5 text-red-400 flex-shrink-0" />
         ) : (

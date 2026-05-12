@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { CheckCircle2, Circle, Loader2, ListTodo, ChevronDown, ChevronRight } from 'lucide-react'
+import { CheckCircle2, Circle, Loader2, ListTodo, ChevronDown, ChevronRight, CirclePause } from 'lucide-react'
 import type { TaskMessage, MessagePart } from '@/types/task-chat'
 
 // ---------------------------------------------------------------------------
@@ -127,12 +127,16 @@ export function deriveTasks(messages: TaskMessage[]): DerivedTask[] {
 // TaskStatusIcon
 // ---------------------------------------------------------------------------
 
-function TaskStatusIcon({ status }: { status: string }) {
+function TaskStatusIcon({ status, isStreaming }: { status: string; isStreaming: boolean }) {
   switch (status) {
     case 'completed':
       return <CheckCircle2 size={14} className="text-green-500 flex-shrink-0" />
     case 'in_progress':
-      return <Loader2 size={14} className="text-primary flex-shrink-0 animate-spin" />
+      return isStreaming ? (
+        <Loader2 size={14} className="text-primary flex-shrink-0 animate-spin" />
+      ) : (
+        <CirclePause size={14} className="text-yellow-500 flex-shrink-0" />
+      )
     default:
       return <Circle size={14} className="text-muted-foreground flex-shrink-0" />
   }
@@ -144,9 +148,10 @@ function TaskStatusIcon({ status }: { status: string }) {
 
 interface TaskListPanelProps {
   messages: TaskMessage[]
+  isStreaming?: boolean
 }
 
-export function TaskListPanel({ messages }: TaskListPanelProps) {
+export function TaskListPanel({ messages, isStreaming = true }: TaskListPanelProps) {
   const tasks = useMemo(() => deriveTasks(messages), [messages])
   const [isCollapsed, setIsCollapsed] = useState(false)
 
@@ -187,7 +192,7 @@ export function TaskListPanel({ messages }: TaskListPanelProps) {
           <div className="px-3 py-1.5 space-y-0.5 max-h-52 overflow-y-auto border-t border-border/30">
             {tasks.map((task, idx) => (
               <div key={task.id} className="flex items-center gap-2 py-0.5 text-xs">
-                <TaskStatusIcon status={task.status} />
+                <TaskStatusIcon status={task.status} isStreaming={isStreaming} />
                 <span className={`truncate ${task.status === 'completed' ? 'line-through text-muted-foreground' : ''}`}>
                   {idx + 1}. {task.status === 'in_progress' ? task.activeForm || task.subject : task.subject}
                 </span>

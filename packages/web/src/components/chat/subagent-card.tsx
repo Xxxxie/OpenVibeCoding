@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react'
-import { Bot, ChevronDown, ChevronRight, Loader2, CheckCircle, XCircle } from 'lucide-react'
+import { Bot, ChevronDown, ChevronRight, Loader2, CheckCircle, XCircle, CirclePause } from 'lucide-react'
 import type { MessagePart } from '@/types/task-chat'
 import { ToolCallCard } from './tool-call-card'
 
@@ -91,7 +91,11 @@ export function SubagentCard({ taskToolCall, taskToolResult, childParts, isStrea
       >
         {/* 左侧状态圆点 */}
         {isPending ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-purple-500 flex-shrink-0" />
+          isStreaming ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-purple-500 flex-shrink-0" />
+          ) : (
+            <CirclePause className="h-3.5 w-3.5 text-yellow-500 flex-shrink-0" />
+          )
         ) : isError ? (
           <XCircle className="h-3.5 w-3.5 text-red-500 flex-shrink-0" />
         ) : (
@@ -164,6 +168,7 @@ export function SubagentCard({ taskToolCall, taskToolResult, childParts, isStrea
                     result={result?.content}
                     isError={result?.isError}
                     isPending={!result}
+                    isStreaming={isStreaming}
                   />
                 )
               })}
