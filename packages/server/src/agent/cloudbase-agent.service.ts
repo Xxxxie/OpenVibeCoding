@@ -975,6 +975,10 @@ export class CloudbaseAgentService {
     }
 
     let currentQuery: any = null
+    // 记录 message loop 中捕获的真实运行错误（非 tool interrupt / 非用户 cancel），
+    // 让 finally 块据此把 task.status / agent run.status 标为 'error'，
+    // 进而让 routes/acp.ts 的 SSE 终结报文使用 stopReason='error' + ⚠️ 提示。
+    let runtimeError: Error | undefined
     try {
       const sessionOpts: Record<string, unknown> = hasHistory
         ? { resume: conversationId, sessionId: conversationId }
@@ -1428,15 +1432,40 @@ export class CloudbaseAgentService {
         }
       } catch (err) {
         console.error('[Agent] message loop error:', err)
-        if (err instanceof ExecutionError) {
-          console.log('[Agent] ExecutionError (interrupt), returning')
+
+        // 工具被 deny+interrupt 中断 → SDK 内部把 interrupt_result 转成
+        //   Error("Permission denied for tool(s): <toolName>")
+        // 并回填到 ExecutionError.errors[0]。这是预期内的"等待用户审批"路径，
+        // 已经通过 canUseTool callback 触发了 tool_confirm/ask_user 回调，静默返回即可。
+        if (err instanceof ExecutionError && err.errors?.[0]?.startsWith('Permission denied for tool(s):')) {
+          console.log('[Agent] ExecutionError (tool interrupt), returning')
           return
         }
-        // Don't re-throw Transport closed errors - they're expected when CLI exits
+
+        // Transport closed：CLI 子进程退出。如果用户已经 cancel，是预期路径，静默返回；
+        // 否则视为异常，走错误分支让 finally 标 error 状态。
         if (err instanceof Error && err.message === 'Transport closed') {
+          if (getAgentRun(conversationId)?.status === 'cancelled') {
+            console.error('[Agent] CLI process exited (cancelled by user)')
+            return
+          }
           console.error('[Agent] CLI process exited unexpectedly')
+          runtimeError = err
+          wrappedCallback({ type: 'error', content: 'Agent CLI 子进程异常退出' })
           return
         }
+
+        // 真实运行错误（如 SDK 反序列化失败、模型返回异常等）：
+        // 1) 通过 wrappedCallback 实时发一条 type:'error' → SSE log/agent_message_chunk
+        // 2) 记录 runtimeError，让 finally 块把 task/run 标为 'error'，
+        //    routes/acp.ts 终结时会发 stopReason:'error' + ⚠️ 提示
+        if (err instanceof ExecutionError) {
+          const message = err.errors?.[0] || err.message || 'Agent 执行失败'
+          wrappedCallback({ type: 'error', content: message })
+          runtimeError = err
+          return
+        }
+
         throw err
       }
     } finally {
@@ -1526,6 +1555,11 @@ export class CloudbaseAgentService {
         }
       }
 
+      // message loop 中捕获到的 runtime 错误（非用户 cancel）也算 error 状态
+      if (runtimeError && !syncError) {
+        finalStatus = 'error'
+      }
+
       // Update task status in DB
       // 被取消的 turn: handleSessionCancel 已写 status='stopped'，不再覆写回 'completed'
       if (!wasCancelled) {
@@ -1554,8 +1588,15 @@ export class CloudbaseAgentService {
         }, 5000)
       }
 
-      // Update agent registry
-      completeAgent(conversationId, wasCancelled ? 'cancelled' : finalStatus, syncError?.message)
+      // Update agent registry — 让 routes/acp.ts 终结报文据此选 stopReason
+      // run.error 用 runtimeError.message 优先（用户可见的错误根因），
+      // 没有就退回 syncError.message
+      const agentRunStatus: 'completed' | 'error' | 'cancelled' = wasCancelled
+        ? 'cancelled'
+        : runtimeError || syncError
+          ? 'error'
+          : 'completed'
+      completeAgent(conversationId, agentRunStatus, runtimeError?.message ?? syncError?.message)
 
       // Cleanup stream events NOW — after completeAgent() so the poll loop sees
       // isDone=true and drains remaining events before we remove them from DB.
