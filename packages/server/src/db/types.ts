@@ -138,6 +138,10 @@ export interface UserResource {
   userId: string
   status: string
   envId: string | null
+  envAlias: string | null
+  envRegion: string | null
+  cosTagValue: string | null
+  policyHash: string | null
   camUsername: string | null
   camSecretId: string | null
   camSecretKey: string | null
