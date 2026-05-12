@@ -252,6 +252,56 @@ pnpm setup:tcr
 pnpm rebuild better-sqlite3
 ```
 
+## OpenCode Agent 配置（可选）
+
+如果需要在前端使用 OpenCode agent（基于 [opencode-ai](https://github.com/sst/opencode) 的 ACP runtime），需要额外配置 LLM provider。
+
+### 前置：安装 opencode CLI
+
+```bash
+npm i -g opencode-ai
+opencode --version   # 验证安装
+```
+
+### 配置 provider
+
+```bash
+pnpm opencode:setup
+```
+
+脚本会自动完成以下操作：
+
+1. 从 [models.dev](https://models.dev) 拉取 provider catalog（118+ 个 provider）
+2. 检测 `.opencode/opencode.json` 中已有 provider 的凭证状态，提示补齐缺失的 env
+3. 引导选择要新增的 provider 并输入 API Key
+4. 从 catalog 取完整配置写入 `.opencode/opencode.json`（含 npm/baseURL/models 等）
+5. 把 API Key 写入 `packages/server/.env`
+
+配置完成后**必须重启 server**（Node.js 的 `--env-file` 只在启动时加载一次）。
+
+### 涉及的文件
+
+| 文件 | 作用 | 是否 gitignore |
+|---|---|---|
+| `.opencode/opencode.json` | provider + model 定义（opencode 子进程 + server 均读取） | 否（应提交） |
+| `packages/server/.env` | API Key 等凭证 | 是 |
+
+### 常见问题
+
+| 问题 | 原因 | 解决 |
+|---|---|---|
+| 前端 OpenCode agent 模型列表为空 | `opencode.json` 未配置 provider 或对应 env 未设置 | 运行 `pnpm opencode:setup` |
+| 前端有模型但选中后 agent 无输出 | opencode.json 中 provider 字段不完整 | 重跑 `pnpm opencode:setup`，或手动补齐 npm/baseURL/models |
+| 出现不应该有的模型（如未配置的 OpenAI） | `.env` 中有通用 env 名（如 `OPENAI_API_KEY`）被 catalog 错误匹配 | 删除或注释 `.env` 中不需要的 key |
+| 配置后前端没变化 | server 未重启 | 重启 `pnpm dev:server` |
+
+### 更多文档
+
+- [OpenCode 配置](https://opencode.ai/docs/zh-cn/config/)
+- [OpenCode 模型](https://opencode.ai/docs/zh-cn/models/)
+- [OpenCode Provider](https://opencode.ai/docs/zh-cn/providers/)
+- [models.dev catalog](https://models.dev)
+
 ## 手动初始化的推荐顺序
 
 如果不使用交互式脚本，建议按照以下顺序手动处理：
@@ -262,7 +312,8 @@ pnpm rebuild better-sqlite3
 4. 配置 CodeBuddy 认证
 5. 配置 TCR 镜像
 6. 初始化数据库
-7. 运行构建或启动命令验证环境
+7. （可选）配置 OpenCode provider：`pnpm opencode:setup`
+8. 运行构建或启动命令验证环境
 
 ## 延伸阅读
 

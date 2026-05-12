@@ -241,23 +241,39 @@ pnpm opencode:setup
 
 该命令会：
 
-1. 从 [models.dev](https://models.dev)（opencode 自身使用的 catalog）拉取 118+ provider 列表
-2. 引导选择要启用的 provider（deepseek / moonshot / openai / anthropic / zhipuai / …）
-3. 提示输入对应的 API Key（如 `DEEPSEEK_API_KEY`）
-4. 选择默认模型
-5. 把 provider 启用声明写入 `.opencode/opencode.json`（空对象风格，与 opencode 官方推荐一致）
-6. 把 API Key 写入 `packages/server/.env`
+1. 从 [models.dev](https://models.dev)（opencode 官方 provider catalog）拉取 118+ provider 列表
+2. 检测 `.opencode/opencode.json` 已有 provider 的凭证状态，提示补齐缺失的 env
+3. 引导选择要新增的 provider（deepseek / moonshot / openai / anthropic / zhipuai / …）
+4. 提示输入对应的 API Key（如 `DEEPSEEK_API_KEY`）
+5. 选择默认模型
+6. 从 catalog 取完整 provider 配置（npm / baseURL / models 等）写入 `.opencode/opencode.json`
+7. 把 API Key 写入 `packages/server/.env`
 
 ### 生成结果示例
 
 ```jsonc
-// .opencode/opencode.json
+// .opencode/opencode.json（自动生成，字段从 models.dev 获取）
 {
   "$schema": "https://opencode.ai/config.json",
   "model": "deepseek/deepseek-chat",
   "provider": {
-    "deepseek": {},
-    "moonshot": {}
+    "deepseek": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "DeepSeek",
+      "options": {
+        "baseURL": "https://api.deepseek.com",
+        "apiKey": "{env:DEEPSEEK_API_KEY}"
+      },
+      "models": {
+        "deepseek-chat": {
+          "name": "DeepSeek Chat",
+          "tool_call": true,
+          "limit": { "context": 1000000, "output": 384000 },
+          "modalities": { "input": ["text"], "output": ["text"] }
+        }
+        // ... 其他模型
+      }
+    }
   }
 }
 ```
@@ -265,31 +281,34 @@ pnpm opencode:setup
 ```bash
 # packages/server/.env 会追加 API Key
 DEEPSEEK_API_KEY=sk-***
-MOONSHOT_API_KEY=sk-***
 ```
 
-`provider.<id>: {}` 表示启用该 provider，其 `npm`/`api`/`name`/`models` 等元数据由 opencode
-运行时从 models.dev 自动获取。这样做的好处：
-
-- 与 opencode 官方行为完全一致，不用冗余维护字段
-- models.dev 上游新增模型时自动生效，无需改项目配置
+> **为什么写完整字段而不是空对象？** opencode 子进程启动时也需要这些配置。如果只写 `{}`，
+> 子进程要自己从 models.dev 拉 catalog 才知道 npm / baseURL / models 等信息，一旦拉取失败
+> （网络/超时）就无法正常工作。写入完整字段让配置自包含，不依赖运行时网络请求。
 
 ### 高级：自定义 provider / 覆盖字段
 
 如果需要：
 
 - 非 catalog 内置的 provider（如内网 LLM 网关、本地 Ollama）
-- 覆盖 catalog 默认的 `baseURL` / `headers`
+- 覆盖 catalog 默认的 `baseURL` / `headers`（如走国内镜像）
 - 用 `whitelist` / `blacklist` 限制要展示的模型
 - 配置 variants（如 Anthropic 的 thinking 预算）
 
 请参考 `.opencode/opencode.example.json` 和 [OpenCode 官方 providers 文档](https://opencode.ai/docs/zh-cn/providers/)
-直接手动编辑 `.opencode/opencode.json`。setup 脚本只覆盖最常用的"启用 + 灌 key + 选默认
-model"三件事。
+直接手动编辑 `.opencode/opencode.json`。
+
+> 提示：`opencode.json` 顶部的 `$schema` 字段让 VS Code / Cursor 等编辑器支持字段自动补全
+> 和悬停文档，编辑时按 Ctrl+Space 可查看所有可选字段。
 
 ### 重新配置 / 新增 provider
 
-`pnpm opencode:setup` 幂等，可多次运行。已存在的 provider / env key 不会被重复询问。
+`pnpm opencode:setup` 幂等，可多次运行：
+
+- **已存在的 provider** 不会被覆盖（避免丢失手动调整）
+- **已设置的 env key** 不会被重复询问
+- **缺失 env 的 provider** 会在启动时提示补齐
 
 ## 常用命令
 

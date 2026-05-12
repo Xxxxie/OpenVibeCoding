@@ -299,6 +299,14 @@ export function readOpencodeJson(opencodeConfigDir: string): OpencodeJson | null
 /**
  * 主入口：合并 catalog + opencode.json，按 env 过滤，返回 ModelInfo[]。
  *
+ * 重要：**只有 opencode.json 中显式声明的 provider 才参与输出**。
+ * catalog 仅用于填充元数据（name/env/npm/models 等），不会因为某个 env key
+ * 碰巧存在就自动启用 catalog 中的 provider。
+ *
+ * 这与 opencode CLI 自身行为不同（CLI 会自动启用所有 env 命中的 provider），
+ * 但在本项目场景下，opencode.json 的 provider 字段是"这个项目启用了哪些 provider"
+ * 的白名单，自动启用会导致 env 命名冲突时暴露意外的模型。
+ *
  * 当 catalog 拉取失败时降级为"只读 opencode.json 中显式定义的自定义 provider"，
  * 以保证最小可用（与改造前行为近似一致）。
  */
@@ -312,9 +320,18 @@ export async function resolveModels(opts: {
   // 降级：catalog 不可用 + config 不可用 → 空列表
   if (!catalog && !config) return []
 
-  // catalog 不可用：把 config.provider 当作全部自定义 provider（需要用户填了完整字段）
-  const baseCatalog: Catalog = catalog ?? {}
-  const merged = mergeProviders(baseCatalog, (config?.provider as Record<string, unknown>) ?? {})
+  const declaredProviderIds = Object.keys(config?.provider ?? {})
+  if (declaredProviderIds.length === 0 && !config?.enabled_providers) return []
+
+  // 只从 catalog 中取 opencode.json 声明的 provider（白名单过滤）
+  const scopedCatalog: Catalog = {}
+  for (const id of declaredProviderIds) {
+    if (catalog && catalog[id]) {
+      scopedCatalog[id] = catalog[id]
+    }
+  }
+
+  const merged = mergeProviders(scopedCatalog, (config?.provider as Record<string, unknown>) ?? {})
   const available = filterAvailable(merged, opts.env, {
     enabledProviders: config?.enabled_providers,
     disabledProviders: config?.disabled_providers,

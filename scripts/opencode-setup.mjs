@@ -231,7 +231,67 @@ function writeOpencodeJson(config) {
   fs.writeFileSync(OPENCODE_JSON, JSON.stringify(ordered, null, 2) + '\n')
 }
 
-// ─── UI flow ────────────────────────────────────────────────────────────
+/**
+ * 从 catalog 构建完整的 provider 配置（写入 opencode.json）。
+ *
+ * 为什么不用空对象 `{}`：opencode 子进程自身也需要拉 models.dev catalog 来
+ * 填充 npm / baseURL / models 等字段。如果拉取失败（网络/超时），空对象等于
+ * "什么都没有"，导致模型不可用。写入完整字段则让 opencode.json 自包含，
+ * 不依赖运行时 catalog 拉取。
+ *
+ * 写入的字段：npm, name, options.baseURL, options.apiKey({env:VAR}),
+ *             models（每个 model 的 name/tool_call/reasoning/limit/modalities）
+ * 不写入的字段：cost/release_date/family 等纯展示字段（opencode 不需要）
+ */
+function buildProviderConfig(catalog, providerId) {
+  const p = catalog[providerId]
+  if (!p) {
+    // catalog 里没有（不太可能走到这，因为 listProviders 已过滤）
+    return {}
+  }
+
+  const config = {}
+
+  // npm: 有则写，没有用默认
+  if (p.npm) config.npm = p.npm
+
+  // name
+  if (p.name && p.name !== providerId) config.name = p.name
+
+  // options: baseURL + apiKey（用 {env:VAR} 占位符）
+  const options = {}
+  if (p.api) options.baseURL = p.api
+  if (Array.isArray(p.env) && p.env.length > 0) {
+    options.apiKey = `{env:${p.env[0]}}`
+  }
+  if (Object.keys(options).length > 0) config.options = options
+
+  // models: 取 catalog 里所有非 deprecated 的 model，只保留 opencode 需要的字段
+  const models = {}
+  for (const [mid, m] of Object.entries(p.models || {})) {
+    if (!m || typeof m !== 'object') continue
+    if (m.status === 'deprecated') continue
+
+    const model = {}
+    if (m.name) model.name = m.name
+    if (m.tool_call !== undefined) model.tool_call = m.tool_call
+    if (m.reasoning !== undefined) model.reasoning = m.reasoning
+    if (m.limit && (m.limit.context || m.limit.output)) {
+      model.limit = {}
+      if (m.limit.context) model.limit.context = m.limit.context
+      if (m.limit.output) model.limit.output = m.limit.output
+    }
+    if (m.modalities) {
+      model.modalities = {}
+      if (Array.isArray(m.modalities.input)) model.modalities.input = m.modalities.input
+      if (Array.isArray(m.modalities.output)) model.modalities.output = m.modalities.output
+    }
+    models[mid] = model
+  }
+  if (Object.keys(models).length > 0) config.models = models
+
+  return config
+}
 
 function padEnd(str, width) {
   // 粗略按 UTF-16 长度对齐（中文宽度不严格处理，够用）
@@ -613,10 +673,11 @@ async function main() {
       ? await pickDefaultModel(catalog, allProvidersForModel, existing.model)
       : existing.model || ''
 
-  // 8. 构造新 opencode.json：已选 provider 用 `{}`，保留其余已有 provider
+  // 8. 构造新 opencode.json：从 catalog 取完整字段写入，保留已有 provider
   const nextProvider = { ...existing.provider }
   for (const it of selected) {
-    if (!nextProvider[it.id]) nextProvider[it.id] = {}
+    if (nextProvider[it.id]) continue // 已存在的不覆盖（用户可能手动调过）
+    nextProvider[it.id] = buildProviderConfig(catalog, it.id)
   }
   const nextConfig = {
     ...existing,
