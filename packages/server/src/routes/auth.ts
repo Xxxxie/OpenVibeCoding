@@ -90,6 +90,10 @@ auth.post('/register', async (c) => {
             userId,
             status: 'processing',
             envId: null,
+            envAlias: null,
+            envRegion: null,
+            cosTagValue: null,
+            policyHash: null,
             camUsername: null,
             camSecretId: null,
             camSecretKey: null,
@@ -104,6 +108,10 @@ auth.post('/register', async (c) => {
           await getDb().userResources.update(resourceId, {
             status: 'success',
             envId: result.envId,
+            envAlias: result.envAlias,
+            envRegion: result.envRegion,
+            cosTagValue: result.cosTagValue,
+            policyHash: result.policyHash,
             camUsername: result.camUsername,
             camSecretId: result.camSecretId,
             camSecretKey: result.camSecretKey || null,
@@ -119,7 +127,7 @@ auth.post('/register', async (c) => {
             const partialResult: Partial<import('../cloudbase/provision.js').ProvisionResult> = {}
             // provisionUserResources 可能部分成功，从错误上下文中尽力提取已创建资源信息
             // CAM username 是可预测的
-            partialResult.camUsername = `oc_${userId.substring(0, 20)}`
+            partialResult.camUsername = `vibe_${userId.substring(0, 20)}`
             await rollbackProvisionedResources(partialResult)
           } catch {
             // rollback best-effort
@@ -139,6 +147,10 @@ auth.post('/register', async (c) => {
           userId,
           status: 'success',
           envId: process.env.TCB_ENV_ID || null,
+          envAlias: null,
+          envRegion: null,
+          cosTagValue: null,
+          policyHash: null,
           camUsername: null,
           camSecretId: process.env.TCB_SECRET_ID || null,
           camSecretKey: process.env.TCB_SECRET_KEY || null,
@@ -366,6 +378,10 @@ auth.post('/provision-retry', async (c) => {
       await getDb().userResources.update(resource.id, {
         status: 'success',
         envId: result.envId,
+        envAlias: result.envAlias,
+        envRegion: result.envRegion,
+        cosTagValue: result.cosTagValue,
+        policyHash: result.policyHash,
         camUsername: result.camUsername,
         camSecretId: result.camSecretId,
         camSecretKey: result.camSecretKey || null,
@@ -377,6 +393,7 @@ auth.post('/provision-retry', async (c) => {
     .catch(async (err) => {
       await getDb().userResources.update(resource.id, {
         status: 'failed',
+        failStep: err.__provisionFailStep || null,
         failReason: err.message,
         updatedAt: Date.now(),
       })

@@ -288,6 +288,10 @@ githubAuth.get('/callback', async (c) => {
               userId,
               status: 'processing',
               envId: null,
+              envAlias: null,
+              envRegion: null,
+              cosTagValue: null,
+              policyHash: null,
               camUsername: null,
               camSecretId: null,
               camSecretKey: null,
@@ -302,6 +306,10 @@ githubAuth.get('/callback', async (c) => {
                 await getDb().userResources.update(resourceId, {
                   status: 'success',
                   envId: result.envId,
+                  envAlias: result.envAlias,
+                  envRegion: result.envRegion,
+                  cosTagValue: result.cosTagValue,
+                  policyHash: result.policyHash,
                   camUsername: result.camUsername,
                   camSecretId: result.camSecretId,
                   camSecretKey: result.camSecretKey || null,
@@ -312,6 +320,7 @@ githubAuth.get('/callback', async (c) => {
               .catch(async (err) => {
                 await getDb().userResources.update(resourceId, {
                   status: 'failed',
+                  failStep: err.__provisionFailStep || null,
                   failReason: err.message,
                   updatedAt: Date.now(),
                 })
@@ -322,6 +331,10 @@ githubAuth.get('/callback', async (c) => {
               userId,
               status: 'success',
               envId: process.env.TCB_ENV_ID || null,
+              envAlias: null,
+              envRegion: null,
+              cosTagValue: null,
+              policyHash: null,
               camUsername: null,
               camSecretId: process.env.TCB_SECRET_ID || null,
               camSecretKey: process.env.TCB_SECRET_KEY || null,

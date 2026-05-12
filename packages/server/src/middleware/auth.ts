@@ -3,7 +3,7 @@ import { getCookie } from 'hono/cookie'
 import { decryptJWE } from '../lib/session'
 import { getDb } from '../db/index.js'
 import CloudBaseManager from '@cloudbase/manager-node'
-import { buildUserEnvPolicyStatements } from '../cloudbase/provision.js'
+import { buildUserEnvPolicyStatements, buildLegacyPolicyStatements } from '../cloudbase/provision.js'
 
 export interface SessionUser {
   id: string
@@ -122,6 +122,18 @@ export async function issueTempCredentials(
 
   if (!systemSecretId || !systemSecretKey || !systemEnvId) return undefined
 
+  // 从 DB 获取用户资源信息，判断使用新版还是旧版策略
+  const resource = await getDb().userResources.findByUserId(userId)
+  const ownerUin = process.env.TENCENTCLOUD_ACCOUNT_ID || ''
+  const region = resource?.envRegion || process.env.TCB_REGION || 'ap-shanghai'
+  const cosTagValue = resource?.cosTagValue || ''
+
+  // 构建策略：有 cosTagValue 且有 ownerUin 时使用精确 ARN，否则使用旧版兼容策略
+  const policyStatements =
+    cosTagValue && ownerUin
+      ? buildUserEnvPolicyStatements({ envId, region, ownerUin, cosTagValue })
+      : buildLegacyPolicyStatements(envId)
+
   try {
     const app = new CloudBaseManager({ secretId: systemSecretId, secretKey: systemSecretKey, envId: systemEnvId })
 
@@ -132,7 +144,7 @@ export async function issueTempCredentials(
         DurationSeconds: 7200,
         Policy: JSON.stringify({
           version: '2.0',
-          statement: buildUserEnvPolicyStatements(envId),
+          statement: policyStatements,
         }),
       },
     })
