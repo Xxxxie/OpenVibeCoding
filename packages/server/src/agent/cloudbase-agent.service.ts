@@ -1538,6 +1538,9 @@ export class CloudbaseAgentService {
 
       let firstMessageReceived = false
       let resultEmitted = false // 防止双发 result（break messageLoop 路径 vs 自然结束路径）
+      let lastMessageType = '' // 追踪最后一条消息类型，用于检测 GLM 截断
+      let glmResumeCount = 0 // GLM end_turn 截断后自动 resume 的次数
+      const MAX_GLM_RESUME = 5 // 最多自动 resume 次数，防止无限循环
       const tracker = createToolCallTracker()
 
       resetIterationTimeout()
@@ -1562,6 +1565,7 @@ export class CloudbaseAgentService {
 
           // Tool result (user message) means tool execution completed — resume timeout
           if (message.type === 'user') {
+            lastMessageType = 'user'
             toolCallInProgress = false
             // P4: 工具结果已回流,代理即将再次让模型推理
             emitPhase('model_responding')
@@ -1569,6 +1573,7 @@ export class CloudbaseAgentService {
 
           // Assistant message with tool_use means tool is about to execute — pause timeout
           if (message.type === 'assistant') {
+            lastMessageType = 'assistant'
             const content = (message as any).message?.content
             const toolUseBlock = Array.isArray(content) ? content.find((b: any) => b.type === 'tool_use') : undefined
             if (toolUseBlock) {
@@ -1608,6 +1613,7 @@ export class CloudbaseAgentService {
               throw new Error(errorMsg)
             }
             case 'stream_event': {
+              lastMessageType = 'stream_event'
               // P7: SDKPartialAssistantMessage 顶层 parent_tool_use_id 透传到子工具链路
               const parentId = (message as any).parent_tool_use_id ?? null
               this.handleStreamEvent((message as any).event, tracker, wrappedCallback, parentId)
@@ -1644,7 +1650,98 @@ export class CloudbaseAgentService {
           }
         }
         // for-await 循环自然结束（SDK 没有发 'result' 消息，如 GLM 的 end_turn 行为）
-        // 补发 idle phase + result，确保前端 phase indicator 复位、agent 状态标记为完成
+        // 检测最后一条消息类型：如果是 user（tool_result），说明模型还想继续
+        // 但被 SDK 的 end_turn 双发 bug 截断了——自动发起 resume 继续执行
+        while (!resultEmitted && lastMessageType === 'user' && glmResumeCount < MAX_GLM_RESUME) {
+          glmResumeCount++
+          console.log(
+            `[Agent] GLM end_turn truncation detected (last msg=user), auto-resuming (${glmResumeCount}/${MAX_GLM_RESUME})...`,
+          )
+          emitPhase('model_responding')
+          // 重新发起 query，使用 resume 模式继续当前会话
+          const resumeArgs = {
+            ...queryArgs,
+            prompt: '', // resume 不需要新 prompt，模型从 tool_result 继续
+            options: {
+              ...(queryArgs as any).options,
+              ...sessionOpts,
+              resume: conversationId,
+              sessionId: conversationId,
+            },
+          } as any
+          const q2 = query(resumeArgs)
+          currentQuery = q2
+
+          for await (const message of q2) {
+            console.log('[Agent] [resume] message type:', message.type, JSON.stringify(message).slice(0, 300))
+            try {
+              appendFileSync(debugMsgLogPath, JSON.stringify({ ts: Date.now(), resumed: true, ...message }) + '\n')
+            } catch {
+              /* ignore */
+            }
+
+            if (message.type === 'user') {
+              lastMessageType = 'user'
+              toolCallInProgress = false
+              emitPhase('model_responding')
+            }
+            if (message.type === 'assistant') {
+              lastMessageType = 'assistant'
+              const content = (message as any).message?.content
+              const toolUseBlock = Array.isArray(content) ? content.find((b: any) => b.type === 'tool_use') : undefined
+              if (toolUseBlock) {
+                toolCallInProgress = true
+                if (iterationTimeoutTimer) {
+                  clearTimeout(iterationTimeoutTimer)
+                  iterationTimeoutTimer = undefined
+                }
+                emitPhase('tool_executing', (toolUseBlock as any).name)
+              } else if (Array.isArray(content)) {
+                emitPhase('model_responding')
+              }
+            }
+            if (message.type === 'stream_event') {
+              lastMessageType = 'stream_event'
+              const parentId = (message as any).parent_tool_use_id ?? null
+              this.handleStreamEvent((message as any).event, tracker, wrappedCallback, parentId)
+            }
+
+            resetIterationTimeout()
+
+            switch (message.type) {
+              case 'error':
+                throw new Error((message as any).error || 'Unknown error')
+              case 'user': {
+                const content = (message as any).message?.content
+                const parentId = (message as any).parent_tool_use_id ?? null
+                if (content) this.handleToolResults(content, tracker, wrappedCallback, parentId)
+                break
+              }
+              case 'assistant': {
+                const parentId = (message as any).parent_tool_use_id ?? null
+                this.handleToolNotFoundErrors(message, tracker, wrappedCallback)
+                this.handleAssistantToolUseInputs(message, tracker, wrappedCallback, parentId)
+                break
+              }
+              case 'result':
+                resultEmitted = true
+                emitPhase('idle')
+                wrappedCallback({
+                  type: 'result',
+                  content: JSON.stringify({
+                    subtype: (message as any).subtype,
+                    duration_ms: (message as any).duration_ms,
+                  }),
+                })
+                break
+              default:
+                break
+            }
+            if (resultEmitted) break
+          }
+        }
+
+        // 仍然没有 result，补发 synthetic result
         if (!resultEmitted) {
           console.log('[Agent] for-await loop ended without result message, emitting synthetic result')
           emitPhase('idle')
