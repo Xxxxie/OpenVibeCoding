@@ -518,7 +518,6 @@ async function observeStream(
   return streamSSE(c, async (stream) => {
     let lastSeq = -1
     const POLL_INTERVAL = 500
-    const MAX_POLL_DURATION = 30 * 60 * 1000
 
     // 1. Replay existing events
     try {
@@ -537,9 +536,15 @@ async function observeStream(
       // Replay failure is non-fatal
     }
 
-    // 2. Poll loop
-    const startTime = Date.now()
-    while (Date.now() - startTime < MAX_POLL_DURATION) {
+    // 2. Poll loop —— 同 observeStreamWithLiveCallback：SSE 寿命跟随 agent，
+    //    仅在 agent 真完成时才发 stopReason + [DONE]；客户端断流时静默 return。
+    let agentDone = false
+    while (true) {
+      if (stream.closed || stream.aborted) {
+        console.log(`[SSE observe] ${sessionId} stream closed/aborted, breaking`)
+        break
+      }
+
       const run = getAgentRun(sessionId)
       const isDone = !run || run.status !== 'running'
 
@@ -556,12 +561,25 @@ async function observeStream(
           lastSeq = Math.max(lastSeq, evt.seq)
         }
 
-        if (isDone && newEvents.length === 0) break
+        if (isDone && newEvents.length === 0) {
+          agentDone = true
+          break
+        }
       } catch {
-        if (isDone) break
+        if (isDone) {
+          agentDone = true
+          break
+        }
       }
 
       await new Promise((r) => setTimeout(r, POLL_INTERVAL))
+    }
+
+    if (!agentDone) {
+      console.log(
+        `[SSE observe] ${sessionId} stream ended without agent completion (client disconnect), skipping final stopReason/[DONE]`,
+      )
+      return
     }
 
     // 3. Send final response + [DONE]
@@ -605,8 +623,8 @@ async function observeStreamWithLiveCallback(
   return streamSSE(c, async (stream) => {
     let lastSeq = -1
     let streamClosed = false
+    let finalDoneSent = false // DEBUG: 标记 [DONE] 已经发了，之后的 write 都是泄漏
     const POLL_INTERVAL = 500
-    const MAX_POLL_DURATION = 10 * 60 * 1000
 
     stream.onAbort(() => {
       streamClosed = true
@@ -622,6 +640,12 @@ async function observeStreamWithLiveCallback(
       // Track seq for deduplication against poll loop
       if (seq !== undefined) {
         lastSeq = Math.max(lastSeq, seq)
+      }
+
+      if (finalDoneSent) {
+        console.warn(
+          `[SSE leak] ${sessionId} liveCallback writing AFTER [DONE]: msg.type=${msg.type}, acpEvent.sessionUpdate=${(acpEvent as { sessionUpdate?: string }).sessionUpdate}`,
+        )
       }
 
       // writeSSE returns a Promise — attach .catch() so unhandled rejection doesn't
@@ -664,17 +688,41 @@ async function observeStreamWithLiveCallback(
     }
 
     // ── Poll loop (safety net for missed events + completion) ─
+    //
+    // 没有时间硬上限：SSE 寿命 = agent 寿命。
+    // 退出原因只有两种：
+    //   1. agent 真完成（completeAgent 被调，run.status !== 'running'）+ doneGraceTicks 走完
+    //      → agentDone=true，下面正常发 stopReason + [DONE] + 写 task.status
+    //   2. 客户端断流 (stream.aborted/closed) → agentDone=false，静默 return，
+    //      不发 stopReason、不写 task.status，让前端自动 reconnect 到 /observe/:sessionId
+    //
+    // 这样设计是因为：以前用 10min cap 强制超时退出会发假的 stopReason='end_turn' +
+    // task.status='done'，前端误以为 turn 结束、auto-fix 等 onStreamComplete 副作用乱触发。
     const startTime = Date.now()
     let doneGraceTicks = 0 // After agent completes, wait a few ticks for eventBuffer flush
     const DONE_GRACE_TICKS = 3 // ~1.5s grace period (3 * 500ms)
-    while (Date.now() - startTime < MAX_POLL_DURATION) {
+    let agentDone = false
+    // DEBUG: 记录第一次观察到 isDone=true 的时刻 + 当时 run 状态，便于定位"过早完成"
+    let firstIsDoneAt: { at: number; status: string | undefined; turnId: string | undefined } | null = null
+    while (true) {
       if (stream.closed || stream.aborted) {
-        console.log(`[SSE] Stream closed/aborted for ${sessionId}`)
+        console.log(`[SSE poll] ${sessionId} stream closed/aborted, breaking`)
         break
       }
 
       const run = getAgentRun(sessionId)
       const isDone = !run || run.status !== 'running'
+
+      if (isDone && !firstIsDoneAt) {
+        firstIsDoneAt = {
+          at: Date.now() - startTime,
+          status: run?.status,
+          turnId: run?.turnId,
+        }
+        console.log(
+          `[SSE poll] ${sessionId} first isDone=true at +${firstIsDoneAt.at}ms, status=${firstIsDoneAt.status}, turnId=${firstIsDoneAt.turnId}, lastSeq=${lastSeq}`,
+        )
+      }
 
       try {
         // Only fetch events after what we've already delivered
@@ -695,12 +743,18 @@ async function observeStreamWithLiveCallback(
             doneGraceTicks++
             if (doneGraceTicks >= DONE_GRACE_TICKS) {
               console.log(
-                `[SSE] Agent done for ${sessionId}, status=${run?.status}, lastSeq=${lastSeq}, breaking poll loop`,
+                `[SSE poll] ${sessionId} grace expired (${doneGraceTicks}/${DONE_GRACE_TICKS}), status=${run?.status}, lastSeq=${lastSeq}, breaking`,
               )
+              agentDone = true
               break
             }
           } else {
             // Got new events after done — reset grace counter to drain remaining
+            if (doneGraceTicks > 0) {
+              console.log(
+                `[SSE poll] ${sessionId} grace RESET (drained ${newEvents.length} events after done), grace was ${doneGraceTicks}`,
+              )
+            }
             doneGraceTicks = 0
           }
         }
@@ -708,13 +762,27 @@ async function observeStreamWithLiveCallback(
         if (isDone) {
           doneGraceTicks++
           if (doneGraceTicks >= DONE_GRACE_TICKS) {
-            console.log(`[SSE] Agent done (with poll error) for ${sessionId}, status=${run?.status}`)
+            console.log(
+              `[SSE poll] ${sessionId} grace expired with poll error (${doneGraceTicks}/${DONE_GRACE_TICKS}), status=${run?.status}`,
+              err,
+            )
+            agentDone = true
             break
           }
         }
       }
 
       await new Promise((r) => setTimeout(r, POLL_INTERVAL))
+    }
+
+    // 客户端断流 / 网络中断（agent 仍在跑）：静默 return，不发任何最终报文，
+    // 不写 task.status。前端 fetchMessages 看到 latestAgent.status 仍 pending →
+    // 自动 reconnect 到 /observe/:sessionId 继续接 events。
+    if (!agentDone) {
+      console.log(
+        `[SSE poll] ${sessionId} stream ended without agent completion (client disconnect or stream abort), skipping final stopReason/[DONE]/task.status writes`,
+      )
+      return
     }
 
     // ── Send final response + [DONE] ─────────────────────────
@@ -744,6 +812,10 @@ async function observeStreamWithLiveCallback(
       })
     }
     await stream.writeSSE({ data: '[DONE]' })
+    finalDoneSent = true
+    console.log(
+      `[SSE poll] ${sessionId} sent [DONE] with stopReason=${rpcId !== null ? resolveStopReason(getAgentRun(sessionId)) : 'n/a (no rpcId)'}, agent run.status=${getAgentRun(sessionId)?.status ?? 'no-run'}`,
+    )
 
     // Update task status: pending → done (or error).
     // This allows the frontend to exit its "busy" state and show the send button.

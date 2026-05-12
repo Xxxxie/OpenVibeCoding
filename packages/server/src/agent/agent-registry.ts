@@ -31,6 +31,12 @@ export interface AgentRun {
 const runningAgents = new Map<string, AgentRun>()
 
 export function registerAgent(run: Omit<AgentRun, 'status' | 'startTime' | 'lastSeq'>): AgentRun {
+  const existing = runningAgents.get(run.conversationId)
+  if (existing) {
+    console.log(
+      `[Registry] registerAgent(${run.conversationId}) OVERWRITING existing entry: prev status=${existing.status}, prev turnId=${existing.turnId}, new turnId=${run.turnId}`,
+    )
+  }
   const agentRun: AgentRun = {
     ...run,
     status: 'running',
@@ -53,9 +59,15 @@ export function completeAgent(
 ): void {
   const run = runningAgents.get(conversationId)
   if (run) {
+    const caller = new Error().stack?.split('\n')[2]?.trim() || 'unknown'
+    console.log(
+      `[Registry] completeAgent(${conversationId}) prev status=${run.status} → ${status}, stopReason=${stopReason ?? 'n/a'}, turnId=${run.turnId}, caller=${caller}`,
+    )
     run.status = status
     if (error) run.error = error
     if (stopReason) run.stopReason = stopReason
+  } else {
+    console.log(`[Registry] completeAgent(${conversationId}) NO RUN FOUND, status=${status}`)
   }
 }
 
