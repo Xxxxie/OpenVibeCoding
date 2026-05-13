@@ -4,8 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-05-13
+
 ### Added
 
+- **ACP Runtime 抽象层**：IAgentRuntime 接口 + 沙箱隔离 + 多轮记忆 + 持久化，支持多 runtime 并行
 - **Agent 统一选择器**：合并静态 CodeBuddy 标签和 runtime 选择器为统一 Agent `<Select>`，支持 CodeBuddy / OpenCode / MiMo 三个 agent 切换
 - **Per-Agent 模型选择**：每个 agent 独立模型列表，切换 agent 时自动校验 selectedModel，不存在则选列表第一个
 - **MiMo 模型集成**：新增 MiMo（小米）provider 配置，支持 mimo-v2.5-pro（含图片理解）、mimo-v2.5、TTS 系列模型
@@ -17,6 +20,9 @@ All notable changes to this project will be documented in this file.
 - **stopReason 友好提示**：refusal/max_tokens 时注入用户可读的友好提示
 - **SSE stopReason 透传**：透传真实 stopReason 到 SSE 终结报文
 - **暂停图标**：SSE stream 中止但仍有 pending loading 状态时显示 paused 图标
+- **human-in-loop 支持**：ToolConfirm + AskUserQuestion
+- **前端 Runtime 选择器 UI**
+- **vitest 单元测试**（27 个）
 
 ### Fixed
 
@@ -38,15 +44,7 @@ All notable changes to this project will be documented in this file.
 - **多 agent 共享 runtime**：`opencode` 和 `mimo` 均映射 `opencode-acp` runtime
 - **tool overrides 迁移**：移至 `.opencode/tools/`，简化 installer
 
-## [0.1.0] - 2026-04-10
-
-### Added
-
-- OpenCode ACP Runtime 集成（IAgentRuntime 抽象 + 沙箱隔离 + 多轮记忆 + 持久化）
-- 前端 Runtime 选择器 UI
-- human-in-loop 支持（ToolConfirm + AskUserQuestion）
-- 消息持久化与多轮记忆
-- vitest 单元测试（27 个）
+---
 
 ## [2.1.0] — 2025-05-03
 
@@ -147,39 +145,37 @@ All notable changes to this project will be documented in this file.
 
 - `toolConfirmation` 真实执行从 sandbox 启动**之前**推迟到 sandbox + sandboxMcpClient ready **之后**，避免 sandbox 未就绪时写入占位文本误触发 SDK 重试。
 
----
-
 ### Chat-Detail 重构（ACP + UI）
 
 本次重大版本面向 `chat-detail` 交互做系统性升级，借鉴官方 CodeBuddy Code 实现。目标：权限模型 / Plan 模式 / 协议层 / Phase 可视化 / 工具渲染 / Subagent 嵌套。
 
-### P1 · 权限模型升级
+#### P1 · 权限模型升级
 
 - **`PermissionAction` 四值**: `allow` / `allow_always` / `deny` / `reject_and_exit_plan`。
 - **`InterruptionCard`**: 新卡片 UI 替代旧 `ToolConfirmDialog` 弹窗，消息流内渲染，不打断上下文。
 - **`sessionPermissions` 白名单**: 按 sessionId 维护"本会话总是允许"的工具名集合；`canUseTool` 命中白名单直接放行。
 - **双入口协同**: `canUseTool` 与 `PreToolUse hook` 都过白名单，保持行为一致。
 
-### P2 · PlanMode + ExitPlanMode
+#### P2 · PlanMode + ExitPlanMode
 
 - **Plan 模式**: 前端传 `permissionMode: 'plan'`，SDK 切入 Plan；除 Read/Glob/Grep/ExitPlanMode 等只读工具外，写操作会被挡住。
 - **`PlanModeCard`**: Rocket 图标 + 三按钮（允许执行 / 继续完善 / 拒绝退出）。
 - **`plan-content.ts`**: 宽松提取器，兼容 `plan` / `allowedPrompts` / `steps` 三种 SDK 输出。
 - **Plan 状态原子**: `planModeAtomFamily`（active / planContent / toolCallId），跨组件共享。
 
-### P3 · 协议层独立（AcpClient）
+#### P3 · 协议层独立（AcpClient）
 
 - **`AcpClient` 类**: `initializeSession` / `request` / `notify` / `stream` (AsyncIterable) / `observe` (AsyncIterable) / `cancel`。
 - **`fetch-with-retry`**: 5xx 与网络错误指数退避重试。
 - **纯函数抽离**: `apply-session-update.ts` 从 223 行 switch 剥离；`use-chat-stream.ts` 由 785 行减到 446 行，SSE 解析全部迁到 `AcpClient.stream`。
 
-### P4 · Agent Phase 可视化
+#### P4 · Agent Phase 可视化
 
 - **服务端 `emitPhase` helper**: 在 5 处边界发射 `agent_phase` 事件（preparing / model_responding / tool_executing / compacting / idle）。
 - **`AgentStatusIndicator`**: 4 种 phase 配 Rocket / Sparkles / Hammer / Archive 图标；`aria-live="polite"` 支持屏幕阅读器。
 - **Timestamp 乱序防护**: `apply-session-update` 中 `case 'agent_phase'` 比较 ts，后到但时间更早的事件不覆盖。
 
-### P6 · 工具渲染注册表
+#### P6 · 工具渲染注册表
 
 - **`TOOL_RENDERERS` 注册表**: 10 个专属渲染器（Bash / Read / Write / Edit / Grep / Glob / Web / Todo / Task + default），各自提供 Icon、getSummary、renderInput、renderOutput。
 - **Edit 渲染器集成 git-diff-view**: 文件编辑显示 before/after unified diff。
@@ -187,7 +183,7 @@ All notable changes to this project will be documented in this file.
 - **`ToolCallCard` 接入注册表**: 外部 API 保持不变，调用方（task-chat）零改动。
 - **DEV 预览页**: `/__preview/tool-renderers`，可视化检查所有渲染器效果。
 
-### P7 · Subagent 嵌套 UI
+#### P7 · Subagent 嵌套 UI
 
 - **`SubagentCard`**: 紫色边框容器（`border-purple-500/40`）+ Bot 图标 + 子工具数量徽章，递归渲染支持多层嵌套。
 - **`parent_tool_use_id` 透传**: SDK 顶层 → 5 个服务端 handler → `convertToSessionUpdate` 3 个 case → 前端 `MessagePart.parentToolCallId`。
