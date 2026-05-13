@@ -930,11 +930,24 @@ async function setupTcr(config) {
     log('账号 ID 已保存', 'success')
   }
 
-  // Step 4: Docker login
+  // Step 4: Docker login (retry with manual username if first attempt fails)
   // 子账号 callerUin 不为空时直接用 callerUin 作为 username，否则用 accountId（主账号）
-  const dockerUsername = config.callerUin || config.accountId
+  let dockerUsername = config.callerUin || config.accountId
   if (!dockerLogin(TCR_DOMAIN, dockerUsername, password)) {
-    return false
+    log('Docker 登录失败，可能是用户名不正确', 'warn')
+    console.log('')
+    console.log(`  当前用户名：${dockerUsername}`)
+    console.log('  如果是子账号，用户名应为子账号 Uin（非主账号 AppID）')
+    console.log('  可在控制台「账号信息」页面查看：https://console.cloud.tencent.com/developer')
+    console.log('')
+    const retryUsername = await promptInput('请输入正确的用户名（回车跳过）')
+    if (!retryUsername) {
+      return false
+    }
+    dockerUsername = retryUsername.trim()
+    if (!dockerLogin(TCR_DOMAIN, dockerUsername, password)) {
+      return false
+    }
   }
 
   // Step 6 (was 5): Check local image, pull only if not present
@@ -957,9 +970,24 @@ async function setupTcr(config) {
     return false
   }
 
-  // Step 8 (was 7): Push image
+  // Step 8 (was 7): Push image (retry with manual username if first attempt fails)
   if (!pushImage(fullImage)) {
-    return false
+    log('推送失败，可能是 Docker 登录用户名不正确', 'warn')
+    console.log('')
+    console.log(`  当前用户名：${dockerUsername}`)
+    console.log('  如果是子账号，用户名应为子账号 Uin（非主账号 AppID）')
+    console.log('  可在控制台「账号信息」页面查看：https://console.cloud.tencent.com/developer')
+    console.log('')
+    const retryUsername = await promptInput('请输入正确的用户名（回车跳过）')
+    if (!retryUsername) {
+      return false
+    }
+    if (!dockerLogin(TCR_DOMAIN, retryUsername.trim(), password)) {
+      return false
+    }
+    if (!pushImage(fullImage)) {
+      return false
+    }
   }
 
   // Save image reference
