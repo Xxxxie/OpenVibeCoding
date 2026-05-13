@@ -25,6 +25,10 @@ interface ScfSandboxConfig {
   runtime: string
   memory: number
   timeout: number
+  /** SCF Session 最大存活时间（秒）。env: SCF_SANDBOX_SESSION_TTL，默认 1800（30 分钟） */
+  sessionTTL: number
+  /** SCF Session 空闲超时（秒）。env: SCF_SANDBOX_SESSION_IDLE_TIMEOUT，默认 600（10 分钟） */
+  sessionIdleTimeout: number
 }
 
 // ─── SandboxInstance ──────────────────────────────────────────────────────
@@ -158,6 +162,8 @@ export class ScfSandboxManager {
     runtime: 'Nodejs16.13',
     memory: 2048,
     timeout: 900,
+    sessionTTL: Number(process.env.SCF_SANDBOX_SESSION_TTL) || 1800,
+    sessionIdleTimeout: Number(process.env.SCF_SANDBOX_SESSION_IDLE_TIMEOUT) || 600,
   }
 
   private cachedAccessToken: { token: string; expiry: number } | null = null
@@ -464,8 +470,8 @@ export class ScfSandboxManager {
             SessionSource: 'HEADER',
             SessionName: 'X-Cloudbase-Session-Id',
             MaximumConcurrencySessionPerInstance: 1,
-            MaximumTTLInSeconds: 1800,
-            MaximumIdleTimeInSeconds: 600,
+            MaximumTTLInSeconds: this.config.sessionTTL,
+            MaximumIdleTimeInSeconds: this.config.sessionIdleTimeout,
             IdleTimeoutStrategy: 'FATAL',
           },
         },
