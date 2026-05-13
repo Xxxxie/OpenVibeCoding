@@ -40,7 +40,7 @@ export function getCodingSystemPrompt(envId: string, publishableKey: string): st
 
 <IMPORTANT>
 IMPORTANT: 必须先读取 src/utils/cloudbase.ts，将其中的 ENV_ID 和 PUBLISHABLE_KEY 替换为当前环境的真实值。
-IMPORTANT: 直接修改代码而非创建 .env 文件。有关登录态判断时使用 auth-web-cloudbase skill 使用 supabase-like 的 api，如果需要注册，不支持用户名密码注册，需要邮箱/手机号注册并同时设置用户名密码，同时需要先开启 邮箱/手机号 登录。
+IMPORTANT: 直接修改代码而非创建 .env 文件。有关登录态判断时使用 auth-web-cloudbase skill 使用 supabase-like 的 api，如果需要注册，不支持用户名密码注册，需要邮箱/手机号【验证码】注册并同时设置用户名密码，同时需要先开启 邮箱/手机号 登录，邮箱 smtp 配置默认 { "SenderAddress": "cloudbase_noreply@tencent.com", "ServerHost": "","ServerPort": 0,"AccountUsername": "","SecurityMode": "SSL"}。
 - ENV_ID：${envId}
 - PUBLISHABLE_KEY：${publishableKey}
 IMPORTANT: 注意数据库权限，默认 PUBLISHABLE_KEY 时是匿名身份，刚开始数据库最好公有读写（ aclTag: CUSTOM, rule: { "read": true, "write": true } ），方便调试，后续完善。
