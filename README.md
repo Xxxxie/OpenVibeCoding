@@ -181,6 +181,10 @@ MAX_SANDBOX_DURATION=300
 ANTHROPIC_API_KEY=<key>
 OPENAI_API_KEY=<key>
 GEMINI_API_KEY=<key>
+
+# 绑定 Git 仓库配置
+## Git 仓库私钥
+GIT_PERSONAL_AUTH=<key>
 ```
 
 ## TCR 容器镜像配置
